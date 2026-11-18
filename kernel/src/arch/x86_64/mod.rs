@@ -1,10 +1,29 @@
 //! Código dependiente de x86_64.
 
+pub mod apic;
+pub mod cpu;
+pub mod gdt;
+pub mod idt;
+pub mod paging;
 pub mod port;
 pub mod serial;
 
 use core::arch::asm;
 use port::Port;
+
+/// Inicialización temprana de la CPU: GDT/TSS e IDT. Las interrupciones
+/// siguen deshabilitadas.
+pub fn init_cpu() {
+    gdt::init();
+    idt::init();
+}
+
+/// Cede la CPU al scheduler mediante una interrupción de software.
+pub fn yield_now() {
+    // SAFETY: el vector YIELD tiene stub e entrada en la IDT; el handler
+    // guarda y restaura el contexto completo.
+    unsafe { asm!("int {v}", v = const idt::YIELD_VECTOR, options(nomem)) };
+}
 
 /// Deshabilita interrupciones y detiene la CPU para siempre.
 pub fn halt_forever() -> ! {

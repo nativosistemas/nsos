@@ -113,6 +113,16 @@ impl Cmdline {
     }
 }
 
+/// Respuesta con la dirección física y virtual donde se cargó el kernel.
+#[repr(C)]
+pub struct ExecutableAddress {
+    revision: u64,
+    /// Base física.
+    pub physical_base: u64,
+    /// Base virtual.
+    pub virtual_base: u64,
+}
+
 /// Respuesta HHDM: desplazamiento del mapeo directo de la memoria física.
 #[repr(C)]
 pub struct Hhdm {
@@ -204,6 +214,11 @@ pub static BOOTLOADER_INFO: Request<BootloaderInfo> =
 #[used]
 #[link_section = ".requests"]
 pub static CMDLINE: Request<Cmdline> = Request::new([0x4b161536e598651e, 0xb390ad4a2f1f303a]);
+
+#[used]
+#[link_section = ".requests"]
+pub static EXECUTABLE_ADDRESS: Request<ExecutableAddress> =
+    Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487]);
 
 #[used]
 #[link_section = ".requests"]

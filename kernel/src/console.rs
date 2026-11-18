@@ -1,10 +1,10 @@
 //! Consola de depuración del kernel sobre el puerto serie.
 
 use crate::arch::serial::Serial;
-use crate::sync::SpinLock;
+use crate::sync::IrqSpinLock;
 use core::fmt::{self, Write};
 
-static SERIAL: SpinLock<Serial> = SpinLock::new(Serial::com1());
+static SERIAL: IrqSpinLock<Serial> = IrqSpinLock::new(Serial::com1());
 
 /// Inicializa el UART.
 pub fn init() {

@@ -1,5 +1,6 @@
 //! Primitivas de sincronización del kernel.
 
+use crate::arch::cpu;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -71,5 +72,79 @@ impl<T> DerefMut for SpinGuard<'_, T> {
 impl<T> Drop for SpinGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+/// Spinlock que deshabilita interrupciones mientras está tomado.
+///
+/// Obligatorio para todo dato que también se toque desde un handler de
+/// interrupción (scheduler, allocadores, consola): si un hilo tuviera el lock
+/// y lo interrumpiera un handler que lo pide, el núcleo quedaría bloqueado.
+pub struct IrqSpinLock<T> {
+    inner: SpinLock<T>,
+}
+
+impl<T> IrqSpinLock<T> {
+    /// Crea el lock.
+    pub const fn new(value: T) -> Self {
+        Self {
+            inner: SpinLock::new(value),
+        }
+    }
+
+    /// Adquiere el lock con interrupciones deshabilitadas.
+    pub fn lock(&self) -> IrqSpinGuard<'_, T> {
+        let was_enabled = cpu::interrupts_enabled();
+        cpu::disable_interrupts();
+        IrqSpinGuard {
+            guard: Some(self.inner.lock()),
+            was_enabled,
+        }
+    }
+
+    /// Intenta adquirir el lock sin girar.
+    pub fn try_lock(&self) -> Option<IrqSpinGuard<'_, T>> {
+        let was_enabled = cpu::interrupts_enabled();
+        cpu::disable_interrupts();
+        match self.inner.try_lock() {
+            Some(g) => Some(IrqSpinGuard {
+                guard: Some(g),
+                was_enabled,
+            }),
+            None => {
+                if was_enabled {
+                    cpu::enable_interrupts();
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Guarda del `IrqSpinLock`: al soltarse libera el lock y restaura IF.
+pub struct IrqSpinGuard<'a, T> {
+    guard: Option<SpinGuard<'a, T>>,
+    was_enabled: bool,
+}
+
+impl<T> Deref for IrqSpinGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.guard.as_ref().unwrap()
+    }
+}
+
+impl<T> DerefMut for IrqSpinGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.guard.as_mut().unwrap()
+    }
+}
+
+impl<T> Drop for IrqSpinGuard<'_, T> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        if self.was_enabled {
+            cpu::enable_interrupts();
+        }
     }
 }
