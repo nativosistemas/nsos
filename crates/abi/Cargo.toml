@@ -1,0 +1,7 @@
+[package]
+name = "nsos-abi"
+description = "ABI estable entre el kernel de nsos y las cells: syscalls, capacidades y mensajes IPC"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

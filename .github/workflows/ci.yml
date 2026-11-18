@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain de Rust
+        run: rustup show
+      - name: Dependencias del sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 xorriso ovmf
+      - name: Lint
+        run: make lint
+      - name: Tests unitarios
+        run: make test
+      - name: Arranque en QEMU (BIOS)
+        run: make smoke
+      - name: Arranque en QEMU (UEFI)
+        run: make smoke-uefi

@@ -1,0 +1,13 @@
+[package]
+name = "nsos-kernel"
+description = "Microkernel de nsos: scheduling, memoria, IPC y capacidades"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nsos-kernel"
+test = false
+bench = false
+
+[dependencies]
+nsos-abi = { path = "../crates/abi" }
