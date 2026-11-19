@@ -2,7 +2,7 @@
 //! de capacidades, y los objetos del kernel que pueden referenciar.
 //!
 //! Orden de locks (para evitar interbloqueos):
-//! `cspace` de una cell → lock de un canal → scheduler.
+//! `cspace` de una cell → lock de un canal → registro `IN_FLIGHT` → scheduler.
 //! Nunca se suelta (drop) un mensaje con capacidades teniendo el lock de un
 //! canal tomado, porque soltar un extremo toma el lock de su canal.
 
@@ -11,11 +11,12 @@ use crate::kprintln;
 use crate::mm::{self, phys_to_virt, pmm, PhysAddr};
 use crate::sched::{self, ThreadId};
 use crate::sync::IrqSpinLock;
+use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use nsos_abi::msg::{MsgHeader, MAX_DATA};
 use nsos_abi::{Error, ObjectType, Rights};
 use nsos_kcore::cspace::{CSpace, Cap};
@@ -60,10 +61,131 @@ pub type KCap = Cap<KObject>;
 // ---------------------------------------------------------------- canales
 
 /// Mensaje encolado: las capacidades ya no pertenecen a ninguna cell.
+///
+/// Crear uno con [`QueuedMsg::new`] marca sus extremos como "en vuelo" para
+/// el recolector; sacarle las capacidades con [`QueuedMsg::take_caps`] o
+/// soltarlo los desmarca.
 pub struct QueuedMsg {
     pub header: MsgHeader,
     pub data: [u8; MAX_DATA],
-    pub caps: Vec<KCap>,
+    caps: Vec<KCap>,
+}
+
+impl QueuedMsg {
+    /// Arma un mensaje con capacidades que acaban de salir de una CSpace.
+    pub fn new(header: MsgHeader, data: [u8; MAX_DATA], caps: Vec<KCap>) -> QueuedMsg {
+        mark_in_flight(&caps);
+        QueuedMsg { header, data, caps }
+    }
+
+    /// Saca las capacidades (para entregarlas a una CSpace).
+    pub fn take_caps(&mut self) -> Vec<KCap> {
+        let caps = core::mem::take(&mut self.caps);
+        unmark_in_flight(&caps);
+        caps
+    }
+
+    /// Devuelve capacidades que no se pudieron entregar.
+    pub fn put_caps(&mut self, caps: Vec<KCap>) {
+        mark_in_flight(&caps);
+        self.caps = caps;
+    }
+}
+
+impl Drop for QueuedMsg {
+    fn drop(&mut self) {
+        unmark_in_flight(&self.caps);
+    }
+}
+
+// ------------------------------------------------- recolector de ciclos
+
+/// Extremos que viajan (o viajaron) en algún mensaje. Puede tener entradas
+/// muertas o repetidas: el recolector las limpia.
+static IN_FLIGHT: IrqSpinLock<Vec<Weak<Endpoint>>> = IrqSpinLock::new(Vec::new());
+
+fn mark_in_flight(caps: &[KCap]) {
+    for c in caps {
+        let KObject::Channel(e) = &c.object;
+        if e.in_flight.fetch_add(1, Ordering::Relaxed) == 0 {
+            IN_FLIGHT.lock().push(Arc::downgrade(e));
+        }
+    }
+}
+
+fn unmark_in_flight(caps: &[KCap]) {
+    for c in caps {
+        let KObject::Channel(e) = &c.object;
+        e.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Libera los extremos en vuelo que ninguna cell puede volver a alcanzar
+/// (ciclos de extremos que viajan en colas). El algoritmo está en
+/// [`nsos_kcore::ipc_gc`]; la especificación, en `Sys.gc` del modelo en Lean.
+///
+/// Corre con las interrupciones deshabilitadas (un solo núcleo), así que los
+/// contadores de referencias no cambian mientras arma el grafo. Las
+/// referencias temporales de otros hilos cuentan como externas: el recolector
+/// es conservador y nunca libera algo vivo.
+pub fn ipc_gc() -> usize {
+    let (nodes, garbage_queues) = crate::arch::cpu::without_interrupts(|| {
+        // Nodos: extremos vivos con algo en vuelo, sin repetir. El registro
+        // se suelta antes de tomar locks de canales (orden: canal → registro).
+        let mut index = BTreeMap::new();
+        let mut nodes: Vec<Arc<Endpoint>> = Vec::new();
+        IN_FLIGHT.lock().retain(|w| match w.upgrade() {
+            Some(e) if e.in_flight.load(Ordering::Relaxed) > 0 => {
+                let key = Arc::as_ptr(&e) as usize;
+                if index.contains_key(&key) {
+                    return false;
+                }
+                index.insert(key, nodes.len());
+                nodes.push(e);
+                true
+            }
+            _ => false,
+        });
+        if nodes.is_empty() {
+            return (nodes, Vec::new());
+        }
+        let graph: Vec<nsos_kcore::ipc_gc::Node> = nodes
+            .iter()
+            .map(|e| {
+                let in_flight = e.in_flight.load(Ordering::Relaxed);
+                let sides = e.pair.sides.lock();
+                let contents = sides[e.side]
+                    .queue
+                    .iter()
+                    .flat_map(|m| m.caps.iter())
+                    .filter_map(|c| {
+                        let KObject::Channel(x) = &c.object;
+                        index.get(&(Arc::as_ptr(x) as usize)).copied()
+                    })
+                    .collect();
+                nsos_kcore::ipc_gc::Node {
+                    // Una referencia es la nuestra (`nodes`).
+                    candidate: Arc::strong_count(e) - 1 == in_flight,
+                    in_flight,
+                    contents,
+                }
+            })
+            .collect();
+        let garbage = nsos_kcore::ipc_gc::garbage(&graph);
+        let queues: Vec<VecDeque<QueuedMsg>> = nodes
+            .iter()
+            .zip(&garbage)
+            .filter(|(_, g)| **g)
+            .map(|(e, _)| core::mem::take(&mut e.pair.sides.lock()[e.side].queue))
+            .collect();
+        (nodes, queues)
+    });
+    let freed = garbage_queues.len();
+    // Soltar fuera de los locks: al caer las últimas referencias corre
+    // `Drop for Endpoint`, que cierra el canal y despierta a los peers.
+    drop(garbage_queues);
+    drop(nodes);
+    freed
 }
 
 #[derive(Default)]
@@ -87,6 +209,8 @@ pub struct ChannelPair {
 pub struct Endpoint {
     pair: Arc<ChannelPair>,
     side: usize,
+    /// Cuántas capacidades a este extremo viajan en mensajes encolados.
+    in_flight: AtomicUsize,
 }
 
 /// Derechos iniciales de un extremo recién creado.
@@ -103,8 +227,13 @@ pub fn channel_create() -> (Arc<Endpoint>, Arc<Endpoint>) {
         Arc::new(Endpoint {
             pair: pair.clone(),
             side: 0,
+            in_flight: AtomicUsize::new(0),
         }),
-        Arc::new(Endpoint { pair, side: 1 }),
+        Arc::new(Endpoint {
+            pair,
+            side: 1,
+            in_flight: AtomicUsize::new(0),
+        }),
     )
 }
 
@@ -340,6 +469,7 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
 
     let caps = cell.cspace.lock().clear();
     drop(caps); // fuera del lock del CSpace
+    ipc_gc(); // lo que solo esta cell alcanzaba ya es basura
 
     // Dejar de usar el espacio de la cell antes de liberarlo.
     // SAFETY: el espacio del kernel mapea todo lo que el kernel usa.

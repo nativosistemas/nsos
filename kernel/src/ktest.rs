@@ -25,6 +25,9 @@ const TESTS: &[Test] = &[
     ("scheduler: apropiación entre 3 hilos", preemption),
     ("scheduler: yield alterna hilos", yield_alternates),
     ("scheduler: 50 hilos terminan y se liberan", many_threads),
+    ("ipc: extremo en su propia cola se libera", ipc_self_loop),
+    ("ipc: ciclo de dos canales se libera", ipc_two_cycle),
+    ("ipc: extremo alcanzable no se libera", ipc_reachable_kept),
 ];
 
 /// Ejecuta todos los tests. Devuelve `true` si pasaron todos.
@@ -267,6 +270,73 @@ fn many_threads() -> Result<(), &'static str> {
         used1 <= used0 + 4096,
         "las pilas de los hilos muertos no se liberaron",
     )
+}
+
+// ------------------------------------------------- recolector de IPC
+
+/// Encola en `via` (hacia su peer) un mensaje que lleva `cargo`.
+fn ipc_send(
+    via: &Arc<crate::cell::Endpoint>,
+    cargo: &Arc<crate::cell::Endpoint>,
+) -> Result<(), &'static str> {
+    use crate::cell::{KObject, QueuedMsg, ENDPOINT_RIGHTS};
+    use nsos_kcore::cspace::Cap;
+    let cap = Cap {
+        object: KObject::Channel(cargo.clone()),
+        rights: ENDPOINT_RIGHTS,
+    };
+    via.send_with(false, || {
+        Ok(QueuedMsg::new(
+            Default::default(),
+            [0; nsos_abi::msg::MAX_DATA],
+            alloc::vec![cap],
+        ))
+    })
+    .map_err(|_| "no se pudo encolar")
+}
+
+fn ipc_self_loop() -> Result<(), &'static str> {
+    let (a, b) = crate::cell::channel_create();
+    ipc_send(&a, &b)?; // b viaja en la cola de b
+    let (wa, wb) = (Arc::downgrade(&a), Arc::downgrade(&b));
+    drop((a, b));
+    check(wa.upgrade().is_none(), "el lado 0 sigue vivo")?;
+    check(wb.upgrade().is_some(), "el ciclo no se formó")?;
+    crate::cell::ipc_gc();
+    check(
+        wb.upgrade().is_none(),
+        "el extremo en su propia cola no se liberó",
+    )
+}
+
+fn ipc_two_cycle() -> Result<(), &'static str> {
+    let (a0, a1) = crate::cell::channel_create();
+    let (b0, b1) = crate::cell::channel_create();
+    ipc_send(&a0, &b1)?; // b1 viaja hacia a1
+    ipc_send(&b0, &a1)?; // a1 viaja hacia b1
+    let (wa, wb) = (Arc::downgrade(&a1), Arc::downgrade(&b1));
+    drop((a0, a1, b0, b1));
+    check(
+        wa.upgrade().is_some() && wb.upgrade().is_some(),
+        "el ciclo no se formó",
+    )?;
+    crate::cell::ipc_gc();
+    check(
+        wa.upgrade().is_none() && wb.upgrade().is_none(),
+        "el ciclo no se liberó",
+    )
+}
+
+fn ipc_reachable_kept() -> Result<(), &'static str> {
+    let (a0, a1) = crate::cell::channel_create();
+    let (b0, b1) = crate::cell::channel_create();
+    ipc_send(&a0, &b1)?; // b1 viaja hacia a1, que seguimos teniendo
+    let wb = Arc::downgrade(&b1);
+    drop((a0, b0, b1));
+    crate::cell::ipc_gc();
+    check(wb.upgrade().is_some(), "se liberó un extremo alcanzable")?;
+    drop(a1); // ahora sí: su cola se descarta y b1 muere
+    check(wb.upgrade().is_none(), "b1 no se liberó al cerrar a1")
 }
 
 /// Test de integración: tres cells en anillo 3. `ping` y `pong` hablan por

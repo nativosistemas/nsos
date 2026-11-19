@@ -4,7 +4,7 @@
 //! contada a un objeto del kernel), para poder probarla en el host.
 
 use alloc::vec::Vec;
-use nsos_abi::cap::{CapHandle, MAX_SLOTS};
+use nsos_abi::cap::{CapHandle, GEN_LIMIT, MAX_SLOTS};
 use nsos_abi::{Error, Rights};
 
 /// Una capacidad: objeto + derechos.
@@ -17,8 +17,17 @@ pub struct Cap<T> {
 }
 
 struct Slot<T> {
+    /// Generación actual. Llega a `GEN_LIMIT` cuando el slot se retira; como
+    /// ningún handle tiene esa generación, ya no puede nombrar nada.
     generation: u32,
     cap: Option<Cap<T>>,
+}
+
+/// Avanza la generación de un slot recién vaciado. Devuelve `true` si el
+/// slot se puede reusar, o `false` si agotó sus generaciones y queda retirado.
+fn retire<T>(s: &mut Slot<T>) -> bool {
+    s.generation += 1;
+    s.generation < GEN_LIMIT
 }
 
 /// Tabla de capacidades.
@@ -27,20 +36,30 @@ pub struct CSpace<T> {
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
     limit: u32,
+    /// Máximo de slots (vivos, libres o retirados). Acota la memoria que una
+    /// cell puede consumir reciclando handles.
+    slot_limit: u32,
     live: usize,
 }
 
 impl<T> CSpace<T> {
     /// Crea un CSpace con como mucho `limit` capacidades vivas.
+    ///
+    /// Puede tener hasta `4 * limit + 1` slots. Cada slot da `GEN_LIMIT`
+    /// handles distintos antes de retirarse, así que una cell puede emitir
+    /// unos `16 * limit * 1024` handles en toda su vida (16 millones con el
+    /// límite del kernel). Después, `insert` devuelve `NoMemory`.
     pub fn new(limit: u32) -> Self {
         let slots = alloc::vec![Slot {
             generation: 0,
             cap: None,
         }];
+        let limit = limit.min(MAX_SLOTS - 1);
         Self {
             slots,
             free: Vec::new(),
-            limit: limit.min(MAX_SLOTS - 1),
+            limit,
+            slot_limit: (limit.saturating_mul(4) + 1).min(MAX_SLOTS),
             live: 0,
         }
     }
@@ -63,6 +82,9 @@ impl<T> CSpace<T> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
+                if self.slots.len() as u32 >= self.slot_limit {
+                    return Err(Error::NoMemory);
+                }
                 self.slots.push(Slot {
                     generation: 0,
                     cap: None,
@@ -104,8 +126,9 @@ impl<T> CSpace<T> {
         self.slot(h)?;
         let s = &mut self.slots[h.slot() as usize];
         let cap = s.cap.take().unwrap();
-        s.generation = CapHandle::next_generation(s.generation);
-        self.free.push(h.slot());
+        if retire(s) {
+            self.free.push(h.slot());
+        }
         self.live -= 1;
         Ok(cap)
     }
@@ -127,7 +150,10 @@ impl<T> CSpace<T> {
         &mut self,
         caps: Vec<Cap<T>>,
     ) -> Result<Vec<CapHandle>, (Error, Vec<Cap<T>>)> {
-        if self.live as u32 + caps.len() as u32 > self.limit {
+        let fresh = caps.len().saturating_sub(self.free.len());
+        if self.live as u32 + caps.len() as u32 > self.limit
+            || self.slots.len() + fresh > self.slot_limit as usize
+        {
             return Err((Error::NoMemory, caps));
         }
         Ok(caps.into_iter().map(|c| self.insert(c).unwrap()).collect())
@@ -138,8 +164,9 @@ impl<T> CSpace<T> {
         let mut out = Vec::new();
         for (i, s) in self.slots.iter_mut().enumerate() {
             if let Some(c) = s.cap.take() {
-                s.generation = CapHandle::next_generation(s.generation);
-                self.free.push(i as u32);
+                if retire(s) {
+                    self.free.push(i as u32);
+                }
                 out.push(c);
             }
         }
@@ -254,6 +281,36 @@ mod tests {
         assert_eq!(e, Error::NoMemory);
         assert_eq!(back.len(), 3);
         assert_eq!(cs.len(), 1);
+    }
+
+    #[test]
+    fn stale_handle_never_revives() {
+        let mut cs = CSpace::new(4);
+        let old = cs.insert(cap(1, Rights::SEND)).unwrap();
+        cs.remove(old).unwrap();
+        for _ in 0..GEN_LIMIT + 10 {
+            let h = cs.insert(cap(2, Rights::SEND)).unwrap();
+            assert_ne!(h, old);
+            cs.remove(h).unwrap();
+        }
+        let h = cs.insert(cap(3, Rights::SEND)).unwrap();
+        assert_ne!(h.slot(), old.slot()); // el slot 1 quedó retirado
+        assert_eq!(cs.get(old), Err(Error::BadHandle));
+    }
+
+    #[test]
+    fn handle_space_is_bounded() {
+        // limit 1 → 5 slots (el 0 no se usa): 4 slots de 4096 generaciones.
+        let mut cs = CSpace::new(1);
+        for _ in 0..4 * GEN_LIMIT {
+            let h = cs.insert(cap(1, Rights::NONE)).unwrap();
+            cs.remove(h).unwrap();
+        }
+        assert_eq!(cs.insert(cap(1, Rights::NONE)), Err(Error::NoMemory));
+        let (e, back) = cs
+            .insert_all(alloc::vec![cap(1, Rights::NONE)])
+            .unwrap_err();
+        assert_eq!((e, back.len()), (Error::NoMemory, 1));
     }
 
     #[test]

@@ -54,6 +54,10 @@ Cada cell tiene un **CSpace**: una tabla de slots, cada uno con
 * Al liberar un slot su generación aumenta. Un handle con generación vieja
   devuelve `BadHandle` en vez de tocar el objeto nuevo que ocupe el slot
   (evita el "use-after-free" de capacidades).
+* La generación nunca da la vuelta: un slot que usó sus 4096 generaciones se
+  retira. Una CSpace tiene como mucho `4 * límite + 1` slots, así que una cell
+  puede emitir unos 16 millones de handles en su vida; después, `NoMemory`.
+  Demostrado en `CSpace.stale_handle_never_revives` (verification/lean).
 * Los handles son locales: el número no significa nada fuera de su cell.
 
 ### 3.1 Derechos
@@ -152,6 +156,12 @@ entra desde una cell:
 * **call** = send + recv de la respuesta en el mismo canal. Permite al
   scheduler hacer *handoff* directo al servidor (camino rápido de RPC).
 * Orden FIFO por canal. Sin garantías de orden entre canales distintos.
+* **Ciclos.** Un extremo puede viajar en la cola de otro, incluso en la suya.
+  Si un grupo de extremos queda referenciado solo desde colas que nadie puede
+  leer, el kernel lo detecta (recolector de extremos en vuelo, como el de
+  sockets Unix en Linux) y lo cierra: sus colas se descartan y los peers ven
+  `PeerClosed`. Corre tras `send` con capacidades, `cap_drop` y al morir una
+  cell. Demostrado en `Sys.step_no_leak` (verification/lean).
 
 ### 5.3 Zero-copy seguro
 

@@ -14,6 +14,7 @@ extern crate alloc;
 pub mod cspace;
 pub mod elf;
 pub mod frame_bitmap;
+pub mod ipc_gc;
 
 pub use cspace::CSpace;
 pub use frame_bitmap::FrameBitmap;
