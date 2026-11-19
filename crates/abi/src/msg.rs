@@ -162,9 +162,9 @@ impl Message {
         m.header.cap_count = b[10];
         m.header.flags = b[11];
         m.header.reserved = u32::from_le_bytes(b[12..16].try_into().unwrap());
-        for i in 0..MAX_CAPS {
+        for (i, cap) in m.caps.iter_mut().enumerate() {
             let o = HEADER_SIZE + i * 4;
-            m.caps[i] = CapHandle(u32::from_le_bytes(b[o..o + 4].try_into().unwrap()));
+            *cap = CapHandle(u32::from_le_bytes(b[o..o + 4].try_into().unwrap()));
         }
         m.data.copy_from_slice(&b[HEADER_SIZE + MAX_CAPS * 4..]);
         m.validate()?;
