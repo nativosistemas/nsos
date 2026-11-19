@@ -129,14 +129,13 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   test exige que el contador avance de a uno, sin saltos ni repeticiones,
   con al menos 5 respuestas de cada versión.
 * Limitaciones:
-  * El rollback cubre el rechazo explícito. Si la versión nueva *falla*
-    (excepción) con las capacidades, el extremo del cliente se cierra y el
-    cliente ve `PEER_CLOSED`. Cubrirlo exige que el kernel devuelva las
-    capacidades de una cell muerta a su supervisor, o un extremo de respaldo.
-  * Mover una capacidad `Memory` no desmapea a quien la tenía: la v1 sigue
-    viendo `mem` después de entregarlo (lo usa para el rollback). Una versión
-    vieja maliciosa podría escribir el estado de la nueva. Falta `mem_unmap`
-    y decidir si mover una capacidad `Memory` revoca los mapeos.
+  * El rollback cubre el rechazo explícito y, desde que el supervisor
+    guarda un respaldo (estado escribible y copia del extremo), también la
+    caída de la versión nueva antes de decidir. Una caída después de
+    aceptar sigue cerrando el extremo del cliente.
+  * Mover una capacidad `Memory` ya revoca los mapeos de quien la tenía
+    (`Mem.step_iso`); la v1 vuelve a mapear el estado al retomar. Falta
+    `mem_unmap`.
   * La v1 sondea dos canales porque todavía no hay `wait` multi-handle.
 
 ## Hito 8 (hecho)

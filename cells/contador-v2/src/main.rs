@@ -6,10 +6,11 @@
 //! 2. el extremo de canal del cliente (con los pedidos que hayan quedado
 //!    encolados).
 //!
-//! Valida el estado *sin escribirlo*, responde `UPGRADE_ACCEPT` y recién
-//! entonces lo migra (`CNT1` → `CNT2`, que además cuenta los pedidos que
-//! atendió esta versión) y sigue atendiendo al mismo cliente. Termina con 0
-//! cuando el cliente cierra el canal.
+//! Valida el estado *sin escribirlo* (el supervisor puede darle `mem` de
+//! solo lectura), responde `UPGRADE_ACCEPT` y recién entonces lo migra a un
+//! objeto `Memory` propio (`CNT1` → `CNT2`, que además cuenta los pedidos
+//! que atendió esta versión) y sigue atendiendo al mismo cliente. Termina
+//! con 0 cuando el cliente cierra el canal.
 
 #![no_std]
 #![no_main]
@@ -17,12 +18,14 @@
 
 use nsos_rt::abi::msg::labels::{UPGRADE_ACCEPT, UPGRADE_RESTORE};
 use nsos_rt::abi::{Message, Rights};
-use nsos_rt::{bootstrap, channel_recv, channel_send, mem_map, println};
+use nsos_rt::{bootstrap, cap_drop, channel_recv, channel_send, mem_create, mem_map, println};
 
 const INC: u64 = 1;
 const COUNT: u64 = 2;
 const VERSION: u32 = 2;
 const STATE_VADDR: u64 = 0x3000_0000;
+/// Dónde mapea el estado propio (formato `CNT2`).
+const OWN_VADDR: u64 = 0x3100_0000;
 const MAGIC_V1: u32 = u32::from_le_bytes(*b"CNT1");
 const MAGIC_V2: u32 = u32::from_le_bytes(*b"CNT2");
 
@@ -39,13 +42,13 @@ fn main() -> i32 {
         println!("contador-v2: UPGRADE_RESTORE sin estado y canal");
         return 2;
     };
-    let Ok(state) = mem_map(mem, STATE_VADDR, Rights::READ | Rights::WRITE) else {
+    let Ok(old) = mem_map(mem, STATE_VADDR, Rights::READ) else {
         return 3;
     };
     // Migración del formato del estado.
-    let (mut count, mut served) = match state.read_u32(0) {
-        MAGIC_V1 => (state.read_u64(8), 0u64),
-        MAGIC_V2 => (state.read_u64(8), state.read_u64(16)),
+    let (mut count, mut served) = match old.read_u32(0) {
+        MAGIC_V1 => (old.read_u64(8), 0u64),
+        MAGIC_V2 => (old.read_u64(8), old.read_u64(16)),
         other => {
             println!("contador-v2: estado desconocido {:#x}", other);
             return 4;
@@ -54,7 +57,18 @@ fn main() -> i32 {
     if channel_send(ctrl, &Message::new(UPGRADE_ACCEPT, b"").unwrap(), 0).is_err() {
         return 6;
     }
+    // Ya aceptó: el estado nuevo va en un objeto propio, y suelta el viejo
+    // (el kernel le quita también el mapeo).
+    let Ok(own) = mem_create(4096) else {
+        return 7;
+    };
+    let Ok(state) = mem_map(own, OWN_VADDR, Rights::READ | Rights::WRITE) else {
+        return 8;
+    };
+    let _ = cap_drop(mem);
     state.write_u32(0, MAGIC_V2);
+    state.write_u64(8, count);
+    state.write_u64(16, served);
     println!("contador-v2: estado restaurado (contador = {})", count);
     loop {
         match channel_recv(client, &mut m, 0) {

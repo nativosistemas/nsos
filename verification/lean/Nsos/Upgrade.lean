@@ -13,13 +13,19 @@ Secuencia:
 1. `sup → old`: `UPGRADE_PREPARE`.
 2. `old`: deja de atender, escribe su contador en `mem` y manda
    `UPGRADE_STATE [mem, ep]` a `sup`. **No termina**: espera la decisión.
-3. `sup → new`: `UPGRADE_RESTORE [mem, ep]`.
-4. `new` valida el estado *sin escribirlo* y decide:
+3. `sup → new`: `UPGRADE_RESTORE [mem', ep]`, donde `mem'` es una copia
+   **de solo lectura** de la capacidad a `mem`. `sup` se queda con la
+   capacidad escribible a `mem` y con una copia de `ep` (respaldo).
+4. `new` valida el estado (el kernel no la deja escribirlo) y decide:
    * acepta: se queda con los recursos, responde `UPGRADE_ACCEPT` y atiende;
      `sup` manda `UPGRADE_COMMIT` a `old`, que termina;
    * rechaza: devuelve `UPGRADE_REJECT [mem, ep]`; `sup` los reenvía con
      `UPGRADE_ROLLBACK` a `old`, que relee su contador de `mem` y vuelve a
      atender. Después se puede intentar otra actualización.
+   * se cae (excepción) antes de decidir: su canal de control se cierra y
+     `sup` hace el mismo rollback con su respaldo (`mem` y la copia de `ep`).
+     El cliente no ve `PEER_CLOSED` y el estado vuelve intacto, porque `new`
+     nunca tuvo una capacidad para escribirlo.
 
 Abstracciones:
 * Las capacidades se *mueven* (lo garantiza el modelo del kernel:
@@ -29,9 +35,12 @@ Abstracciones:
   actúa sin tener los recursos y que el estado viaja correctamente.
 * Un pedido del cliente y su respuesta son un solo paso del servidor que
   tiene `ep`. `log` es la secuencia de respuestas que vio el cliente.
-* Si `new` *falla* (excepción) con los recursos, el extremo se cierra y el
-  cliente ve `PEER_CLOSED`: el rollback cubre el rechazo explícito, no la
-  caída. Ver la discusión en `docs/hoja-de-ruta.md`.
+* `loc .mem` es la capacidad *escribible* a `mem`. Que escribir exige esa
+  capacidad lo garantiza el kernel (`Mem.write_needs_cap` en
+  `Nsos/Memory.lean`); aquí, el paso `scribble` (cualquier escritura de `new`,
+  correcta o no) solo es posible si `new` la tiene.
+* Una caída de `new` *después* de aceptar no tiene rollback: `old` ya
+  terminó. La cubre el supervisor reiniciando la versión nueva (hito 6).
 -/
 
 namespace Nsos.Upgrade
@@ -61,7 +70,8 @@ inductive Phase where
   | preparing
   /-- `UPGRADE_STATE [mem, ep]` viaja hacia `sup`. -/
   | handedOver
-  /-- `UPGRADE_RESTORE [mem, ep]` viaja hacia `new`. -/
+  /-- `UPGRADE_RESTORE [mem', ep]` viaja hacia `new` (o `new` ya lo
+  recibió y está validando); `sup` tiene `mem` y el respaldo de `ep`. -/
   | restoring
   /-- `new` aceptó y atiende; `UPGRADE_ACCEPT` viaja hacia `sup`. -/
   | accepted
@@ -100,6 +110,12 @@ def newServes : Phase → Bool
 /-- Mueve todos los recursos a `l`. -/
 def all (l : Loc) : Res → Loc := fun _ => l
 
+/-- Durante `restoring`: `mem` (escribible) queda en `sup`; el extremo va a
+`new`. -/
+def restoreLoc : Res → Loc
+  | .mem => .at .sup
+  | .ep => .to .new
+
 /-- Pasos del sistema. Cada uno exige lo que el código correspondiente
 necesita tener en la mano (por ejemplo, `ep` para atender). -/
 inductive Step : St → St → Prop where
@@ -119,18 +135,30 @@ inductive Step : St → St → Prop where
   | handOver (s : St) :
       s.phase = .preparing → s.loc .mem = .at .old → s.loc .ep = .at .old →
       Step s { s with phase := .handedOver, mem := s.oldCount, loc := all (.to .sup) }
-  /-- `sup` reenvía todo a `new` con `UPGRADE_RESTORE`. -/
+  /-- `sup` reenvía a `new` el extremo y una copia de solo lectura de
+  `mem`, y se queda con `mem`. -/
   | forward (s : St) :
       s.phase = .handedOver → (∀ r, s.loc r = .at .sup ∨ s.loc r = .to .sup) →
-      Step s { s with phase := .restoring, loc := all (.to .new) }
-  /-- `new` acepta: toma los recursos y lee el contador de `mem`. -/
+      Step s { s with phase := .restoring, loc := restoreLoc }
+  /-- `new` acepta: lee el contador y se queda con el servicio (`sup` suelta
+  su respaldo). -/
   | accept (s : St) :
-      s.phase = .restoring → (∀ r, s.loc r = .to .new) →
+      s.phase = .restoring → s.loc .ep = .to .new → s.loc .mem = .at .sup →
       Step s { s with phase := .accepted, loc := all (.at .new), newCount := s.mem }
-  /-- `new` rechaza: devuelve los recursos sin haber escrito `mem`. -/
+  /-- `new` rechaza: devuelve lo que recibió. -/
   | reject (s : St) :
-      s.phase = .restoring → (∀ r, s.loc r = .to .new) →
+      s.phase = .restoring → s.loc .ep = .to .new →
       Step s { s with phase := .rejected, loc := all (.to .sup) }
+  /-- `new` se cae antes de decidir. El kernel cierra lo que tenía; `sup` lo
+  nota (su canal de control con `new` se cierra) y devuelve a `old` `mem` y
+  el respaldo de `ep`. -/
+  | crash (s : St) :
+      s.phase = .restoring →
+      Step s { s with phase := .rollingBack, loc := all (.to .old) }
+  /-- `new` escribe cualquier cosa en `mem`: solo si tiene la capacidad
+  escribible. -/
+  | scribble (s : St) (v : Nat) :
+      s.loc .mem = .at .new → Step s { s with mem := v }
   /-- `sup` recibe `UPGRADE_ACCEPT` y envía `UPGRADE_COMMIT`. -/
   | commit (s : St) :
       s.phase = .accepted → Step s { s with phase := .committing }
@@ -164,7 +192,7 @@ def PhaseInv (s : St) : Prop :=
   match s.phase with
   | .idle | .preparing => s.loc = all (.at .old) ∧ s.oldCount = s.log.length
   | .handedOver => s.loc = all (.to .sup) ∧ s.mem = s.log.length
-  | .restoring => s.loc = all (.to .new) ∧ s.mem = s.log.length
+  | .restoring => s.loc = restoreLoc ∧ s.mem = s.log.length
   | .rejected => s.loc = all (.to .sup) ∧ s.mem = s.log.length
   | .rollingBack => s.loc = all (.to .old) ∧ s.mem = s.log.length
   | .accepted | .committing | .done => s.loc = all (.at .new) ∧ s.newCount = s.log.length
@@ -207,12 +235,19 @@ theorem inv_step {s t : St} (hs : Inv s) (st : Step s t) : Inv t := by
   | forward h _ =>
     refine ⟨hc, ?_⟩
     unfold PhaseInv at *; simp_all
-  | accept h _ =>
+  | accept h _ _ =>
     refine ⟨hc, ?_⟩
     unfold PhaseInv at *; simp_all
   | reject h _ =>
     refine ⟨hc, ?_⟩
     unfold PhaseInv at *; simp_all
+  | crash h =>
+    refine ⟨hc, ?_⟩
+    unfold PhaseInv at *; simp_all
+  | scribble v hm =>
+    refine ⟨hc, ?_⟩
+    unfold PhaseInv at *
+    split at hp <;> simp_all [all, restoreLoc]
   | commit h =>
     refine ⟨hc, ?_⟩
     unfold PhaseInv at *; simp_all
@@ -267,6 +302,49 @@ theorem accept_continues {s t : St} (h : Reachable s) (st : Step s t)
   simp [ht] at hp
   exact hp.2
 
+/-- **La versión nueva no puede tocar el estado antes de aceptar**: mientras
+valida, la capacidad escribible a `mem` la tiene `sup`. -/
+theorem restoring_mem_at_sup {s : St} (h : Reachable s) (hph : s.phase = .restoring) :
+    s.loc .mem = .at .sup ∧ s.mem = s.log.length := by
+  have hp := (reachable_inv h).2
+  unfold PhaseInv at hp
+  simp [hph] at hp
+  exact ⟨by rw [hp.1]; rfl, hp.2⟩
+
+/-- **Caída de la versión nueva**: si se cae antes de decidir, `sup` devuelve
+todo a `old` y el estado que `old` relee es exactamente la cantidad de
+respuestas que vio el cliente, sin importar qué haya intentado hacer `new`.
+Al retomar, la cuenta sigue (`rollback_resumes`). -/
+theorem crash_rolls_back {s t : St} (h : Reachable s) (st : Step s t)
+    (hph : s.phase = .restoring) (ht : t.phase = .rollingBack) :
+    t.mem = t.log.length ∧ ∀ r, t.loc r = .to .old := by
+  have hp := (reachable_inv (Reachable.step h st)).2
+  unfold PhaseInv at hp
+  simp [ht] at hp
+  have _ := hph
+  exact ⟨hp.2, fun r => by rw [hp.1]; rfl⟩
+
+/-- Una caída en plena validación, rollback, y la v1 sigue: el cliente ve
+1, 2 sin saltos. -/
+example : ∃ s, Reachable s ∧ s.phase = .idle ∧ s.log = [1, 2] := by
+  let s0 := init
+  have r0 : Reachable s0 := .init
+  let s1 : St := { s0 with oldCount := 1, log := [1] }
+  have r1 : Reachable s1 := .step r0 (.serveOld s0 rfl rfl)
+  let s2 : St := { s1 with phase := .preparing }
+  have r2 : Reachable s2 := .step r1 (.prepare s1 rfl)
+  let s3 : St := { s2 with phase := .handedOver, mem := 1, loc := all (.to .sup) }
+  have r3 : Reachable s3 := .step r2 (.handOver s2 rfl rfl rfl)
+  let s4 : St := { s3 with phase := .restoring, loc := restoreLoc }
+  have r4 : Reachable s4 := .step r3 (.forward s3 rfl (fun _ => Or.inr rfl))
+  let s5 : St := { s4 with phase := .rollingBack, loc := all (.to .old) }
+  have r5 : Reachable s5 := .step r4 (.crash s4 rfl)
+  let s6 : St := { s5 with phase := .idle, loc := all (.at .old), oldCount := 1 }
+  have r6 : Reachable s6 := .step r5 (.resume s5 rfl (fun _ => rfl))
+  let s7 : St := { s6 with oldCount := 2, log := [1, 2] }
+  have r7 : Reachable s7 := .step r6 (.serveOld s6 rfl rfl)
+  exact ⟨s7, r7, rfl, rfl⟩
+
 /-- Una ejecución concreta: un rechazo, rollback, y después una actualización
 aceptada; el cliente ve 1..4 sin saltos. -/
 example : ∃ s, Reachable s ∧ s.phase = .done ∧ s.log = [1, 2, 3, 4] := by
@@ -278,10 +356,10 @@ example : ∃ s, Reachable s ∧ s.phase = .done ∧ s.log = [1, 2, 3, 4] := by
   have r2 : Reachable s2 := .step r1 (.prepare s1 rfl)
   let s3 : St := { s2 with phase := .handedOver, mem := 1, loc := all (.to .sup) }
   have r3 : Reachable s3 := .step r2 (.handOver s2 rfl rfl rfl)
-  let s4 : St := { s3 with phase := .restoring, loc := all (.to .new) }
+  let s4 : St := { s3 with phase := .restoring, loc := restoreLoc }
   have r4 : Reachable s4 := .step r3 (.forward s3 rfl (fun _ => Or.inr rfl))
   let s5 : St := { s4 with phase := .rejected, loc := all (.to .sup) }
-  have r5 : Reachable s5 := .step r4 (.reject s4 rfl (fun _ => rfl))
+  have r5 : Reachable s5 := .step r4 (.reject s4 rfl rfl)
   let s6 : St := { s5 with phase := .rollingBack, loc := all (.to .old) }
   have r6 : Reachable s6 := .step r5 (.rollback s5 rfl (fun _ => rfl))
   let s7 : St := { s6 with phase := .idle, loc := all (.at .old), oldCount := 1 }
@@ -292,10 +370,10 @@ example : ∃ s, Reachable s ∧ s.phase = .done ∧ s.log = [1, 2, 3, 4] := by
   have r9 : Reachable s9 := .step r8 (.prepare s8 rfl)
   let s10 : St := { s9 with phase := .handedOver, mem := 2, loc := all (.to .sup) }
   have r10 : Reachable s10 := .step r9 (.handOver s9 rfl rfl rfl)
-  let s11 : St := { s10 with phase := .restoring, loc := all (.to .new) }
+  let s11 : St := { s10 with phase := .restoring, loc := restoreLoc }
   have r11 : Reachable s11 := .step r10 (.forward s10 rfl (fun _ => Or.inr rfl))
   let s12 : St := { s11 with phase := .accepted, loc := all (.at .new), newCount := 2 }
-  have r12 : Reachable s12 := .step r11 (.accept s11 rfl (fun _ => rfl))
+  have r12 : Reachable s12 := .step r11 (.accept s11 rfl rfl rfl)
   let s13 : St := { s12 with newCount := 3, mem := 3, log := [1, 2, 3] }
   have r13 : Reachable s13 := .step r12 (.serveNew s12 rfl rfl)
   let s14 : St := { s13 with phase := .committing }

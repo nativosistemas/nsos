@@ -69,9 +69,11 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    escribir un salto de línea y luego texto que parezca venir de otra.
    *Mitigación futura*: prefijar cada línea o pasar la consola a una cell
    con canal propio.
-6. **Caída de la versión nueva durante una actualización.** El rollback
-   cubre el rechazo explícito; si la nueva falla con las capacidades, los
-   clientes ven `PEER_CLOSED`.
+6. **Caída de la versión nueva durante una actualización.** *Resuelto*
+   antes de que decida: el supervisor le da el estado de solo lectura y
+   guarda una copia de los extremos, así que si se cae hace rollback y los
+   clientes no notan nada (`Upgrade.crash_rolls_back`). Si se cae después
+   de aceptar, los clientes ven `PEER_CLOSED` y corresponde reiniciarla.
 7. **El enlace entre máquinas no está autenticado ni cifrado.** Quien
    controle el cable (o la otra máquina) lee el estado migrado y puede
    inventar respuestas para el cliente; la suma de control solo detecta

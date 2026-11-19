@@ -48,6 +48,11 @@ Todos sin `sorry` ni axiomas extra.
   contador `1, 2, …, n` sin saltos ni repeticiones.
 * `Upgrade.server_holds_everything`: la versión que atiende tiene el estado y
   el extremo del cliente; nunca atienden dos versiones a la vez.
+* `Upgrade.crash_rolls_back` y `Upgrade.restoring_mem_at_sup`: si la
+  versión nueva se cae antes de decidir, todo vuelve a la vieja con el estado
+  intacto. Mientras valida, la capacidad escribible al estado la tiene el
+  supervisor, así que ninguna escritura de la nueva (paso `scribble`) puede
+  tocarlo.
 * `Upgrade.rollback_resumes` y `Upgrade.accept_continues`: la versión que
   retoma (vieja tras un rollback, nueva tras aceptar) sigue la cuenta desde
   la última respuesta del cliente. Si la nueva escribiera el estado antes de
