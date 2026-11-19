@@ -1,4 +1,4 @@
-.PHONY: all iso run run-uefi test smoke smoke-uefi lint clean
+.PHONY: all iso run run-uefi test smoke smoke-uefi lint verify clean
 
 all: iso
 
@@ -28,6 +28,12 @@ lint:
 	cargo clippy -p nsos-kernel --target x86_64-unknown-none -- -D warnings
 	RUSTFLAGS="-C relocation-model=static" cargo clippy --target x86_64-unknown-none \
 		--target-dir target/cells -p nsos-rt -p cell-ping -p cell-pong -p cell-intruso -- -D warnings
+
+# Demostraciones en Lean y regeneración de las trazas del modelo
+verify:
+	cd verification/lean && lake build && \
+		lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace
+	cargo test -p nsos-kcore --test model_traces
 
 clean:
 	cargo clean
