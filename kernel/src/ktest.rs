@@ -383,6 +383,71 @@ pub fn run_bench() -> bool {
     ok
 }
 
+/// COM2: el puerto serie que une las dos máquinas de la migración.
+const COM2: (u16, u16) = (0x2F8, 8);
+
+/// Una de las dos máquinas de la migración (hito 10). El kernel arranca el
+/// `enlace` con el puerto COM2 y el supervisor de este lado con las imágenes
+/// que necesita, espera a que todos terminen y exige que terminen con 0.
+pub fn run_migration(origin: bool) -> bool {
+    use crate::cell::{self, KObject};
+    use nsos_kcore::cspace::Cap;
+    let (sup, images, cells): (&str, [&str; 2], [&str; 4]) = if origin {
+        (
+            "origen",
+            ["contador-v1", "cliente"],
+            ["enlace", "origen", "contador-v1", "cliente"],
+        )
+    } else {
+        (
+            "destino",
+            ["contador-roto", "contador-v2"],
+            ["enlace", "destino", "contador-roto", "contador-v2"],
+        )
+    };
+    kprintln!("migración: esta máquina es el {}", sup);
+    let spawn = || -> Result<(), &'static str> {
+        let (a, b) = cell::channel_create();
+        let chan = |e| Cap {
+            object: KObject::Channel(e),
+            rights: cell::ENDPOINT_RIGHTS,
+        };
+        let ports = Cap {
+            object: KObject::IoPorts(alloc::sync::Arc::new(cell::PortRange {
+                base: COM2.0,
+                len: COM2.1,
+            })),
+            rights: cell::PORT_RIGHTS,
+        };
+        let enlace = crate::module("enlace").ok_or("falta el módulo enlace")?;
+        let sup_img = crate::module(sup).ok_or("falta el supervisor")?;
+        let caps = alloc::vec![chan(b), crate::image(images[0])?, crate::image(images[1])?];
+        cell::spawn("enlace", enlace, alloc::vec![ports, chan(a)])
+            .map_err(|_| "enlace no arrancó")?;
+        cell::spawn(sup, sup_img, caps).map_err(|_| "el supervisor no arrancó")?;
+        Ok(())
+    };
+    if let Err(e) = spawn() {
+        kprintln!("migración: {}", e);
+        return false;
+    }
+    sched::wait_all();
+    let exits = crate::cell::EXITS.lock().clone();
+    let mut ok = true;
+    for name in cells {
+        let st = exits.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
+        let good = st == Some(crate::cell::ExitStatus::Exited(0));
+        kprintln!(
+            "  {} terminó con 0 ... {}",
+            name,
+            if good { "ok" } else { "FALLO" }
+        );
+        ok &= good;
+    }
+    kprintln!("migración: {}", if ok { "OK" } else { "FALLO" });
+    ok
+}
+
 pub fn run_cells() -> bool {
     kprintln!("ktest: cells en anillo 3");
     let free_before = pmm::stats().free_frames;

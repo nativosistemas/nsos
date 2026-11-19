@@ -13,7 +13,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente`, con rollback |
 | 8 | Tests de aislamiento y benchmark de IPC | ✅ `intruso` (27 abusos), fuzzer `caos`, `bench` con resumen en la CI |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ✅ `docs/amenazas.md`, auditoría `tools/audit-unsafe.sh`, SMEP/SMAP |
-| 10 | Fase 2: migración de cells entre dos instancias QEMU | ○ |
+| 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B por COM2 sin cortar al `cliente`, con rollback |
 
 ## Criterios de aceptación del MVP
 
@@ -178,17 +178,36 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   `test-smap-fault` lee una página de usuario desde el kernel y espera #PF.
   El kernel no necesitó cambios: ya copiaba todo por el HHDM.
 
-## Hito 10 en detalle (próximo)
+## Hito 10 (hecho)
 
-Migración de una cell entre dos instancias QEMU (fase 2):
+* Dos QEMU unidas por el segundo puerto serie (COM2) de cada una, con un
+  socket Unix (`tools/migrate-test.sh`, parte de `make smoke`). El kernel
+  arranca en modo `migrar-origen` o `migrar-destino` y solo entrega a la
+  cell `enlace` el rango de puertos de COM2.
+* El protocolo es el de la actualización en vivo: para `origen` el enlace
+  es la versión nueva. Primero pide `contador-roto` en B, que rechaza:
+  rollback en A y la v1 retoma. Después pide `contador-v2`, que acepta: la
+  v1 termina y el enlace de A reenvía los pedidos del `cliente` por el
+  cable. El `cliente` es el mismo del hito 7 y verifica que el contador no
+  salta.
+* Verificación formal: `verification/lean/Nsos/Migration.lean`, escrito
+  antes que el código. Demuestra que el cliente ve el contador sin saltos,
+  que nunca atienden las dos máquinas a la vez y que un rechazo remoto no
+  puede dañar el estado local (B solo recibe una copia).
+* Hallazgo al probarlo: limpiar la FIFO del UART al iniciarlo perdía el
+  primer byte si la otra máquina ya había mandado algo. El enlace deja la
+  FIFO apagada y QEMU retiene lo que llega.
+* Solo con BIOS: OVMF usa los puertos serie como consola y con UEFI los
+  firmwares se escriben entre sí por COM2.
+* Límites (ver `docs/amenazas.md`): el cable no está autenticado, las
+  capacidades no cruzan de máquina y se migra un servicio cuyo estado cabe
+  en 32 bytes (lo que define el formato del contador).
 
-1. Serializar el estado de una cell con el mismo protocolo de la
-   actualización en vivo (`UPGRADE_STATE`), sin congelar la memoria entera.
-2. Un canal entre máquinas: driver virtio-net o puerto serie entre dos QEMU,
-   como cell.
-3. Proxy de capacidades: los canales de la cell migrada se reenvían por el
-   enlace; el cliente no nota la mudanza (mismo invariante que
-   `Upgrade.client_sees_consecutive`, a modelar en Lean antes de escribirlo).
+## Próximos pasos posibles
+
+* Revocar mapeos al mover un `Memory` (modelarlo en Lean junto con el IPC).
+* Enlace autenticado y una red de verdad (virtio-net como cell).
+* Rollback cuando la versión nueva falla (no solo cuando rechaza).
 
 ## Riesgos
 

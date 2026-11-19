@@ -31,6 +31,7 @@ físico.
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
 | Una cell colgada se puede terminar | `cell_kill` con `CONTROL`; la cell muere desde su hilo, nunca a mitad de una syscall | `dormilona` (bloqueada y girando) |
 | Un servicio se actualiza sin que el cliente note saltos | Protocolo de supervisor con rollback | Lean: `Upgrade.client_sees_consecutive`; test en QEMU con rechazo y aceptación |
+| Un servicio se muda a otra máquina sin que el cliente note saltos, y un rechazo remoto no daña el estado local | El enlace manda una *copia* del estado; la decisión vuelve por el cable; rollback local | Lean: `Migration.client_sees_consecutive`, `one_server`, `rollback_resumes`; `tools/migrate-test.sh` con dos QEMU |
 | No se filtran extremos de canal en ciclos | Recolector `ipc_gc` | Lean: `step_no_leak`; ktest de ciclos |
 | El `unsafe` del kernel está acotado y justificado | Lints `undocumented_unsafe_blocks`, `forbid(unsafe_code)` en `abi`/`kcore`, `deny` en cells, registro | `tools/audit-unsafe.sh` en la CI |
 
@@ -70,9 +71,17 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
 6. **Caída de la versión nueva durante una actualización.** El rollback
    cubre el rechazo explícito; si la nueva falla con las capacidades, los
    clientes ven `PEER_CLOSED`.
-7. **Arranque sin verificación.** Limine carga el kernel y las cells sin
+7. **El enlace entre máquinas no está autenticado ni cifrado.** Quien
+   controle el cable (o la otra máquina) lee el estado migrado y puede
+   inventar respuestas para el cliente; la suma de control solo detecta
+   errores, no ataques. La máquina de destino confía en el estado que
+   recibe: lo valida el servicio (número mágico), no el sistema. Además el
+   enlace de origen conserva un mapeo de solo lectura del estado tras un
+   rechazo (punto 3). *Mitigación futura*: canal autenticado (claves por
+   máquina, MAC por trama) y un derecho específico para migrar.
+8. **Arranque sin verificación.** Limine carga el kernel y las cells sin
    comprobar firmas; quien pueda cambiar la imagen ISO controla el sistema.
-8. **Un solo núcleo.** Varias invariantes (syscalls con interrupciones
+9. **Un solo núcleo.** Varias invariantes (syscalls con interrupciones
    apagadas, la pila de kernel en una variable global) asumen un CPU. Con
    SMP hay que revisarlas antes de prender el segundo núcleo.
 
