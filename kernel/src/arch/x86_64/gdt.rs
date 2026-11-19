@@ -18,10 +18,8 @@ pub const KERNEL_CS: u16 = 0x08;
 /// Selector de datos de kernel.
 pub const KERNEL_DS: u16 = 0x10;
 /// Selector de datos de usuario (RPL 3).
-#[allow(dead_code)] // hito 4
 pub const USER_DS: u16 = 0x18 | 3;
 /// Selector de código de usuario (RPL 3).
-#[allow(dead_code)] // hito 4
 pub const USER_CS: u16 = 0x20 | 3;
 const TSS_SEL: u16 = 0x28;
 
@@ -128,8 +126,7 @@ pub fn init() {
     }
 }
 
-/// Fija la pila de anillo 0 usada al entrar desde anillo 3 (hito 4).
-#[allow(dead_code)]
+/// Fija la pila de anillo 0 usada al entrar desde anillo 3.
 pub fn set_kernel_stack(top: u64) {
     // SAFETY: escritura de un u64 en el TSS; se llama con interrupciones
     // deshabilitadas desde el scheduler, único escritor.

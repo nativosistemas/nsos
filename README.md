@@ -8,11 +8,12 @@ investigar en QEMU, no un reemplazo de Linux.
 
 ## Estado
 
-El kernel arranca en QEMU x86_64 (BIOS y UEFI) con Limine, construye sus
-propias tablas de páginas (W^X), tiene heap, APIC timer y un scheduler
-apropiativo de hilos de kernel. El ABI de IPC y capacidades está
-especificado e implementado como crate testeable. Siguiente: cells en anillo
-3 e IPC. Ver [hoja de ruta](docs/hoja-de-ruta.md).
+El kernel arranca en QEMU x86_64 (BIOS y UEFI) con Limine, tiene tablas de
+páginas propias (W^X), heap, APIC timer y scheduler apropiativo. Corre
+**cells en anillo 3**, cada una con su espacio de direcciones y su tabla de
+capacidades, que se comunican por canales IPC y se pasan capacidades. Una
+cell que viola el aislamiento es terminada sin afectar al kernel. Siguiente:
+drivers como cells (virtio). Ver [hoja de ruta](docs/hoja-de-ruta.md).
 
 ## Requisitos
 
@@ -45,6 +46,16 @@ mm: heap del kernel de 8192 KiB
 apic: timer a 100 Hz, TSC ~2150 MHz
 arranque del kernel: 16 ms (desde kmain, build release)
 nsos: arranque OK
+```
+
+Después arrancan las cells de ejemplo:
+
+```
+[ping] ping: 10 ecos verificados
+[ping] ping: transferí un extremo; mi handle viejo ya es inválido
+[pong] pong: recibí por el canal transferido: "hola por el canal nuevo"
+[intruso] intruso: debug_log con puntero al kernel   -> Err(InvalidArgs) (bloqueado)
+cell "intruso": excepción 14 ... el kernel la termina
 ```
 
 Con `memmap` en la línea de comandos (`CMDLINE="memmap" make run`) imprime

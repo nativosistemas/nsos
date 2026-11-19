@@ -7,6 +7,7 @@ pub mod idt;
 pub mod paging;
 pub mod port;
 pub mod serial;
+pub mod syscall;
 
 use core::arch::asm;
 use port::Port;
@@ -16,6 +17,7 @@ use port::Port;
 pub fn init_cpu() {
     gdt::init();
     idt::init();
+    syscall::init();
 }
 
 /// Cede la CPU al scheduler mediante una interrupción de software.

@@ -15,6 +15,12 @@ pub type PhysAddr = u64;
 pub type VirtAddr = u64;
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
+static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// CR3 del espacio del kernel.
+pub fn kernel_root() -> PhysAddr {
+    KERNEL_ROOT.load(Ordering::Relaxed)
+}
 
 /// Espacio de direcciones del kernel. Su mitad alta (entradas 256..512 del
 /// PML4) se compartirá con todas las cells (hito 4).
@@ -116,7 +122,12 @@ pub fn init(memmap: &Memmap, exec: &ExecutableAddress) {
     map_section(ro_start, ro_end, flags::NO_EXECUTE); // R--
     map_section(data_start, k_end, flags::WRITABLE | flags::NO_EXECUTE); // RW-
 
-    // 3. Activar: NX y protección de escritura en anillo 0.
+    // 3. Mitad alta completa, compartida con todas las cells.
+    space
+        .prealloc_kernel_half(&mut alloc)
+        .expect("sin marcos para la mitad alta");
+
+    // 4. Activar: NX y protección de escritura en anillo 0.
     // SAFETY: EFER.NXE y CR0.WP solo endurecen permisos; el nuevo espacio
     // mapea el código del kernel (sección text), sus datos y la pila actual
     // (que vive en memoria del bootloader, cubierta por el HHDM).
@@ -128,6 +139,7 @@ pub fn init(memmap: &Memmap, exec: &ExecutableAddress) {
         cpu::write_cr0(cpu::read_cr0() | (1 << 16));
         space.activate();
     }
+    KERNEL_ROOT.store(space.root(), Ordering::Relaxed);
     *KERNEL_SPACE.lock() = Some(space);
 
     heap::init();

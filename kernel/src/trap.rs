@@ -3,6 +3,7 @@
 use crate::arch::apic;
 use crate::arch::cpu;
 use crate::arch::idt::{TrapFrame, YIELD_VECTOR};
+use crate::arch::syscall::SYSCALL_VECTOR;
 use crate::sched;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -51,6 +52,12 @@ pub fn breakpoints() -> u64 {
 /// Atiende una interrupción. Devuelve el frame desde el que reanudar.
 pub fn dispatch(f: &mut TrapFrame, raw: *mut TrapFrame) -> *mut TrapFrame {
     match f.vector {
+        // Excepción en anillo 3: es culpa de la cell, no del kernel.
+        0..=31 if f.cs & 3 == 3 => crate::syscall::user_fault(f, raw),
+        v if v == SYSCALL_VECTOR => {
+            crate::syscall::handle(f);
+            raw
+        }
         3 => {
             BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
             raw
@@ -73,8 +80,8 @@ pub fn dispatch(f: &mut TrapFrame, raw: *mut TrapFrame) -> *mut TrapFrame {
 
 fn fatal_exception(f: &TrapFrame) -> ! {
     let name = EXCEPTIONS[f.vector as usize];
-    // Hito 6: si `f.cs & 3 == 3` el fallo es de una cell; se la termina y el
-    // kernel sigue. Hoy todo corre en anillo 0, así que es un bug del kernel.
+    // Los fallos de cells se desvían antes (ver `dispatch`): llegar aquí es
+    // un bug del kernel.
     let extra = if f.vector == 14 {
         // SAFETY de formato solamente: CR2 se lee sin efectos.
         let cr2 = cpu::read_cr2();

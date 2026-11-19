@@ -76,6 +76,7 @@ nsos_isr_\n:
 .endm
 
 .section .text
+.global nsos_trap_common
 nsos_trap_common:
     push rax
     push rbx

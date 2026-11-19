@@ -2,7 +2,10 @@
 
 Política:
 
-* `crates/abi`, `crates/kcore` y todas las cells de usuario: `#![forbid(unsafe_code)]`.
+* `crates/abi` y `crates/kcore`: `#![forbid(unsafe_code)]`.
+* Cells de usuario: `#![deny(unsafe_code)]`; la única excepción es el `_start` que
+  genera `nsos_rt::entry!`. El `unsafe` de usuario vive en `cells/rt` (instrucción
+  `syscall`). La cell `intruso` lo usa a propósito para probar el aislamiento.
 * Kernel: `#![deny(unsafe_op_in_unsafe_fn)]` y
   `#![deny(clippy::undocumented_unsafe_blocks)]`. Cada bloque lleva un
   comentario `// SAFETY:` con el invariante que lo justifica.
@@ -28,5 +31,10 @@ Política:
 | `kernel/src/sched.rs` | fabricar el `TrapFrame` inicial, `Send` de `Thread` | el frame vive en la pila propia del hilo; solo el scheduler lo toca bajo lock |
 | `kernel/src/ktest.rs` | `int3`, escrituras de prueba, lectura de tablas | solo en modo test; direcciones mapeadas por el propio test |
 | `kernel/src/main.rs` | test negativo `test-wx-fault` | solo con esa bandera; se espera el #PF |
+| `kernel/src/arch/x86_64/syscall.rs` | MSR de `syscall`, stub de entrada | un solo núcleo: la pila de kernel del hilo actual está en `NSOS_KSTACK_TOP` (con SMP: por CPU vía `swapgs`) |
+| `kernel/src/usercopy.rs` | copiar desde/hacia memoria de cells vía HHDM | cada página se traduce con las tablas de la cell y exige USER (y WRITABLE al escribir) |
+| `kernel/src/cell.rs` | copiar segmentos ELF a marcos nuevos | marcos recién reservados; rangos validados por `kcore::elf` |
+| `kernel/src/boot/limine.rs` (módulos) | leer módulos cargados por Limine | `size` bytes válidos en memoria que el kernel nunca reclama |
+| `cells/rt/src/lib.rs` | instrucción `syscall`, `_start` | convención del ABI; el kernel valida todo argumento |
 
 Revisión: `grep -rn "unsafe" kernel/src` debe coincidir con esta tabla.

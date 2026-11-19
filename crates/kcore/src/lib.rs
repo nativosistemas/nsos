@@ -9,6 +9,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
+pub mod cspace;
+pub mod elf;
 pub mod frame_bitmap;
 
+pub use cspace::CSpace;
 pub use frame_bitmap::FrameBitmap;

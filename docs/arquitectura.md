@@ -90,24 +90,50 @@ el frame guardado del otro hilo y el stub lo restaura con `iretq`. No hay
 otra rutina de *context switch*: un hilo nuevo es una pila con un frame
 fabricado que apunta a su función.
 
+## Cells en anillo 3
+
+* Cada cell tiene su PML4. La mitad alta (kernel, HHDM, pilas de kernel) es
+  la misma en todos los espacios y no tiene bit USER; la baja es de la cell.
+* Al cambiar a un hilo de cell el scheduler carga su CR3 y fija la pila de
+  kernel en el TSS y para `syscall`.
+* Una syscall construye el mismo `TrapFrame` que una interrupción: bloquear
+  en `channel_recv` es marcar el hilo `Blocked` y ceder la CPU.
+* El kernel nunca desreferencia punteros de cells: traduce cada página con
+  las tablas de la cell, exige USER/WRITABLE y copia por el HHDM.
+* Una excepción en anillo 3 termina la cell (capacidades cerradas, memoria
+  y tablas liberadas) y el kernel elige otro hilo.
+
+```
++--------+  canal (capacidades)  +--------+
+|  ping  | <-------------------> |  pong  |      intruso: sin capacidades,
++--------+                       +--------+      todo intento falla y su
+     |  canal nuevo, creado por ping y movido a pong |  lectura del kernel
+     +-----------------------------------------------+  termina en #PF
+```
+
 ## Organización del repositorio
 
 ```
 crates/abi/        ABI kernel↔cells (no_std, sin unsafe, testeable en host)
-crates/kcore/      lógica del kernel sin hardware (allocador de marcos...)
+crates/kcore/      lógica del kernel sin hardware (marcos, CSpace, validador ELF)
+cells/rt/          runtime de las cells (entrada, syscalls, println!)
+cells/ping|pong/   cells de ejemplo que hablan por IPC
+cells/intruso/     test de aislamiento
 kernel/            microkernel (x86_64-unknown-none)
   src/arch/        código dependiente de arquitectura
   src/boot/        protocolo Limine
   src/mm/          marcos físicos, tablas de páginas del kernel, heap
-  src/sched.rs     scheduler
+  src/sched.rs     scheduler (hilos de kernel y de cells, bloqueo)
+  src/cell.rs      cells, objetos del kernel y canales
+  src/syscall.rs   implementación de las syscalls
+  src/usercopy.rs  copias seguras kernel↔cell
   src/trap.rs      despacho de interrupciones y excepciones
   src/ktest.rs     tests dentro del kernel
 docs/              especificaciones y documentación
 tools/             construcción de imagen, QEMU, tests de humo
 ```
 
-Más adelante: `cells/` (runtime y cells de ejemplo), `tests/` (aislamiento),
-`bench/` (IPC y arranque).
+Más adelante: `tests/` (aislamiento) y `bench/` (IPC y arranque).
 
 ## Decisiones
 
