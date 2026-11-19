@@ -122,6 +122,9 @@ pub const IMAGE_RIGHTS: Rights = Rights(Rights::EXEC.0 | Rights::DUPLICATE.0 | R
 pub const CELL_RIGHTS: Rights =
     Rights(Rights::CONTROL.0 | Rights::WAIT.0 | Rights::DUPLICATE.0 | Rights::GRANT.0);
 
+/// Derechos de la memoria que crea una cell con `mem_create`.
+pub const MEM_RIGHTS: Rights =
+    Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::DUPLICATE.0 | Rights::GRANT.0);
 /// Derechos de una capacidad de memoria DMA para un driver.
 pub const DMA_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::CONTROL.0);
 /// Derechos de un rango de puertos para un driver.

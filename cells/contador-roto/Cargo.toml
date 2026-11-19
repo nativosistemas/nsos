@@ -1,0 +1,14 @@
+[package]
+name = "cell-contador-roto"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "contador-roto"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+nsos-rt = { path = "../rt" }

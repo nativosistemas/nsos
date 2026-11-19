@@ -31,6 +31,16 @@ pub mod labels {
     pub const PING: u64 = SYSTEM_BASE + 4;
     /// Respuesta a `PING`.
     pub const PONG: u64 = SYSTEM_BASE + 5;
+    /// Cell nueva → supervisor: aceptó el estado y ya atiende (sin caps).
+    pub const UPGRADE_ACCEPT: u64 = SYSTEM_BASE + 6;
+    /// Cell nueva → supervisor: rechazó el estado; devuelve las capacidades
+    /// recibidas en `UPGRADE_RESTORE` sin haberlas usado.
+    pub const UPGRADE_REJECT: u64 = SYSTEM_BASE + 7;
+    /// Supervisor → cell vieja: la nueva aceptó; terminar.
+    pub const UPGRADE_COMMIT: u64 = SYSTEM_BASE + 8;
+    /// Supervisor → cell vieja: la nueva rechazó; retomar con estas
+    /// capacidades.
+    pub const UPGRADE_ROLLBACK: u64 = SYSTEM_BASE + 9;
 }
 
 /// Cabecera de mensaje (16 bytes).

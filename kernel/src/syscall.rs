@@ -79,6 +79,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::ChannelCreate => channel_create(cell, a0),
         Syscall::ChannelSend => channel_send(cell, h(a0), a1, a2),
         Syscall::ChannelRecv => channel_recv(cell, h(a0), a1, a2),
+        Syscall::MemCreate => mem_create(cell, a0, a1),
         Syscall::MemMap => mem_map(cell, h(a0), a1, a2),
         Syscall::MemInfo => mem_info(cell, h(a0), a1),
         Syscall::CellSpawn => cell_spawn(cell, h(a0), a1, a2),
@@ -242,6 +243,25 @@ fn endpoint(cell: &Cell, h: CapHandle, need: Rights) -> SysResult<Arc<cell::Endp
 
 /// `mem_map(h, vaddr, rights)`: los derechos pedidos deben estar en la
 /// capacidad; siempre hace falta READ; nunca WRITE y EXEC juntos.
+/// Tope de `mem_create` (los objetos son contiguos).
+const MEM_CREATE_MAX: u64 = 1 << 20;
+
+/// `mem_create(size, flags) -> h`: memoria nueva, a cero, para compartir
+/// (por ejemplo el estado de una actualización en vivo). Sin `CONTROL`: quien
+/// la crea no conoce su dirección física.
+fn mem_create(cell: &Cell, size: u64, fl: u64) -> SysResult<u64> {
+    if fl != 0 || size == 0 || size > MEM_CREATE_MAX {
+        return Err(Error::InvalidArgs);
+    }
+    let pages = size.div_ceil(crate::arch::paging::PAGE_SIZE) as usize;
+    let obj = cell::MemObj::new(pages).ok_or(Error::NoMemory)?;
+    let h = cell.cspace.lock().insert(Cap {
+        object: KObject::Memory(obj),
+        rights: cell::MEM_RIGHTS,
+    })?;
+    Ok(h.0 as u64)
+}
+
 fn mem_map(cell: &Cell, h: CapHandle, vaddr: u64, want: u64) -> SysResult<u64> {
     let want = Rights::from_bits(want as u32).ok_or(Error::InvalidArgs)?;
     if !want.contains(Rights::READ)
