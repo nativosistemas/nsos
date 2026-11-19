@@ -129,8 +129,8 @@ def trace (limit len : Nat) : GenM Unit := do
         pure s!"cycle {n} {obj} 3 => {if ok then s!"ok {last}" else "err NoMemory"}"
     emit s!"{line} len={cs.live}"
 
-/-- Traza fija: después de 4096 reusos de un slot, el handle original vuelve a
-ser válido (la generación tiene 12 bits). Documenta un límite conocido. -/
+/-- Traza fija: después de 4096 reusos, el slot se retira y el handle original
+sigue sin valer (la generación tiene 12 bits y no da la vuelta). -/
 def wrapTrace : GenM Unit := do
   emit "T 4"
   emit "insert 1 3 => ok 1 len=1"
@@ -139,10 +139,10 @@ def wrapTrace : GenM Unit := do
   if let .ok (cs', _) := cs.remove 1 then cs := cs'
   emit "remove 1 => ok 1:3 len=0"
   let mut last := 0
-  for _ in [0:4095] do
+  for _ in [0:5000] do
     if let .ok (cs', h) := cs.insert ⟨2, Rights.ofBits 3⟩ then
       if let .ok (cs'', _) := cs'.remove h then cs := cs''; last := h
-  emit s!"cycle 4095 2 3 => ok {last} len={cs.live}"
+  emit s!"cycle 5000 2 3 => ok {last} len={cs.live}"
   let res := cs.insert ⟨3, Rights.ofBits 1⟩
   if let .ok (cs', _) := res then cs := cs'
   emit s!"insert 3 1 => {errOr res (toString ·.2)} len={cs.live}"

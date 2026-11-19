@@ -14,6 +14,8 @@ pub const SLOT_BITS: u32 = 20;
 pub const MAX_SLOTS: u32 = 1 << SLOT_BITS;
 /// Bits de generación (anti-reuso de handles).
 pub const GEN_BITS: u32 = 32 - SLOT_BITS;
+/// Cantidad de generaciones distintas que puede tener un slot.
+pub const GEN_LIMIT: u32 = 1 << GEN_BITS;
 const SLOT_MASK: u32 = MAX_SLOTS - 1;
 const GEN_MASK: u32 = (1 << GEN_BITS) - 1;
 
@@ -22,7 +24,9 @@ const GEN_MASK: u32 = (1 << GEN_BITS) - 1;
 /// Formato (32 bits): `[ generación:12 | slot:20 ]`. El slot 0 nunca se usa,
 /// así que `CapHandle(0)` es siempre inválido. La generación se incrementa
 /// cada vez que un slot se libera, de modo que un handle viejo (use-after-free
-/// de capacidades) se detecta y devuelve `Error::BadHandle`.
+/// de capacidades) se detecta y devuelve `Error::BadHandle`. Un slot que agotó
+/// sus `GEN_LIMIT` generaciones se retira para siempre: la generación nunca da
+/// la vuelta, así que un handle viejo no puede volver a ser válido.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct CapHandle(pub u32);

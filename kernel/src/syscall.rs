@@ -11,7 +11,6 @@ use crate::usercopy::{copy_from_user, copy_to_user};
 use crate::{kprintln, sched};
 use alloc::sync::Arc;
 use alloc::vec;
-use alloc::vec::Vec;
 use nsos_abi::cap::CapInfo;
 use nsos_abi::error::encode_ret;
 use nsos_abi::msg::MSG_SIZE;
@@ -56,6 +55,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a0: u64, a1: u64, a2: u64) -> SysResul
         Syscall::CapDrop => {
             let cap = cell.cspace.lock().remove(h(a0))?;
             drop(cap); // fuera del lock
+            cell::ipc_gc();
             Ok(0)
         }
         Syscall::CapInfo => {
@@ -140,15 +140,16 @@ fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
             };
             ep.send_with(wait, || {
                 let caps = cs.remove_all(msg.cap_slice(), Rights::GRANT)?;
-                Ok(QueuedMsg {
-                    header: msg.header,
-                    data: msg.data,
-                    caps,
-                })
+                Ok(QueuedMsg::new(msg.header, msg.data, caps))
             })
         };
         match r {
             Err(Error::WouldBlock) if wait => crate::arch::yield_now(),
+            Ok(()) if !msg.cap_slice().is_empty() => {
+                // Mover extremos puede dejar un ciclo inalcanzable.
+                cell::ipc_gc();
+                return Ok(0);
+            }
             r => return r.map(|_| 0),
         }
     }
@@ -164,11 +165,11 @@ fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
     let (q, handles) = loop {
         match ep.try_recv(wait) {
             Ok(mut q) => {
-                let caps: Vec<_> = core::mem::take(&mut q.caps);
+                let caps = q.take_caps();
                 match cell.cspace.lock().insert_all(caps) {
                     Ok(hs) => break (q, hs),
                     Err((e, caps)) => {
-                        q.caps = caps;
+                        q.put_caps(caps);
                         ep.unrecv(q);
                         return Err(e);
                     }

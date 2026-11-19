@@ -67,47 +67,62 @@ def passing : Sys × List (Except Err (List Nat)) :=
 #guard errIs .accessDenied (passing.2.getD 6 (.error .noMemory))
 #guard errIs .accessDenied (passing.2.getD 7 (.error .noMemory))
 
-/-! ## Límite conocido 1: ciclos de referencias
+/-! ## Extremos que viajan en ciclos se liberan
 
 Si una cell manda un extremo por su propio canal hacia la cola de ese mismo
 extremo y suelta el resto de sus handles, el extremo queda referenciado solo
-por su cola. Con conteo de referencias (`Arc`) nunca se libera: el canal y sus
-mensajes quedan en memoria para siempre. Zircon prohíbe el caso directo
-(mandar un canal por sí mismo); en nsos hoy está permitido. -/
+por su cola. Con conteo de referencias puro (`Arc`) nunca se liberaría. La
+recolección por alcanzabilidad lo cierra y vacía su cola. -/
 
-def leak : Sys × List (Except Err (List Nat)) :=
+def selfLoop : Sys × List (Except Err (List Nat)) :=
   runAll (empty 1) [
     (0, .create),              -- handles 1 (lado 0) y 2 (lado 1)
     (0, .send h1 0 [h2]),      -- el lado 1 viaja en la cola del lado 1
-    (0, .drop h1)              -- la cell ya no tiene nada
+    (0, .send h1 1 [])         -- el lado 1 ya es inalcanzable: PeerClosed
   ]
 
-#guard leak.2.all isOk
-#guard (leak.1.cells.map (·.caps.length)) == [0]
-#guard leak.1.closed (.endpoint 0 false)          -- el lado 0 se cerró
-#guard !leak.1.closed (.endpoint 0 true)          -- el lado 1 nunca se cierra
-#guard (leak.1.queue (.endpoint 0 true)).length == 1
+#guard isOk (selfLoop.2.getD 1 (.error .noMemory))
+#guard errIs .peerClosed (selfLoop.2.getD 2 (.ok []))
+#guard selfLoop.1.closed (.endpoint 0 true)
+#guard (selfLoop.1.queue (.endpoint 0 true)).isEmpty
 
-/-! ## Límite conocido 2: la generación da la vuelta
+/-- Ciclo de dos canales: el lado 1 de cada uno viaja en la cola del lado 1
+del otro. Ninguna comprobación local lo detecta; la recolección sí. -/
+def twoCycle : Sys × List (Except Err (List Nat)) :=
+  runAll (empty 1) [
+    (0, .create),              -- canal A: handles 1 y 2
+    (0, .create),              -- canal B: handles 3 y 4
+    (0, .send h1 0 [4]),       -- B.1 viaja hacia A.1
+    (0, .send h3 0 [h2]),      -- A.1 viaja hacia B.1: ciclo, ya inalcanzables
+    (0, .drop h1),
+    (0, .drop h3)
+  ]
 
-La generación de un handle tiene 12 bits. Después de 4096 reusos del mismo
-slot, un handle viejo vuelve a ser válido y apunta a otra capacidad. La traza
-fija al final de `cspace_model.trace` comprueba que Rust hace lo mismo. -/
+#guard twoCycle.2.all isOk
+#guard (twoCycle.1.cells.map (·.caps.length)) == [0]
+#guard [Obj.endpoint 0 false, .endpoint 0 true, .endpoint 1 false, .endpoint 1 true].all
+  twoCycle.1.closed
+#guard (twoCycle.1.queue (.endpoint 0 true)).isEmpty && (twoCycle.1.queue (.endpoint 1 true)).isEmpty
 
-def wrap : Bool := Id.run do
+/-! ## Los handles viejos no reviven
+
+La generación tiene 12 bits. Un slot que agota sus 4096 generaciones se
+retira, en lugar de volver a la generación 0. Ver
+`CSpace.stale_handle_never_revives` para la demostración general. -/
+
+def noWrap : Bool := Id.run do
   let mut cs : CSpace Nat := CSpace.new 4
   if let .ok (cs', _) := cs.insert ⟨1, Rights.ofBits 3⟩ then cs := cs'
   if let .ok (cs', _) := cs.remove h1 then cs := cs'
-  for _ in [0:4095] do
+  for _ in [0:5000] do
     if let .ok (cs', h) := cs.insert ⟨2, Rights.ofBits 3⟩ then
       if let .ok (cs'', _) := cs'.remove h then cs := cs''
   if let .ok (cs', _) := cs.insert ⟨3, Rights.ofBits 1⟩ then cs := cs'
-  -- el handle 1 (viejo) ahora nombra el objeto 3
   return match cs.get h1 with
-    | .ok c => c.obj == 3
-    | .error _ => false
+    | .ok _ => false
+    | .error _ => true
 
-#guard wrap
+#guard noWrap
 
 end Examples
 end Nsos

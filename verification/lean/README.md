@@ -13,7 +13,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/CSpace.lean` | Modelo ejecutable de `nsos_kcore::cspace::CSpace`, paso a paso. |
 | `Nsos/System.lean` | Cells, canales y syscalls `cap_dup`, `cap_drop`, `channel_create`, `channel_send`, `channel_recv`, con cierre de extremos en cascada. |
 | `Nsos/Security.lean` | Teoremas de seguridad. |
-| `Nsos/Examples.lean` | Escenarios evaluados al compilar, incluidos dos límites conocidos. |
+| `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
 
 ## Teoremas demostrados
@@ -35,6 +35,10 @@ Todos sin `sorry` ni axiomas extra.
 * `Sys.no_forging`: una cell que nunca hace `recv` termina solo con capacidades
   a objetos que ya tenía (con derechos iguales o menores) o a objetos nuevos.
   Nadie puede fabricar una capacidad ni recibirla sin un `recv` propio.
+* `CSpace.stale_handle_never_revives`: después de quitar un handle, ninguna
+  secuencia de operaciones lo vuelve a hacer válido.
+* `Sys.step_no_leak`: después de cada syscall, todo extremo que ya nadie puede
+  alcanzar está cerrado y con la cola vacía.
 
 ## Tests derivados del modelo
 
@@ -49,17 +53,18 @@ El IPC del kernel (`kernel/src/cell.rs`) todavía no tiene este puente porque
 depende del scheduler. Para tenerlo hay que mover la lógica de colas de canal
 a `kcore`.
 
-## Límites conocidos que muestra el modelo
+## Límites que encontró el modelo (corregidos)
 
-1. **Ciclos de referencias.** Si una cell manda un extremo por su propio canal
-   hacia la cola de ese mismo extremo y suelta sus handles, el extremo queda
-   referenciado solo por su cola y nunca se libera (fuga de memoria del
-   kernel). Ver `Examples.leak`.
-2. **La generación da la vuelta.** Con 12 bits, tras 4096 reusos de un slot un
-   handle viejo vuelve a ser válido. Ver `Examples.wrap` y la última traza.
-
-Ninguno rompe los teoremas: no dan derechos nuevos a nadie. El segundo sí
-permite que una cell confunda dos capacidades propias.
+1. **Ciclos de referencias.** Un extremo que viaja solo en su propia cola, o
+   un ciclo de extremos en colas ajenas, quedaba vivo para siempre con el
+   conteo de referencias. Ahora `Sys.gc` cierra todo lo inalcanzable
+   (`Sys.step_no_leak`) y el kernel lo implementa con `ipc_gc`
+   (`crates/kcore/src/ipc_gc.rs` + `kernel/src/cell.rs`). Ver
+   `Examples.selfLoop` y `Examples.twoCycle`.
+2. **La generación daba la vuelta.** Con 12 bits, tras 4096 reusos un handle
+   viejo volvía a valer. Ahora el slot se retira
+   (`CSpace.stale_handle_never_revives`) y la última traza comprueba que Rust
+   hace lo mismo. Ver `Examples.noWrap`.
 
 ## Uso
 

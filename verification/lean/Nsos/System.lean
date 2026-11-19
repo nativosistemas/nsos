@@ -12,9 +12,10 @@ Simplificaciones respecto del kernel:
 * Los envíos y recepciones son no bloqueantes: bloquear es reintentar más
   tarde, y no cambia el estado.
 * Los datos del mensaje se abstraen en una etiqueta (`label`).
-* El cierre de extremos sigue la semántica de `Arc` del kernel: un extremo se
-  cierra cuando ya no lo referencia ninguna CSpace ni ninguna cola viva, y al
-  cerrarse se descarta su cola (lo que puede cerrar otros, en cascada).
+* El cierre de extremos es por alcanzabilidad: tras cada syscall se cierra
+  todo extremo que ninguna cell pueda alcanzar (directamente o siguiendo
+  colas), y se descarta su cola. Es lo que logran juntos el conteo de
+  referencias (`Arc`) y el recolector `ipc_gc` del kernel.
 -/
 
 namespace Nsos
@@ -101,21 +102,34 @@ namespace Sys
 def endpoints (s : Sys) : List Obj :=
   (List.range s.nextPair).flatMap fun p => [.endpoint p false, .endpoint p true]
 
-/-- ¿Alguna CSpace o alguna cola referencia al extremo? -/
-def referenced (s : Sys) (e : Obj) : Bool :=
-  s.cells.any (fun cs => cs.caps.any (·.obj == e)) ||
-  s.endpoints.any (fun o => (s.queue o).any (fun m => m.caps.any (·.obj == e)))
+/-- Objetos que viajan en la cola del extremo `o`. Quien tenga `o` los puede
+recibir. -/
+def queuedObjs (s : Sys) (o : Obj) : List Obj :=
+  (s.queue o).flatMap fun m => m.caps.map (·.obj)
 
-/-- Cierra en cascada los extremos sin referencias (`Drop for Endpoint`). -/
-def collect : Nat → Sys → Sys
-  | 0, s => s
-  | n + 1, s =>
-    match s.endpoints.find? (fun e => !s.closed e && !s.referenced e) with
-    | none => s
-    | some e => collect n { s with closed := update s.closed e true, queue := update s.queue e [] }
+/-- Objetos que alguna cell tiene en su CSpace. -/
+def roots (s : Sys) : List Obj :=
+  s.cells.flatMap fun cs => cs.caps.map (·.obj)
 
-/-- Recolección tras cada syscall. -/
-def gc (s : Sys) : Sys := collect (2 * s.nextPair + 1) s
+/-- Clausura: lo que se alcanza desde `acc` siguiendo colas. -/
+def reachGo (s : Sys) : Nat → List Obj → List Obj
+  | 0, acc => acc
+  | n + 1, acc =>
+    let new := (acc.flatMap s.queuedObjs).filter (fun o => !acc.contains o)
+    if new.isEmpty then acc else reachGo s n (acc ++ new.eraseDups)
+
+/-- Objetos alcanzables: los que tiene alguna cell, y los que viajan en la
+cola de un extremo alcanzable. Ningún otro puede volver a usarse nunca. -/
+def reachSet (s : Sys) : List Obj := s.reachGo (2 * s.nextPair + 1) s.roots
+
+/-- Recolección tras cada syscall: cierra los extremos inalcanzables y
+descarta sus colas. Es lo que hace `ipc_gc` en el kernel (al estilo del
+recolector de descriptores en vuelo de Linux): sin esto, un ciclo de extremos
+que viajan en colas ajenas quedaría vivo para siempre. -/
+def gc (s : Sys) : Sys :=
+  let r := s.reachSet
+  { s with closed := fun e => s.closed e || !r.contains e
+           queue := fun e => if r.contains e then s.queue e else [] }
 
 /-- CSpace de la cell `a`. -/
 def cellAt (s : Sys) (a : Nat) : Except Err (CSpace Obj) :=

@@ -17,6 +17,8 @@ Teoremas principales:
   mensajes termina solo con capacidades a objetos que ya tenía (con derechos
   iguales o menores) o a objetos nuevos. Es decir: nadie puede fabricar una
   capacidad, y nadie la recibe sin un `recv` propio.
+* `Sys.step_no_leak`: después de cada syscall, todo extremo que ya nadie puede
+  alcanzar está cerrado y con la cola vacía (no hay fugas por ciclos).
 -/
 
 namespace Nsos
@@ -43,47 +45,14 @@ theorem derived_of_exists {s : Sys} {c : Cap Obj} (h : s.Exists c) : s.Derived c
 
 /-! ## La recolección solo quita -/
 
-theorem collect_cells : ∀ (n : Nat) (s : Sys), (collect n s).cells = s.cells := by
-  intro n
-  induction n with
-  | zero => intro s; rfl
-  | succ n ih =>
-    intro s
-    simp only [collect]
-    split
-    · rfl
-    · rw [ih]
-
-theorem collect_nextPair : ∀ (n : Nat) (s : Sys), (collect n s).nextPair = s.nextPair := by
-  intro n
-  induction n with
-  | zero => intro s; rfl
-  | succ n ih =>
-    intro s
-    simp only [collect]
-    split
-    · rfl
-    · rw [ih]
-
-theorem collect_queued : ∀ (n : Nat) (s : Sys) (c : Cap Obj),
-    (collect n s).Queued c → s.Queued c := by
-  intro n
-  induction n with
-  | zero => intro s c h; exact h
-  | succ n ih =>
-    intro s c h
-    simp only [collect] at h
-    split at h
-    · exact h
-    · obtain ⟨o, m, hm, hc⟩ := ih _ _ h
-      rcases mem_update hm with hm | hm
-      · simp at hm
-      · exact ⟨o, m, hm, hc⟩
-
-theorem gc_cells (s : Sys) : s.gc.cells = s.cells := collect_cells _ _
-theorem gc_nextPair (s : Sys) : s.gc.nextPair = s.nextPair := collect_nextPair _ _
-theorem gc_queued {s : Sys} {c : Cap Obj} (h : s.gc.Queued c) : s.Queued c :=
-  collect_queued _ _ _ h
+theorem gc_cells (s : Sys) : s.gc.cells = s.cells := rfl
+theorem gc_nextPair (s : Sys) : s.gc.nextPair = s.nextPair := rfl
+theorem gc_queued {s : Sys} {c : Cap Obj} (h : s.gc.Queued c) : s.Queued c := by
+  obtain ⟨o, m, hm, hc⟩ := h
+  simp only [gc] at hm
+  split at hm
+  · exact ⟨o, m, hm, hc⟩
+  · simp at hm
 
 theorem gc_held {s : Sys} {a : Nat} {c : Cap Obj} : s.gc.Held a c ↔ s.Held a c := by
   simp [Held, gc_cells]
@@ -400,6 +369,63 @@ theorem run_no_amplification {s s' : Sys} {tr : List (Nat × Op)} (h : Run s tr 
       · exact .inr (ho1 ▸ hf)
     · exact .inr (Nat.le_trans (step_nextPair_le hs) hfresh)
   | err _ _ ih => exact ih hc
+
+/-! ## Sin fugas de canales -/
+
+/-- `e` es alcanzable: alguna cell lo tiene, o viaja en la cola de un extremo
+alcanzable (y entonces el dueño de ese extremo lo puede recibir). -/
+inductive Reach (s : Sys) : Obj → Prop
+  | held {cs : CSpace Obj} {c : Cap Obj} : cs ∈ s.cells → c ∈ cs.caps → Reach s c.obj
+  | queued {x : Obj} {m : Msg} {c : Cap Obj} :
+      Reach s x → m ∈ s.queue x → c ∈ m.caps → Reach s c.obj
+
+theorem reachGo_sound (s : Sys) : ∀ (n : Nat) (acc : List Obj),
+    (∀ x, x ∈ acc → s.Reach x) → ∀ x, x ∈ s.reachGo n acc → s.Reach x := by
+  intro n
+  induction n with
+  | zero => intro acc h x hx; exact h x hx
+  | succ n ih =>
+    intro acc h x hx
+    simp only [reachGo] at hx
+    split at hx
+    · exact h x hx
+    · apply ih _ _ x hx
+      intro y hy
+      simp only [List.mem_append] at hy
+      rcases hy with hy | hy
+      · exact h y hy
+      · have hy' := List.mem_eraseDups.1 hy
+        simp only [List.mem_filter, List.mem_flatMap] at hy'
+        obtain ⟨⟨z, hz, hyz⟩, _⟩ := hy'
+        simp only [queuedObjs, List.mem_flatMap, List.mem_map] at hyz
+        obtain ⟨m, hm, c, hc, rfl⟩ := hyz
+        exact .queued (h z hz) hm hc
+
+theorem reachSet_sound (s : Sys) {x : Obj} (hx : x ∈ s.reachSet) : s.Reach x := by
+  apply reachGo_sound s _ _ _ x hx
+  intro y hy
+  simp only [roots, List.mem_flatMap, List.mem_map] at hy
+  obtain ⟨cs, hcs, c, hc, rfl⟩ := hy
+  exact .held hcs hc
+
+/-- **La recolección no deja fugas**: todo extremo que ya nadie puede alcanzar
+queda cerrado y con la cola vacía (sus mensajes, y las capacidades que
+llevaban, se liberan). -/
+theorem gc_collects {s : Sys} {e : Obj} (h : ¬ s.Reach e) :
+    s.gc.closed e = true ∧ s.gc.queue e = [] := by
+  have hn : e ∉ s.reachSet := fun hm => h (reachSet_sound s hm)
+  simp [gc, hn]
+
+/-- **Sin fugas tras cada syscall**: si después del efecto de una syscall un
+extremo quedó inalcanzable (por ejemplo, porque viaja solo en su propia cola,
+o en un ciclo de colas), al terminar la syscall está cerrado y su cola vacía. -/
+theorem step_no_leak {s s₁ s' : Sys} {a : Nat} {op : Op} {r : List Nat} {e : Obj}
+    (he : s.exec a op = .ok (s₁, r)) (hs : s.step a op = .ok (s', r))
+    (hu : ¬ s₁.Reach e) : s'.closed e = true ∧ s'.queue e = [] := by
+  unfold step at hs
+  rw [he] at hs
+  cases hs
+  exact gc_collects hu
 
 end Sys
 end Nsos
