@@ -281,3 +281,21 @@ mod tests {
         assert!(accepted > 0);
     }
 }
+
+/// Pruebas de Kani: cualquier secuencia de 256 bytes que llegue de una cell.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(257)]
+    fn from_bytes_any_input() {
+        let b: [u8; MSG_SIZE] = kani::any();
+        if let Ok(m) = Message::from_bytes(&b) {
+            assert!(m.validate().is_ok());
+            assert!(m.cap_slice().len() <= MAX_CAPS);
+            assert!(m.cap_slice().iter().all(|c| c.is_valid()));
+            assert_eq!(m.to_bytes(), b); // ida y vuelta exacta
+        }
+    }
+}

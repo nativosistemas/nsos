@@ -47,3 +47,15 @@ jobs:
           cd verification/lean
           lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace
           git diff --exit-code -- ../../crates/kcore/tests/data/cspace_model.trace
+
+  kani:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar Kani
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+      - name: Pruebas de Kani
+        run: make kani

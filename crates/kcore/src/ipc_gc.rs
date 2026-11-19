@@ -37,28 +37,46 @@ pub fn garbage(nodes: &[Node]) -> Vec<bool> {
     let n = nodes.len();
     // Apariciones de cada nodo dentro de colas de candidatos.
     let mut internal = vec![0usize; n];
-    for node in nodes.iter().filter(|x| x.candidate) {
-        for &j in &node.contents {
-            if j < n {
-                internal[j] += 1;
+    for node in nodes {
+        if node.candidate {
+            for &j in &node.contents {
+                if j < n {
+                    internal[j] += 1;
+                }
             }
         }
     }
-    let mut alive: Vec<bool> = nodes
-        .iter()
-        .zip(&internal)
-        .map(|(x, &int)| !x.candidate || x.in_flight > int)
-        .collect();
-    let mut work: Vec<usize> = (0..n).filter(|&i| alive[i] && nodes[i].candidate).collect();
-    while let Some(i) = work.pop() {
+    // Vivos de entrada: los que alguien tiene, y los que aparecen en alguna
+    // cola que no es de un candidato.
+    // Pila de trabajo de tamaño fijo: cada nodo entra a lo sumo una vez (al
+    // marcarlo vivo), así que nunca se pasa de `n`.
+    let mut alive = vec![false; n];
+    let mut work = vec![0usize; n];
+    let mut top = 0;
+    for (i, node) in nodes.iter().enumerate() {
+        let a = !node.candidate || node.in_flight > internal[i];
+        alive[i] = a;
+        if a && node.candidate {
+            work[top] = i;
+            top += 1;
+        }
+    }
+    // Lo que viaja en la cola de un vivo está vivo.
+    while top > 0 {
+        top -= 1;
+        let i = work[top];
         for &j in &nodes[i].contents {
             if j < n && !alive[j] {
                 alive[j] = true;
-                work.push(j);
+                work[top] = j;
+                top += 1;
             }
         }
     }
-    alive.into_iter().map(|a| !a).collect()
+    for a in alive.iter_mut() {
+        *a = !*a;
+    }
+    alive
 }
 
 #[cfg(test)]
@@ -118,5 +136,99 @@ mod tests {
     #[test]
     fn not_candidate_is_never_garbage() {
         assert_eq!(garbage(&[node(false, 1, &[0])]), [false]);
+    }
+}
+
+/// Pruebas de Kani: grafos cualesquiera (índices fuera de rango incluidos).
+/// Sin panics ni overflows, y la respuesta es coherente.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// `n` nodos con hasta 2 apariciones en cola cada uno. Un índice `n` está
+    /// fuera de rango (el kernel nunca lo genera, pero no debe romper nada).
+    fn any_graph(n: usize) -> Vec<Node> {
+        let mut nodes = Vec::with_capacity(n);
+        for _ in 0..n {
+            let in_flight: u8 = kani::any();
+            kani::assume(in_flight <= 4);
+            let mut contents = Vec::with_capacity(2);
+            for _ in 0..2 {
+                let j: u8 = kani::any();
+                if (j as usize) <= n && kani::any() {
+                    contents.push(j as usize);
+                }
+            }
+            nodes.push(Node {
+                candidate: kani::any(),
+                in_flight: in_flight as usize,
+                contents,
+            });
+        }
+        nodes
+    }
+
+    /// Con 3 nodos (ciclos de hasta 3, colgados de otros): sin panics.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::solver(cadical)]
+    fn garbage_no_panic_3() {
+        let nodes = any_graph(3);
+        assert_eq!(garbage(&nodes).len(), 3);
+    }
+
+    /// Con 2 nodos (auto-ciclos, ciclos de 2, referencias externas): la
+    /// respuesta cumple la especificación.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn garbage_spec_2() {
+        let n = 2;
+        let nodes = any_graph(n);
+        // Como en el kernel: `in_flight` cuenta todas las apariciones, las de
+        // colas de nodos del grafo y quizás otras (colas de extremos que no
+        // viajan).
+        for i in 0..n {
+            let mut seen = 0;
+            for k in 0..n {
+                for &j in &nodes[k].contents {
+                    if j == i {
+                        seen += 1;
+                    }
+                }
+            }
+            kani::assume(nodes[i].in_flight >= seen);
+        }
+        let g = garbage(&nodes);
+        assert_eq!(g.len(), n);
+        for i in 0..n {
+            let node = &nodes[i];
+            // Lo que alguien tiene (no candidato) nunca es basura.
+            if !node.candidate {
+                assert!(!g[i]);
+            }
+            // Lo que viaja en la cola de un extremo vivo está vivo.
+            if !g[i] {
+                for &j in &node.contents {
+                    if j < n {
+                        assert!(!g[j]);
+                    }
+                }
+            }
+            // Si es basura, todas sus apariciones están en colas de basura.
+            if g[i] {
+                let mut from_garbage = 0;
+                for k in 0..n {
+                    if g[k] {
+                        for &j in &nodes[k].contents {
+                            if j == i {
+                                from_garbage += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(node.in_flight <= from_garbage);
+            }
+        }
     }
 }

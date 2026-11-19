@@ -34,6 +34,7 @@ make test        # tests unitarios en el host
 make smoke       # arranca en QEMU, corre los tests internos y un test de fallo (como la CI)
 make lint        # rustfmt + clippy
 make verify      # demostraciones en Lean + tests derivados del modelo (requiere elan)
+make kani        # pruebas de Kani sobre abi y kcore (requiere kani-verifier)
 ```
 
 Salida esperada:
@@ -69,3 +70,4 @@ además el mapa de memoria de Limine.
 * [Hoja de ruta](docs/hoja-de-ruta.md)
 * [Registro de `unsafe`](docs/unsafe.md)
 * [Verificación formal en Lean](verification/lean/README.md)
+* [Pruebas de Kani sobre el código Rust](verification/kani.md)

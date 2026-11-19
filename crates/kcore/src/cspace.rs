@@ -142,7 +142,11 @@ impl<T> CSpace<T> {
                 return Err(Error::InvalidArgs);
             }
         }
-        Ok(hs.iter().map(|h| self.remove(*h).unwrap()).collect())
+        let mut out = Vec::with_capacity(hs.len());
+        for h in hs {
+            out.push(self.remove(*h).unwrap());
+        }
+        Ok(out)
     }
 
     /// Inserta varias de forma atómica (si no hay espacio, no inserta nada).
@@ -156,12 +160,18 @@ impl<T> CSpace<T> {
         {
             return Err((Error::NoMemory, caps));
         }
-        Ok(caps.into_iter().map(|c| self.insert(c).unwrap()).collect())
+        let mut hs = Vec::with_capacity(caps.len());
+        for c in caps {
+            hs.push(self.insert(c).unwrap());
+        }
+        Ok(hs)
     }
 
     /// Quita todo (al morir la cell). Devuelve los objetos para soltarlos.
     pub fn clear(&mut self) -> Vec<Cap<T>> {
-        let mut out = Vec::new();
+        // Capacidad por cantidad de slots (no `live`): así no depende de que
+        // `live` sea exacto, y Kani no razona sobre realocaciones.
+        let mut out = Vec::with_capacity(self.slots.len());
         for (i, s) in self.slots.iter_mut().enumerate() {
             if let Some(c) = s.cap.take() {
                 if retire(s) {
@@ -172,6 +182,35 @@ impl<T> CSpace<T> {
         }
         self.live = 0;
         out
+    }
+}
+
+impl<T> CSpace<T> {
+    /// Comprueba los invariantes internos (tests y pruebas de Kani). Escrito
+    /// con bucles simples para que el verificador lo procese rápido.
+    #[cfg(any(test, kani))]
+    pub(crate) fn check_invariants(&self) {
+        let n = self.slots.len();
+        assert!(n >= 1 && self.slots[0].cap.is_none());
+        assert!(n <= self.slot_limit as usize && self.slot_limit <= MAX_SLOTS);
+        let mut live = 0;
+        for s in &self.slots {
+            assert!(s.generation <= GEN_LIMIT);
+            if s.cap.is_some() {
+                // Un slot retirado está vacío para siempre.
+                assert!(s.generation < GEN_LIMIT);
+                live += 1;
+            }
+        }
+        assert!(live == self.live && self.live <= self.limit as usize);
+        for i in 0..self.free.len() {
+            let f = self.free[i] as usize;
+            assert!(f != 0 && f < n);
+            assert!(self.slots[f].cap.is_none() && self.slots[f].generation < GEN_LIMIT);
+            for &g in &self.free[..i] {
+                assert!(g as usize != f);
+            }
+        }
     }
 }
 
@@ -203,7 +242,7 @@ mod tests {
         assert_ne!(h.slot(), 0);
         assert_eq!(cs.get(h).unwrap().object, 7);
         assert_eq!(cs.remove(h).unwrap().object, 7);
-        assert_eq!(cs.get(h), Err(Error::BadHandle));
+        assert!(cs.get(h) == Err(Error::BadHandle));
         assert!(cs.is_empty());
     }
 
@@ -217,6 +256,7 @@ mod tests {
         assert_ne!(h1, h2); // ...con otra generación
         assert_eq!(cs.get(h1), Err(Error::BadHandle));
         assert_eq!(cs.get(h2).unwrap().object, 2);
+        cs.check_invariants();
     }
 
     #[test]
@@ -295,7 +335,8 @@ mod tests {
         }
         let h = cs.insert(cap(3, Rights::SEND)).unwrap();
         assert_ne!(h.slot(), old.slot()); // el slot 1 quedó retirado
-        assert_eq!(cs.get(old), Err(Error::BadHandle));
+        assert!(cs.get(old) == Err(Error::BadHandle));
+        cs.check_invariants();
     }
 
     #[test]
@@ -321,7 +362,252 @@ mod tests {
             .collect();
         assert_eq!(cs.clear().len(), 5);
         for h in hs {
-            assert_eq!(cs.get(h), Err(Error::BadHandle));
+            assert!(cs.get(h) == Err(Error::BadHandle));
         }
+    }
+}
+
+/// Pruebas de Kani: exploran *todos* los valores posibles de las entradas
+/// (handles, derechos, límites, orden de operaciones) dentro de cotas chicas,
+/// y comprueban que no hay panics, overflows ni índices fuera de rango, y que
+/// se mantienen los invariantes. Correr con `cargo kani -p nsos-kcore`.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    fn any_handle(issued: &[CapHandle]) -> CapHandle {
+        if kani::any() && !issued.is_empty() {
+            let i: usize = kani::any();
+            kani::assume(i < issued.len());
+            issued[i]
+        } else {
+            CapHandle(kani::any())
+        }
+    }
+
+    fn any_cap() -> Cap<u8> {
+        Cap {
+            object: kani::any(),
+            rights: Rights(kani::any()),
+        }
+    }
+
+    /// Una CSpace cualquiera que cumpla los invariantes: 3 slots (más el 0)
+    /// con generaciones y contenidos arbitrarios, incluidos slots retirados,
+    /// lista libre en cualquier orden, y límites arbitrarios compatibles.
+    /// Se arma directamente (con capacidad reservada, para que el verificador
+    /// no tenga que razonar sobre realocaciones).
+    fn any_state() -> (CSpace<u8>, Vec<CapHandle>) {
+        const N: usize = 3;
+        let mut slots = Vec::with_capacity(N + 3);
+        let mut free = Vec::with_capacity(N + 3);
+        let mut issued = Vec::with_capacity(N);
+        slots.push(Slot {
+            generation: 0,
+            cap: None,
+        });
+        let mut live = 0;
+        for i in 1..N {
+            let generation: u32 = kani::any();
+            kani::assume(generation <= GEN_LIMIT);
+            let full = generation < GEN_LIMIT && kani::any();
+            slots.push(Slot {
+                generation,
+                cap: if full { Some(any_cap()) } else { None },
+            });
+            if full {
+                live += 1;
+                issued.push(CapHandle::new(i as u32, generation).unwrap());
+            } else if generation < GEN_LIMIT {
+                free.push(i as u32);
+            } else {
+                // retirado: su último handle era de la generación anterior
+                issued.push(CapHandle::new(i as u32, generation - 1).unwrap());
+            }
+        }
+        if free.len() == 2 && kani::any() {
+            free.swap(0, 1);
+        }
+        let limit: u32 = kani::any();
+        kani::assume(limit as usize >= live && limit <= 3);
+        let extra: u32 = kani::any();
+        kani::assume(extra <= 2);
+        let cs = CSpace {
+            slots,
+            free,
+            limit,
+            slot_limit: N as u32 + extra,
+            live,
+        };
+        cs.check_invariants();
+        (cs, issued)
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn insert_any() {
+        let (mut cs, _) = any_state();
+        let c = any_cap();
+        if let Ok(h) = cs.insert(c.clone()) {
+            assert!(cs.get(h) == Ok(&c));
+        }
+        cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn get_with_any() {
+        let (cs, issued) = any_state();
+        let need = Rights(kani::any());
+        if let Ok(c) = cs.get_with(any_handle(&issued), need) {
+            assert!(c.rights.contains(need));
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn remove_any() {
+        let (mut cs, issued) = any_state();
+        let before = cs.len();
+        let h = any_handle(&issued);
+        if cs.remove(h).is_ok() {
+            assert!(cs.get(h) == Err(Error::BadHandle));
+            assert_eq!(cs.len(), before - 1);
+        } else {
+            assert_eq!(cs.len(), before);
+        }
+        cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn dup_any() {
+        let (mut cs, issued) = any_state();
+        let h = any_handle(&issued);
+        let src = cs.get(h).map(|c| c.rights);
+        if let Ok(d) = cs.dup(h, Rights(kani::any())) {
+            let r = cs.get(d).unwrap().rights;
+            assert!(r.is_subset_of(src.unwrap()));
+        }
+        cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(4)]
+    #[kani::solver(cadical)]
+    fn remove_all_any() {
+        let (mut cs, issued) = any_state();
+        let before = cs.len();
+        // Dos handles: cubre repetidos, mezclas válidos/ inválidos y atomicidad.
+        let n = 2;
+        let mut hs = Vec::with_capacity(2);
+        for _ in 0..n {
+            hs.push(any_handle(&issued));
+        }
+        let need = Rights(kani::any());
+        match cs.remove_all(&hs, need) {
+            Ok(got) => {
+                assert_eq!(got.len(), n);
+                assert!(got.iter().all(|c| c.rights.contains(need)));
+                assert_eq!(cs.len(), before - n);
+            }
+            Err(_) => assert_eq!(cs.len(), before), // atómico
+        }
+        cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn insert_all_any() {
+        let (mut cs, _) = any_state();
+        let before = cs.len();
+        let n = 2;
+        let mut caps = Vec::with_capacity(2);
+        for _ in 0..n {
+            caps.push(any_cap());
+        }
+        match cs.insert_all(caps) {
+            Ok(hs) => {
+                assert_eq!(hs.len(), n);
+                assert_eq!(cs.len(), before + n);
+            }
+            Err((_, back)) => {
+                assert_eq!(back.len(), n); // devuelve todo
+                assert_eq!(cs.len(), before);
+            }
+        }
+        cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(4)]
+    #[kani::solver(cadical)]
+    fn clear_any() {
+        let (mut cs, issued) = any_state();
+        let before = cs.len();
+        let h = any_handle(&issued);
+        assert_eq!(cs.clear().len(), before);
+        assert!(cs.is_empty());
+        assert!(cs.get(h).is_err());
+        cs.check_invariants();
+    }
+
+    /// Un handle cualquiera (incluso fabricado) nunca hace fallar a `get`.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn cspace_get_any_handle() {
+        let mut cs: CSpace<u8> = CSpace::new(2);
+        let _ = cs.insert(any_cap());
+        let h = CapHandle(kani::any());
+        let _ = cs.get(h);
+        let _ = cs.get_with(h, Rights(kani::any()));
+    }
+
+    /// Slot con una generación cualquiera: quitar nunca hace que la
+    /// generación dé la vuelta, y el handle viejo no vuelve a valer aunque se
+    /// reuse el slot (o se use uno nuevo, si se retiró).
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn cspace_generation_never_wraps() {
+        let g: u32 = kani::any();
+        kani::assume(g < GEN_LIMIT);
+        let mut slots = Vec::with_capacity(4);
+        slots.push(Slot {
+            generation: 0,
+            cap: None,
+        });
+        slots.push(Slot {
+            generation: g,
+            cap: Some(any_cap()),
+        });
+        let mut cs = CSpace {
+            slots,
+            free: Vec::with_capacity(4),
+            limit: 2,
+            slot_limit: 3,
+            live: 1,
+        };
+        cs.check_invariants();
+        let old = CapHandle::new(1, g).unwrap();
+        assert!(cs.remove(old).is_ok());
+        cs.check_invariants();
+        let h = cs.insert(any_cap()).unwrap();
+        assert_ne!(h, old);
+        assert!(cs.get(old) == Err(Error::BadHandle));
+        cs.check_invariants();
+    }
+
+    /// Los límites extremos no desbordan.
+    #[kani::proof]
+    fn cspace_new_any_limit() {
+        let cs: CSpace<u8> = CSpace::new(kani::any());
+        assert!(cs.limit < MAX_SLOTS && cs.slot_limit <= MAX_SLOTS);
+        cs.check_invariants();
     }
 }
