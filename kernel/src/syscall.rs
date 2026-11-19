@@ -31,12 +31,13 @@ pub fn handle(f: &mut TrapFrame) {
             drop(cell);
             sched::exit();
         }
-        Some(s) => dispatch(s, &cell, f.rdi, f.rsi, f.rdx),
+        Some(s) => dispatch(s, &cell, [f.rdi, f.rsi, f.rdx, f.r10]),
     };
     f.rax = encode_ret(r) as u64;
 }
 
-fn dispatch(s: Syscall, cell: &Arc<Cell>, a0: u64, a1: u64, a2: u64) -> SysResult<u64> {
+fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
+    let [a0, a1, a2, a3] = a;
     let h = |v: u64| CapHandle(v as u32);
     match s {
         Syscall::DebugLog => debug_log(cell, a0, a1),
@@ -78,6 +79,10 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a0: u64, a1: u64, a2: u64) -> SysResul
         Syscall::ChannelCreate => channel_create(cell, a0),
         Syscall::ChannelSend => channel_send(cell, h(a0), a1, a2),
         Syscall::ChannelRecv => channel_recv(cell, h(a0), a1, a2),
+        Syscall::MemMap => mem_map(cell, h(a0), a1, a2),
+        Syscall::MemInfo => mem_info(cell, h(a0), a1),
+        Syscall::IoPortRead => ioport(cell, h(a0), a1, a2, None),
+        Syscall::IoPortWrite => ioport(cell, h(a0), a1, a2, Some(a3)),
         _ => Err(Error::Unsupported),
     }
 }
@@ -121,6 +126,99 @@ fn channel_create(cell: &Cell, out: u64) -> SysResult<u64> {
 fn endpoint(cell: &Cell, h: CapHandle, need: Rights) -> SysResult<Arc<cell::Endpoint>> {
     match &cell.cspace.lock().get_with(h, need)?.object {
         KObject::Channel(e) => Ok(e.clone()),
+        _ => Err(Error::WrongType),
+    }
+}
+
+/// `mem_map(h, vaddr, rights)`: los derechos pedidos deben estar en la
+/// capacidad; siempre hace falta READ; nunca WRITE y EXEC juntos.
+fn mem_map(cell: &Cell, h: CapHandle, vaddr: u64, want: u64) -> SysResult<u64> {
+    let want = Rights::from_bits(want as u32).ok_or(Error::InvalidArgs)?;
+    if !want.contains(Rights::READ)
+        || want.bits() & !(Rights::READ | Rights::WRITE | Rights::EXEC).bits() != 0
+    {
+        return Err(Error::InvalidArgs);
+    }
+    let obj = match cell.cspace.lock().get_with(h, want)? {
+        Cap {
+            object: KObject::Memory(m),
+            ..
+        } => m.clone(),
+        _ => return Err(Error::WrongType),
+    };
+    cell.map_memory(
+        obj,
+        vaddr,
+        want.contains(Rights::WRITE),
+        want.contains(Rights::EXEC),
+    )?;
+    Ok(vaddr)
+}
+
+fn mem_info(cell: &Cell, h: CapHandle, out: u64) -> SysResult<u64> {
+    let (size, phys) = match cell.cspace.lock().get(h)? {
+        Cap {
+            object: KObject::Memory(m),
+            rights,
+        } => {
+            let phys = if rights.contains(Rights::CONTROL) {
+                m.phys
+            } else {
+                0
+            };
+            (m.size(), phys)
+        }
+        _ => return Err(Error::WrongType),
+    };
+    let mut b = [0u8; 16];
+    b[0..8].copy_from_slice(&size.to_le_bytes());
+    b[8..16].copy_from_slice(&phys.to_le_bytes());
+    copy_to_user(cell, out, &b)?;
+    Ok(0)
+}
+
+/// `ioport_read(h, off, width)` / `ioport_write(h, off, width, valor)`.
+/// `off` es relativo al inicio del rango; el acceso entero debe caer dentro.
+fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
+    use crate::arch::port::Port;
+    let need = if value.is_some() {
+        Rights::WRITE
+    } else {
+        Rights::READ
+    };
+    let (base, len) = match cell.cspace.lock().get_with(h, need)? {
+        Cap {
+            object: KObject::IoPorts(r),
+            ..
+        } => (r.base as u64, r.len as u64),
+        _ => return Err(Error::WrongType),
+    };
+    if !matches!(width, 1 | 2 | 4) || off.checked_add(width).is_none_or(|e| e > len) {
+        return Err(Error::InvalidArgs);
+    }
+    let port = (base + off) as u16;
+    // SAFETY: el kernel entregó este rango de puertos a la cell al crearla
+    // (dispositivo PCI descubierto por el kernel, que no lo usa), y el
+    // acceso cae completamente dentro del rango.
+    unsafe {
+        Ok(match (width, value) {
+            (1, None) => Port::<u8>::new(port).read() as u64,
+            (2, None) => Port::<u16>::new(port).read() as u64,
+            (4, None) => Port::<u32>::new(port).read() as u64,
+            (1, Some(v)) => {
+                Port::<u8>::new(port).write(v as u8);
+                0
+            }
+            (2, Some(v)) => {
+                Port::<u16>::new(port).write(v as u16);
+                0
+            }
+            (_, Some(v)) => {
+                Port::<u32>::new(port).write(v as u32);
+                0
+            }
+            _ => unreachable!(),
+        })
     }
 }
 
@@ -137,6 +235,7 @@ fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
             let mut cs = cell.cspace.lock();
             let ep = match &cs.get_with(h, Rights::SEND)?.object {
                 KObject::Channel(e) => e.clone(),
+                _ => return Err(Error::WrongType),
             };
             ep.send_with(wait, || {
                 let caps = cs.remove_all(msg.cap_slice(), Rights::GRANT)?;

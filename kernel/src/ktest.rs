@@ -371,6 +371,15 @@ pub fn run_cells() -> bool {
             })
         ),
     );
+    if crate::pci::find(crate::VIRTIO_CONSOLE.0, crate::VIRTIO_CONSOLE.1).is_some() {
+        check(
+            "virtcon (driver virtio) terminó con 0",
+            status("virtcon") == Some(Exited(0)),
+        );
+        check("hola terminó con 0", status("hola") == Some(Exited(0)));
+    } else {
+        kprintln!("  (sin virtio-console: se omite el driver)");
+    }
     check(
         "la memoria de las cells se liberó",
         pmm::stats().free_frames == free_before,

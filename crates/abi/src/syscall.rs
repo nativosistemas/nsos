@@ -49,6 +49,9 @@ pub enum Syscall {
     MemMap = 41,
     /// `mem_unmap(vaddr, len)`.
     MemUnmap = 42,
+    /// `mem_info(h, out: *mut MemInfo)`: tamaño y, si la capacidad tiene
+    /// `CONTROL`, la dirección física (solo para DMA de drivers).
+    MemInfo = 43,
 
     // ---- Cells (5x) ----
     /// `cell_spawn(image, caps: *const CapHandle, n, out_ctrl) -> h_cell`:
@@ -62,9 +65,9 @@ pub enum Syscall {
     // ---- Hardware para drivers (6x) ----
     /// `irq_ack(h_irq)`: rearma la línea de interrupción.
     IrqAck = 60,
-    /// `ioport_read(h_ports, port, width) -> valor`.
+    /// `ioport_read(h_ports, off, width) -> valor` (`off` relativo al rango).
     IoPortRead = 61,
-    /// `ioport_write(h_ports, port, width, valor)`.
+    /// `ioport_write(h_ports, off, width, valor)` (`off` relativo al rango).
     IoPortWrite = 62,
 }
 
@@ -88,6 +91,7 @@ impl Syscall {
             40 => MemCreate,
             41 => MemMap,
             42 => MemUnmap,
+            43 => MemInfo,
             50 => CellSpawn,
             51 => CellKill,
             52 => CellStatus,
@@ -97,6 +101,16 @@ impl Syscall {
             _ => return None,
         })
     }
+}
+
+/// Salida de `mem_info`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct MemInfo {
+    /// Tamaño en bytes (múltiplo de 4096).
+    pub size: u64,
+    /// Dirección física del primer byte (contiguo), o 0 sin `CONTROL`.
+    pub phys: u64,
 }
 
 /// Flags de `channel_send` / `channel_recv`.

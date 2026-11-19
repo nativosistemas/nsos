@@ -38,6 +38,10 @@ pub const USER_STACK_SIZE: u64 = 64 * 1024;
 pub enum KObject {
     /// Extremo de canal.
     Channel(Arc<Endpoint>),
+    /// Objeto de memoria (marcos contiguos).
+    Memory(Arc<MemObj>),
+    /// Rango de puertos de E/S.
+    IoPorts(Arc<PortRange>),
 }
 
 impl KObject {
@@ -45,15 +49,62 @@ impl KObject {
     pub fn object_type(&self) -> ObjectType {
         match self {
             KObject::Channel(_) => ObjectType::Channel,
+            KObject::Memory(_) => ObjectType::Memory,
+            KObject::IoPorts(_) => ObjectType::IoPorts,
         }
     }
     /// Identificador para depuración.
     pub fn koid(&self) -> u64 {
         match self {
             KObject::Channel(e) => Arc::as_ptr(e) as u64,
+            KObject::Memory(m) => Arc::as_ptr(m) as u64,
+            KObject::IoPorts(p) => Arc::as_ptr(p) as u64,
         }
     }
 }
+
+/// Objeto de memoria: `pages` marcos físicos contiguos, a cero al crearse.
+/// Se libera cuando muere su última capacidad *y* su último mapeo.
+pub struct MemObj {
+    pub phys: PhysAddr,
+    pub pages: usize,
+}
+
+impl MemObj {
+    /// Reserva `pages` marcos contiguos.
+    pub fn new(pages: usize) -> Option<Arc<MemObj>> {
+        let phys = pmm::alloc_contiguous(pages, 1)?;
+        // SAFETY: marcos recién reservados, nuestros, en el HHDM.
+        unsafe {
+            core::ptr::write_bytes(phys_to_virt(phys) as *mut u8, 0, pages * PAGE_SIZE as usize)
+        };
+        Some(Arc::new(MemObj { phys, pages }))
+    }
+
+    /// Tamaño en bytes.
+    pub fn size(&self) -> u64 {
+        self.pages as u64 * PAGE_SIZE
+    }
+}
+
+impl Drop for MemObj {
+    fn drop(&mut self) {
+        for i in 0..self.pages {
+            pmm::free_frame(self.phys + i as u64 * PAGE_SIZE);
+        }
+    }
+}
+
+/// Rango de puertos `[base, base+len)` entregado a un driver.
+pub struct PortRange {
+    pub base: u16,
+    pub len: u16,
+}
+
+/// Derechos de una capacidad de memoria DMA para un driver.
+pub const DMA_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::CONTROL.0);
+/// Derechos de un rango de puertos para un driver.
+pub const PORT_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 
 /// Capacidad del kernel.
 pub type KCap = Cap<KObject>;
@@ -343,6 +394,9 @@ pub struct Cell {
     pub cspace: IrqSpinLock<CSpace<KObject>>,
     /// Marcos de usuario propiedad de la cell.
     frames: IrqSpinLock<Vec<PhysAddr>>,
+    /// Objetos de memoria mapeados (los mantiene vivos mientras estén
+    /// mapeados, aunque la cell suelte la capacidad).
+    mappings: IrqSpinLock<Vec<Arc<MemObj>>>,
 }
 
 static NEXT_CELL: AtomicU64 = AtomicU64::new(1);
@@ -446,6 +500,7 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
         space: IrqSpinLock::new(Some(space)),
         cspace: IrqSpinLock::new(cspace),
         frames: IrqSpinLock::new(frames),
+        mappings: IrqSpinLock::new(Vec::new()),
     });
     kprintln!(
         "cell {} \"{}\": {} segmentos, entrada {:#x}",
@@ -480,5 +535,58 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
     }
     for p in core::mem::take(&mut *cell.frames.lock()) {
         pmm::free_frame(p);
+    }
+    drop(core::mem::take(&mut *cell.mappings.lock()));
+}
+
+impl Cell {
+    /// Mapea `obj` en `vaddr` con los permisos pedidos (W^X).
+    pub fn map_memory(
+        &self,
+        obj: Arc<MemObj>,
+        vaddr: u64,
+        write: bool,
+        exec: bool,
+    ) -> Result<(), Error> {
+        if write && exec {
+            return Err(Error::InvalidArgs);
+        }
+        if !vaddr.is_multiple_of(PAGE_SIZE) || vaddr < elf::USER_MIN {
+            return Err(Error::InvalidArgs);
+        }
+        let end = vaddr.checked_add(obj.size()).ok_or(Error::InvalidArgs)?;
+        if end > elf::USER_MAX {
+            return Err(Error::InvalidArgs);
+        }
+        let mut g = self.space.lock();
+        let space = g.as_mut().ok_or(Error::InvalidArgs)?;
+        // Todo o nada: comprobar que el rango está libre antes de mapear.
+        for i in 0..obj.pages as u64 {
+            if space.translate(vaddr + i * PAGE_SIZE).is_some() {
+                return Err(Error::InvalidArgs);
+            }
+        }
+        let mut f = flags::USER;
+        if write {
+            f |= flags::WRITABLE;
+        }
+        if !exec {
+            f |= flags::NO_EXECUTE;
+        }
+        let mut alloc = pmm::alloc_frame;
+        for i in 0..obj.pages as u64 {
+            space
+                .map(
+                    vaddr + i * PAGE_SIZE,
+                    obj.phys + i * PAGE_SIZE,
+                    PageSize::Size4K,
+                    f,
+                    &mut alloc,
+                )
+                .map_err(|_| Error::NoMemory)?;
+        }
+        drop(g);
+        self.mappings.lock().push(obj);
+        Ok(())
     }
 }

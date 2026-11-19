@@ -37,6 +37,23 @@ impl PortWidth for u8 {
     }
 }
 
+impl PortWidth for u16 {
+    unsafe fn read(port: u16) -> u16 {
+        let v: u16;
+        // SAFETY: delegada al llamador (Port::new).
+        unsafe {
+            asm!("in ax, dx", out("ax") v, in("dx") port, options(nomem, nostack, preserves_flags))
+        };
+        v
+    }
+    unsafe fn write(port: u16, v: u16) {
+        // SAFETY: delegada al llamador (Port::new).
+        unsafe {
+            asm!("out dx, ax", in("dx") port, in("ax") v, options(nomem, nostack, preserves_flags))
+        };
+    }
+}
+
 impl PortWidth for u32 {
     unsafe fn read(port: u16) -> u32 {
         let v: u32;

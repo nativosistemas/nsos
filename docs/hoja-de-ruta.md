@@ -8,7 +8,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 2 | Imagen booteable mínima: Limine + kernel que imprime por serial (BIOS y UEFI) | ✅ |
 | 3 | Allocador físico/virtual, paginación, GDT/IDT, scheduler básico | ✅ 9 tests en QEMU + 7 en host |
 | 4 | IPC seguro (canales + transferencia de capacidades) y creación de cells | ✅ ping/pong/intruso en anillo 3 |
-| 5 | "hello cell" y driver virtio de consola como cell | ⏳ siguiente |
+| 5 | "hello cell" y driver virtio de consola como cell | ✅ `virtcon` (driver) + `hola` (cliente) |
 | 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ⏳ matar ya funciona; falta reiniciar (supervisor) |
 | 7 | Actualización en vivo de una cell | ○ |
 | 8 | Tests de aislamiento y benchmark de IPC | ⏳ primeros tests (`intruso`) y benchmark de ida y vuelta |
@@ -63,15 +63,34 @@ Cada hito se entrega como un PR con tests y documentación.
   e `intruso` (8 abusos bloqueados y lectura del kernel atrapada por la MMU).
 
 Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
-objetos `Memory` (zero-copy), `cell_spawn` desde una cell (supervisor),
-`Irq`/`IoPorts` para drivers.
+`mem_create` (zero-copy entre cells), `cell_spawn` desde una cell
+(supervisor), `Irq` para drivers.
 
-## Hito 5 en detalle (próximo)
+## Hito 5 (hecho)
 
-1. Objetos `Memory`, `Irq` e `IoPorts` y sus syscalls.
-2. `cell_spawn` desde una cell `init` que hace de supervisor.
-3. Driver virtio-console como cell (PCI legacy de QEMU) y "hello cell" que
-   escribe a través de él.
+* Objetos `Memory` (marcos contiguos, a cero) e `IoPorts` (rango de
+  puertos). Syscalls `mem_map`, `mem_info` (la dirección física solo con
+  `CONTROL`, para DMA), `ioport_read` y `ioport_write` (desplazamiento
+  relativo al rango concedido; nunca un puerto fuera de él).
+* Enumeración PCI mínima en el kernel (`kernel/src/pci.rs`): encuentra la
+  consola virtio (`1af4:1003`), habilita E/S y bus master y entrega BAR0
+  como `IoPorts`.
+* Cell `virtcon`: driver virtio-console (PCI legacy) en anillo 3. Configura
+  la cola de transmisión, atiende `WRITE` por un canal y responde `WRITTEN`.
+  Sin interrupciones por ahora: sondea el anillo "used" cediendo la CPU.
+* Cell `hola`: escribe tres líneas a través del driver. El test de humo
+  exige que el texto aparezca en la consola virtio de QEMU (un archivo) y
+  que ambas cells terminen con 0 (al cerrarse `hola`, `virtcon` ve
+  `PeerClosed` y termina).
+
+## Hito 6 en detalle (próximo)
+
+1. `cell_spawn`, `cell_kill`, `cell_status` desde una cell `init` que hace
+   de supervisor.
+2. Política de reinicio: si una cell falla, el supervisor la vuelve a
+   arrancar y reconecta sus canales.
+3. Test: una cell que falla a propósito y se reinicia sin afectar a las
+   demás.
 
 ## Riesgos
 
