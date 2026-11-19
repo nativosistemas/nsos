@@ -22,6 +22,10 @@ casos borde.
 | `cspace_new_any_limit` | `crates/kcore/src/cspace.rs` | `CSpace::new` con cualquier límite. |
 | `garbage_no_panic_3` | `crates/kcore/src/ipc_gc.rs` | Recolector con cualquier grafo de 3 nodos (ciclos, índices fuera de rango): sin panics. |
 | `garbage_spec_2` | `crates/kcore/src/ipc_gc.rs` | Con cualquier grafo de 2 nodos, la respuesta cumple la especificación de `Sys.gc`: lo que alguien tiene no es basura, lo que viaja en la cola de un vivo está vivo, y la basura solo aparece en colas de basura. |
+| `walk_any_tables` | `crates/kcore/src/paging.rs` | Con tablas de páginas de contenido cualquiera (incluso corruptas), `map`, `unmap` y `translate` no entran en pánico ni desbordan, y nunca usan un índice fuera de la tabla. |
+| `map_then_translate` | `crates/kcore/src/paging.rs` | Mapear cualquier página de la mitad baja: después se traduce a esa física con exactamente los permisos pedidos (USER, WRITABLE, NX), y no se escribe nada en la mitad alta del PML4 ni en las tablas del kernel. |
+| `unmap_only_that_page` | `crates/kcore/src/paging.rs` | Con dos páginas mapeadas, `unmap` de cualquier dirección quita solo la página pedida. |
+| `user_range_stays_low` | `crates/kcore/src/paging.rs` | Un rango que acepta `user_range_ok` (lo que exige `mem_map`) no desborda y queda entero en la mitad baja. |
 
 `check_invariants` (en `cspace.rs`) también corre en los tests unitarios.
 

@@ -149,6 +149,11 @@ impl<T> CSpace<T> {
         Ok(out)
     }
 
+    /// Recorre las capacidades vivas.
+    pub fn caps(&self) -> impl Iterator<Item = &Cap<T>> {
+        self.slots.iter().filter_map(|s| s.cap.as_ref())
+    }
+
     /// Inserta varias de forma atómica (si no hay espacio, no inserta nada).
     pub fn insert_all(
         &mut self,

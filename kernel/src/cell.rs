@@ -445,9 +445,10 @@ pub struct Cell {
     pub cspace: IrqSpinLock<CSpace<KObject>>,
     /// Marcos de usuario propiedad de la cell.
     frames: IrqSpinLock<Vec<PhysAddr>>,
-    /// Objetos de memoria mapeados (los mantiene vivos mientras estén
-    /// mapeados, aunque la cell suelte la capacidad).
-    mappings: IrqSpinLock<Vec<Arc<MemObj>>>,
+    /// Objetos de memoria mapeados. Cada mapeo vale mientras la cell tenga
+    /// una capacidad al objeto con los derechos del mapeo: ver
+    /// `revoke_mappings`.
+    mappings: IrqSpinLock<Vec<Mapping>>,
     /// Hilo principal (para despertarlo si se pide matarla).
     thread: AtomicU64,
     /// Se pidió terminarla (`cell_kill`): el hilo termina la próxima vez que
@@ -658,11 +659,8 @@ impl Cell {
         if write && exec {
             return Err(Error::InvalidArgs);
         }
-        if !vaddr.is_multiple_of(PAGE_SIZE) || vaddr < elf::USER_MIN {
-            return Err(Error::InvalidArgs);
-        }
-        let end = vaddr.checked_add(obj.size()).ok_or(Error::InvalidArgs)?;
-        if end > elf::USER_MAX {
+        // Solo la mitad baja: demostrado con Kani en `nsos_kcore::paging`.
+        if !nsos_kcore::paging::user_range_ok(vaddr, obj.size(), elf::USER_MIN, elf::USER_MAX) {
             return Err(Error::InvalidArgs);
         }
         let mut g = self.space.lock();
@@ -693,7 +691,71 @@ impl Cell {
                 .map_err(|_| Error::NoMemory)?;
         }
         drop(g);
-        self.mappings.lock().push(obj);
+        self.mappings.lock().push(Mapping {
+            obj,
+            vaddr,
+            write,
+            exec,
+        });
         Ok(())
+    }
+
+    /// Revocación: quita los mapeos de objetos de memoria para los que la
+    /// cell ya no tiene una capacidad con los derechos del mapeo (porque la
+    /// envió, la pasó a una cell hija o la soltó). Se llama después de toda
+    /// operación que saca capacidades de la CSpace de la cell, desde la
+    /// propia cell (su espacio está activo, así que `invlpg` alcanza).
+    ///
+    /// Modelo y demostración: `verification/lean/Nsos/Memory.lean`.
+    pub fn revoke_mappings(&self) {
+        let stale: Vec<Mapping> = {
+            let mut maps = self.mappings.lock();
+            if maps.is_empty() {
+                return;
+            }
+            let cs = self.cspace.lock();
+            let (keep, stale) = core::mem::take(&mut *maps)
+                .into_iter()
+                .partition(|m| cs.caps().any(|c| m.allowed_by(c)));
+            *maps = keep;
+            stale
+        };
+        if stale.is_empty() {
+            return;
+        }
+        let mut g = self.space.lock();
+        if let Some(space) = g.as_mut() {
+            for m in &stale {
+                for i in 0..m.obj.pages as u64 {
+                    space.unmap(m.vaddr + i * PAGE_SIZE);
+                }
+            }
+        }
+        drop(g);
+        // Soltar los objetos fuera de los locks (puede liberar marcos).
+        drop(stale);
+    }
+}
+
+/// Un objeto de memoria mapeado en una cell.
+struct Mapping {
+    obj: Arc<MemObj>,
+    vaddr: u64,
+    write: bool,
+    exec: bool,
+}
+
+impl Mapping {
+    /// `c` es una capacidad a este objeto con los derechos del mapeo.
+    fn allowed_by(&self, c: &Cap<KObject>) -> bool {
+        let mut need = Rights::READ;
+        if self.write {
+            need = need | Rights::WRITE;
+        }
+        if self.exec {
+            need = need | Rights::EXEC;
+        }
+        matches!(&c.object, KObject::Memory(m) if Arc::ptr_eq(m, &self.obj))
+            && c.rights.contains(need)
     }
 }

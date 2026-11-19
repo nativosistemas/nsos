@@ -23,7 +23,7 @@ físico.
 
 | Propiedad | Mecanismo | Evidencia |
 |---|---|---|
-| Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells | `intruso` (lectura del kernel → #PF), `fragil`; ktest de W^X |
+| Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells | `intruso` (lectura del kernel → #PF), `fragil`; ktest de W^X; Lean: `Mem.step_iso`, `Mem.never_maps_foreign`; Kani: `map_then_translate`, `user_range_stays_low` |
 | El kernel no puede ser engañado para tocar memoria ajena en nombre de una cell | `usercopy` traduce cada página con las tablas de la cell y exige USER (y WRITABLE); nunca desreferencia punteros de usuario | `intruso`: punteros al kernel y a código propio; `caos`: 50 000 syscalls al azar |
 | …y eso lo hace cumplir la CPU | **SMAP**: el kernel no puede acceder a páginas de usuario; **SMEP**: no puede ejecutarlas. `AC` se limpia en cada entrada (SFMASK y `clac`) | `test-smap-fault`: una lectura directa del kernel a una página de usuario termina en #PF |
 | Nadie fabrica ni amplía capacidades | Handles con generación; derechos que solo se atenúan; `GRANT` para moverlas | Lean: `no_forging`, `run_no_amplification`, `send_requires_grant`, `stale_handle_never_revives`; Kani sobre `kcore`; `intruso` |
@@ -51,11 +51,12 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    lugar de la RAM. Un driver es, por lo tanto, de confianza respecto a la
    memoria. *Mitigación futura*: programar el IOMMU (VT-d) para que cada
    dispositivo solo vea los objetos `Memory` de su driver.
-3. **Mapeos que sobreviven a mover una capacidad `Memory`.** Quien mapeó un
-   objeto lo sigue viendo después de entregarlo. En la actualización en vivo,
-   la versión vieja podría escribir el estado que ya usa la nueva. *Pendiente*:
-   `mem_unmap` y decidir si mover o soltar una capacidad `Memory` revoca los
-   mapeos; conviene modelarlo en Lean junto con el IPC.
+3. **Mapeos que sobreviven a mover una capacidad `Memory`.** *Resuelto*:
+   un mapeo vale mientras la cell tenga una capacidad al objeto con los
+   derechos del mapeo. Al enviarla, pasarla a una cell hija o soltarla, el
+   kernel quita el mapeo (`Cell::revoke_mappings`). Demostrado en
+   `Mem.step_iso` y `Mem.send_revokes` (verification/lean). Falta
+   `mem_unmap` para soltar un mapeo sin soltar la capacidad.
 4. **Agotamiento de recursos (DoS).** No hay cuotas: una cell puede llenar
    su CSpace (1024 entradas) de objetos `Memory` de hasta 1 MiB, o crear
    cells sin límite si tiene una imagen, y así dejar sin memoria al resto.

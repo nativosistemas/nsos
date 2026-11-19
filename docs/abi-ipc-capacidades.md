@@ -238,7 +238,8 @@ Se implementa encima de las primitivas anteriores, por cell:
    mismos; solo cambió quién tiene el otro extremo. Los mensajes encolados
    viajan con el extremo.
 6. Si la nueva rechaza, el supervisor devuelve estado y canales a la vieja
-   con `UPGRADE_ROLLBACK` y la vieja retoma releyendo el estado (rollback).
+   con `UPGRADE_ROLLBACK` y la vieja retoma: vuelve a mapear el objeto (al
+   enviarlo perdió el mapeo) y relee el estado (rollback).
    Si la nueva *falla* con las capacidades, el rollback no es posible: el
    extremo se cierra y los clientes ven `PEER_CLOSED`.
 
@@ -264,7 +265,10 @@ El kernel solo enmascara la IRQ, activa `IRQ_PENDING` y espera `irq_ack`.
 
 * `mem_map(h, vaddr, rights)`: mapea el objeto entero en `vaddr` (alineada a
   página, en el rango de usuario, sin pisar otro mapeo). Exige `READ` en la
-  capacidad y los derechos pedidos; W^X se aplica también aquí.
+  capacidad y los derechos pedidos; W^X se aplica también aquí. El mapeo
+  dura mientras la cell tenga una capacidad al objeto con esos derechos: si
+  la envía, la pasa a una cell hija o la suelta, el kernel lo quita
+  (revocación, demostrada en `Mem.step_iso`).
 * `mem_info(h, out)`: escribe `MemInfo { size, phys }`; `phys` es 0 salvo
   que la capacidad tenga `CONTROL`.
 * `ioport_read(h, off, width)` / `ioport_write(h, off, width, v)`: `width`

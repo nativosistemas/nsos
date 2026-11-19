@@ -13,7 +13,8 @@
 //! objeto **y** el extremo del cliente. Después espera la decisión:
 //! * `UPGRADE_COMMIT`: la nueva versión aceptó; termina con 0.
 //! * `UPGRADE_ROLLBACK [mem, ep]`: la nueva rechazó; recupera las
-//!   capacidades, **relee el contador de `mem`** y vuelve a atender.
+//!   capacidades, vuelve a mapear `mem` (al enviarlo perdió el mapeo),
+//!   **relee el contador** y vuelve a atender.
 //!
 //! Para que la prueba sea determinista, solo mira el canal de control
 //! después de atender `MIN_BEFORE_UPGRADE` pedidos desde que arrancó o
@@ -68,7 +69,9 @@ fn upgrade(
     match (m.header.label, m.cap_slice()) {
         (UPGRADE_COMMIT, []) => Ok(None),
         (UPGRADE_ROLLBACK, &[mem, client]) => {
-            // El mapeo sigue siendo nuestro: el estado se relee de ahí.
+            // Al enviar `mem` el kernel nos quitó el mapeo (revocación):
+            // hay que volver a mapearlo, en la misma dirección, y releer.
+            let state = mem_map(mem, STATE_VADDR, Rights::READ | Rights::WRITE)?;
             if state.read_u32(0) != STATE_MAGIC {
                 return Err(Error::BadMessage);
             }
