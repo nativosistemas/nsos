@@ -142,7 +142,13 @@ cliente ====canal==== contador-v1           cliente ====canal==== contador-v2
                          |  UPGRADE_STATE        ^                     ^
                          |  [Memory, extremo]    |   UPGRADE_RESTORE   |
                          +-------> init ---------+---------------------+
+                                    ^   UPGRADE_ACCEPT / UPGRADE_REJECT [Memory, extremo]
+                                    |   -> UPGRADE_COMMIT a la v1, o UPGRADE_ROLLBACK [Memory, extremo]
 ```
+
+El protocolo está modelado en Lean (`verification/lean/Nsos/Upgrade.lean`):
+con cualquier intercalado de pedidos, rechazos y aceptaciones, el cliente ve
+el contador sin saltos y solo atiende quien tiene estado y canal.
 
 ## Drivers en user-space
 
@@ -176,6 +182,7 @@ cells/intruso/     test de aislamiento
 cells/init/        supervisor: reinicia cells que fallan, mata cells
 cells/fragil|dormilona/  cells que fallan o no terminan, para el supervisor
 cells/contador-v1|v2/    servidor con estado en dos versiones (actualización en vivo)
+cells/contador-roto/  versión que rechaza el estado (prueba el rollback)
 cells/cliente/     cliente del contador
 cells/virtcon/     driver virtio-console en user-space
 cells/hola/        cliente del driver: escribe por la consola virtio

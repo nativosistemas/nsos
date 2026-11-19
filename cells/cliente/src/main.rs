@@ -2,8 +2,9 @@
 //!
 //! Capacidad de arranque 1: canal con el servidor. Pide `INC` una y otra vez
 //! y comprueba que el contador avanza de a uno, sin saltos ni retrocesos,
-//! aunque en el medio cambie la versión del servidor. Termina con 0 cuando
-//! vio al menos `MIN_PER_VERSION` respuestas de la versión 1 y de la 2.
+//! aunque en el medio haya un intento de actualización rechazado (rollback)
+//! y uno aceptado. Termina con 0 cuando vio al menos `MIN_V1` respuestas de
+//! la versión 1 (antes y después del rollback) y `MIN_V2` de la 2.
 
 #![no_std]
 #![no_main]
@@ -14,7 +15,8 @@ use nsos_rt::{bootstrap, channel_recv, channel_send, println};
 
 const INC: u64 = 1;
 const COUNT: u64 = 2;
-const MIN_PER_VERSION: u32 = 5;
+const MIN_V1: u32 = 10;
+const MIN_V2: u32 = 5;
 const MAX_REQUESTS: u64 = 10_000;
 
 nsos_rt::entry!(main);
@@ -51,7 +53,7 @@ fn main() -> i32 {
             last_version = version;
         }
         seen[version as usize] += 1;
-        if seen[1] >= MIN_PER_VERSION && seen[2] >= MIN_PER_VERSION {
+        if seen[1] >= MIN_V1 && seen[2] >= MIN_V2 {
             println!(
                 "cliente: {} pedidos sin saltos ({} a v1, {} a v2)",
                 count, seen[1], seen[2]

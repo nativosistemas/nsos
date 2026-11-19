@@ -6,7 +6,8 @@
 //! 2. el extremo de canal del cliente (con los pedidos que hayan quedado
 //!    encolados).
 //!
-//! Migra el estado (`CNT1` → `CNT2`, que además cuenta los pedidos que
+//! Valida el estado *sin escribirlo*, responde `UPGRADE_ACCEPT` y recién
+//! entonces lo migra (`CNT1` → `CNT2`, que además cuenta los pedidos que
 //! atendió esta versión) y sigue atendiendo al mismo cliente. Termina con 0
 //! cuando el cliente cierra el canal.
 
@@ -14,7 +15,7 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::msg::labels::UPGRADE_RESTORE;
+use nsos_rt::abi::msg::labels::{UPGRADE_ACCEPT, UPGRADE_RESTORE};
 use nsos_rt::abi::{Message, Rights};
 use nsos_rt::{bootstrap, channel_recv, channel_send, mem_map, println};
 
@@ -50,6 +51,9 @@ fn main() -> i32 {
             return 4;
         }
     };
+    if channel_send(ctrl, &Message::new(UPGRADE_ACCEPT, b"").unwrap(), 0).is_err() {
+        return 6;
+    }
     state.write_u32(0, MAGIC_V2);
     println!("contador-v2: estado restaurado (contador = {})", count);
     loop {

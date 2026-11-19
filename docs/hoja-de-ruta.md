@@ -10,7 +10,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 4 | IPC seguro (canales + transferencia de capacidades) y creación de cells | ✅ ping/pong/intruso en anillo 3 |
 | 5 | "hello cell" y driver virtio de consola como cell | ✅ `virtcon` (driver) + `hola` (cliente) |
 | 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ✅ supervisor `init` que reinicia `fragil` y mata `dormilona` |
-| 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente` |
+| 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente`, con rollback |
 | 8 | Tests de aislamiento y benchmark de IPC | ⏳ primeros tests (`intruso`) y benchmark de ida y vuelta |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ⏳ registro inicial en `docs/unsafe.md` |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ○ |
@@ -22,7 +22,7 @@ Cada hito se entrega como un PR con tests y documentación.
 - [x] Al menos 3 cells aisladas comunicándose por IPC (`init` con `fragil`, `ping`/`pong`, `hola`/`virtcon`).
 - [x] Un driver en user-space (`virtcon`).
 - [x] Un fallo de cell no afecta al kernel (la cell se termina, se libera su memoria y un supervisor puede reiniciarla).
-- [x] Actualización en vivo de una cell sin reinicio (protocolo de supervisor; falta el rollback).
+- [x] Actualización en vivo de una cell sin reinicio (protocolo de supervisor con rollback, modelado en Lean).
 - [ ] `unsafe` confinado y documentado (en curso: lint obligatorio + registro).
 - [ ] Benchmarks básicos de IPC y arranque (arranque medido con el TSC; IPC: ida y vuelta entre `ping` y `pong`; falta automatizar y comparar).
 
@@ -111,15 +111,33 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   2. Envía `UPGRADE_PREPARE` a `contador-v1`, que deja de atender, escribe
      su estado (formato `CNT1`) en un objeto `Memory` y responde
      `UPGRADE_STATE` adjuntando el objeto y el extremo de su cliente.
-  3. `init` reenvía ambas capacidades a la v2 con `UPGRADE_RESTORE`. La v2
-     migra el estado a `CNT2` y sigue atendiendo al mismo extremo.
+  3. `init` reenvía ambas capacidades a la nueva con `UPGRADE_RESTORE`. La
+     nueva valida el estado sin escribirlo y responde:
+     * `UPGRADE_ACCEPT`: `init` manda `UPGRADE_COMMIT` a la v1, que termina;
+       la nueva migra el estado a `CNT2` y sigue atendiendo al mismo extremo.
+     * `UPGRADE_REJECT [mem, ep]`: `init` devuelve todo a la v1 con
+       `UPGRADE_ROLLBACK`; la v1 relee su contador de `mem` y retoma.
+* El test hace primero un intento con `contador-roto` (rechaza: rollback) y
+  después con `contador-v2` (acepta).
+* Verificación formal: `verification/lean/Nsos/Upgrade.lean` modela el
+  protocolo y demuestra que el cliente ve `1, 2, …, n` sin saltos con
+  cualquier intercalado de pedidos, rechazos y aceptaciones, y que solo
+  atiende quien tiene estado y canal. El modelo se escribió antes que el
+  código del rollback.
 * El `cliente` nunca se reconecta: su extremo es el mismo y el pedido que
   quedó encolado durante el cambio viaja con el extremo del servidor. El
   test exige que el contador avance de a uno, sin saltos ni repeticiones,
   con al menos 5 respuestas de cada versión.
-* Limitaciones: falta el rollback (si la v2 rechaza el estado, devolverlo a
-  la v1), y la v1 sondea dos canales porque todavía no hay `wait`
-  multi-handle.
+* Limitaciones:
+  * El rollback cubre el rechazo explícito. Si la versión nueva *falla*
+    (excepción) con las capacidades, el extremo del cliente se cierra y el
+    cliente ve `PEER_CLOSED`. Cubrirlo exige que el kernel devuelva las
+    capacidades de una cell muerta a su supervisor, o un extremo de respaldo.
+  * Mover una capacidad `Memory` no desmapea a quien la tenía: la v1 sigue
+    viendo `mem` después de entregarlo (lo usa para el rollback). Una versión
+    vieja maliciosa podría escribir el estado de la nueva. Falta `mem_unmap`
+    y decidir si mover una capacidad `Memory` revoca los mapeos.
+  * La v1 sondea dos canales porque todavía no hay `wait` multi-handle.
 
 ## Hito 8 en detalle (próximo)
 

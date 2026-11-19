@@ -202,6 +202,7 @@ fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<
         image("contador-v1")?,
         image("contador-v2")?,
         image("cliente")?,
+        image("contador-roto")?,
     ];
     cell::spawn("init", init, caps).map_err(report)?;
     Ok(())

@@ -7,11 +7,17 @@
 //! Protocolo de servicio: `INC` → incrementa y responde `COUNT` con
 //! `[contador: u64, versión: u32]`.
 //!
-//! Actualización en vivo: al recibir `UPGRADE_PREPARE` deja de atender,
-//! escribe su estado en un objeto `Memory` nuevo (formato `CNT1`) y responde
-//! `UPGRADE_STATE` adjuntando ese objeto **y** el extremo del cliente.
-//! Después termina con 0. Para que la prueba sea determinista, solo mira el
-//! canal de control después de atender `MIN_BEFORE_UPGRADE` pedidos.
+//! Actualización en vivo (modelo: `verification/lean/Nsos/Upgrade.lean`): al
+//! recibir `UPGRADE_PREPARE` deja de atender, escribe su estado en un objeto
+//! `Memory` (formato `CNT1`) y responde `UPGRADE_STATE` adjuntando ese
+//! objeto **y** el extremo del cliente. Después espera la decisión:
+//! * `UPGRADE_COMMIT`: la nueva versión aceptó; termina con 0.
+//! * `UPGRADE_ROLLBACK [mem, ep]`: la nueva rechazó; recupera las
+//!   capacidades, **relee el contador de `mem`** y vuelve a atender.
+//!
+//! Para que la prueba sea determinista, solo mira el canal de control
+//! después de atender `MIN_BEFORE_UPGRADE` pedidos desde que arrancó o
+//! retomó.
 //!
 //! Sin `wait` multi-handle todavía: sondea ambos canales cediendo la CPU.
 
@@ -19,10 +25,12 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::msg::labels::{UPGRADE_PREPARE, UPGRADE_STATE};
+use nsos_rt::abi::msg::labels::{UPGRADE_COMMIT, UPGRADE_PREPARE, UPGRADE_ROLLBACK, UPGRADE_STATE};
 use nsos_rt::abi::syscall::flags::NONBLOCK;
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
-use nsos_rt::{bootstrap, channel_recv, channel_send, mem_create, mem_map, println, yield_now};
+use nsos_rt::{
+    bootstrap, channel_recv, channel_send, mem_create, mem_map, println, yield_now, Mapped,
+};
 
 const INC: u64 = 1;
 const COUNT: u64 = 2;
@@ -41,35 +49,68 @@ fn reply(client: CapHandle, count: u64) -> Result<(), Error> {
     channel_send(client, &Message::new(COUNT, &d).unwrap(), 0)
 }
 
-fn hand_over(ctrl: CapHandle, client: CapHandle, count: u64) -> Result<(), Error> {
-    let mem = mem_create(4096)?;
-    let state = mem_map(mem, STATE_VADDR, Rights::READ | Rights::WRITE)?;
+/// Entrega estado y cliente y espera la decisión del supervisor. Devuelve
+/// `Some((mem, client, count))` si hubo rollback, `None` si hubo commit.
+fn upgrade(
+    ctrl: CapHandle,
+    mem: CapHandle,
+    state: Mapped,
+    client: CapHandle,
+    count: u64,
+) -> Result<Option<(CapHandle, CapHandle, u64)>, Error> {
     state.write_u32(0, STATE_MAGIC);
     state.write_u64(8, count);
     let mut m = Message::new(UPGRADE_STATE, b"").unwrap();
     m.push_cap(mem)?;
     m.push_cap(client)?;
-    channel_send(ctrl, &m, 0)
+    channel_send(ctrl, &m, 0)?;
+    channel_recv(ctrl, &mut m, 0)?;
+    match (m.header.label, m.cap_slice()) {
+        (UPGRADE_COMMIT, []) => Ok(None),
+        (UPGRADE_ROLLBACK, &[mem, client]) => {
+            // El mapeo sigue siendo nuestro: el estado se relee de ahí.
+            if state.read_u32(0) != STATE_MAGIC {
+                return Err(Error::BadMessage);
+            }
+            Ok(Some((mem, client, state.read_u64(8))))
+        }
+        _ => Err(Error::BadMessage),
+    }
 }
 
 fn main() -> i32 {
     let ctrl = bootstrap(1);
-    let client = bootstrap(2);
+    let mut client = bootstrap(2);
+    let Ok(mut mem) = mem_create(4096) else {
+        return 5;
+    };
+    let Ok(state) = mem_map(mem, STATE_VADDR, Rights::READ | Rights::WRITE) else {
+        return 6;
+    };
     let mut count = 0u64;
+    let mut since_start = 0u64;
     let mut m = Message::default();
     println!("contador-v1: atendiendo");
     loop {
-        if count >= MIN_BEFORE_UPGRADE {
+        if since_start >= MIN_BEFORE_UPGRADE {
             match channel_recv(ctrl, &mut m, NONBLOCK) {
                 Ok(()) if m.header.label == UPGRADE_PREPARE => {
                     println!("contador-v1: entrego el estado (contador = {})", count);
-                    return match hand_over(ctrl, client, count) {
-                        Ok(()) => 0,
-                        Err(e) => {
-                            println!("contador-v1: no pude entregar el estado: {:?}", e);
-                            1
+                    match upgrade(ctrl, mem, state, client, count) {
+                        Ok(None) => {
+                            println!("contador-v1: la versión nueva aceptó; termino");
+                            return 0;
                         }
-                    };
+                        Ok(Some((m2, c2, n))) => {
+                            println!("contador-v1: rollback; retomo con contador = {}", n);
+                            (mem, client, count, since_start) = (m2, c2, n, 0);
+                        }
+                        Err(e) => {
+                            println!("contador-v1: actualización falló: {:?}", e);
+                            return 1;
+                        }
+                    }
+                    continue;
                 }
                 Ok(()) => println!("contador-v1: control desconocido {}", m.header.label),
                 Err(Error::WouldBlock) => {}
@@ -79,6 +120,7 @@ fn main() -> i32 {
         match channel_recv(client, &mut m, NONBLOCK) {
             Ok(()) if m.header.label == INC => {
                 count += 1;
+                since_start += 1;
                 if reply(client, count).is_err() {
                     return 3;
                 }

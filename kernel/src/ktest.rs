@@ -376,8 +376,8 @@ pub fn run_cells() -> bool {
         status("init") == Some(Exited(0)),
     );
     check(
-        "actualización en vivo: contador-v1, v2 y cliente terminaron con 0",
-        ["contador-v1", "contador-v2", "cliente"]
+        "actualización en vivo con rollback: contador-v1, roto, v2 y cliente terminaron con 0",
+        ["contador-v1", "contador-roto", "contador-v2", "cliente"]
             .iter()
             .all(|n| status(n) == Some(Exited(0))),
     );
