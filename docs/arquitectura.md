@@ -131,6 +131,19 @@ su propio hilo en la ruta de vuelta a anillo 3. Así nunca se destruye un
 espacio de direcciones que otro hilo está usando ni una cell a mitad de una
 syscall.
 
+## Actualización en vivo
+
+Tampoco está en el kernel: es un protocolo entre el supervisor y el servicio.
+Lo que lo hace posible es que un extremo de canal es una capacidad que se
+puede mover, con su cola de mensajes, sin que el otro extremo lo note.
+
+```
+cliente ====canal==== contador-v1           cliente ====canal==== contador-v2
+                         |  UPGRADE_STATE        ^                     ^
+                         |  [Memory, extremo]    |   UPGRADE_RESTORE   |
+                         +-------> init ---------+---------------------+
+```
+
 ## Drivers en user-space
 
 El kernel no maneja dispositivos: los *descubre* y entrega sus recursos como
@@ -162,6 +175,8 @@ cells/ping|pong/   cells de ejemplo que hablan por IPC
 cells/intruso/     test de aislamiento
 cells/init/        supervisor: reinicia cells que fallan, mata cells
 cells/fragil|dormilona/  cells que fallan o no terminan, para el supervisor
+cells/contador-v1|v2/    servidor con estado en dos versiones (actualización en vivo)
+cells/cliente/     cliente del contador
 cells/virtcon/     driver virtio-console en user-space
 cells/hola/        cliente del driver: escribe por la consola virtio
 kernel/            microkernel (x86_64-unknown-none)

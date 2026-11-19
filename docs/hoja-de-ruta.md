@@ -10,7 +10,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 4 | IPC seguro (canales + transferencia de capacidades) y creación de cells | ✅ ping/pong/intruso en anillo 3 |
 | 5 | "hello cell" y driver virtio de consola como cell | ✅ `virtcon` (driver) + `hola` (cliente) |
 | 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ✅ supervisor `init` que reinicia `fragil` y mata `dormilona` |
-| 7 | Actualización en vivo de una cell | ○ |
+| 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente` |
 | 8 | Tests de aislamiento y benchmark de IPC | ⏳ primeros tests (`intruso`) y benchmark de ida y vuelta |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ⏳ registro inicial en `docs/unsafe.md` |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ○ |
@@ -22,7 +22,7 @@ Cada hito se entrega como un PR con tests y documentación.
 - [x] Al menos 3 cells aisladas comunicándose por IPC (`init` con `fragil`, `ping`/`pong`, `hola`/`virtcon`).
 - [x] Un driver en user-space (`virtcon`).
 - [x] Un fallo de cell no afecta al kernel (la cell se termina, se libera su memoria y un supervisor puede reiniciarla).
-- [ ] Actualización en vivo de una cell sin reinicio.
+- [x] Actualización en vivo de una cell sin reinicio (protocolo de supervisor; falta el rollback).
 - [ ] `unsafe` confinado y documentado (en curso: lint obligatorio + registro).
 - [ ] Benchmarks básicos de IPC y arranque (arranque medido con el TSC; IPC: ida y vuelta entre `ping` y `pong`; falta automatizar y comparar).
 
@@ -63,7 +63,7 @@ Cada hito se entrega como un PR con tests y documentación.
   e `intruso` (8 abusos bloqueados y lectura del kernel atrapada por la MMU).
 
 Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
-`mem_create` (zero-copy entre cells), `cell_spawn` desde una cell
+`mem_create` (zero-copy entre cells; hecho en el hito 7), `cell_spawn` desde una cell
 (supervisor), `Irq` para drivers.
 
 ## Hito 5 (hecho)
@@ -101,14 +101,33 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   el driver siguen corriendo. Los tests en QEMU verifican la secuencia de
   terminaciones y que no se pierde memoria.
 
-## Hito 7 en detalle (próximo)
+## Hito 7 (hecho)
 
-1. Protocolo de actualización en vivo por cell (sección 8 del ABI): el
-   supervisor pide `UPGRADE_PREPARE`, la cell serializa su estado en un
-   objeto `Memory` y lo entrega con sus capacidades.
-2. El supervisor arranca la versión nueva con esas capacidades y el estado.
-3. Test: un servidor con estado (contador) se actualiza sin que su cliente
-   pierda la conexión ni el estado.
+* Syscall `mem_create(size, 0)`: memoria nueva, a cero, con
+  `READ | WRITE | DUPLICATE | GRANT` (sin `CONTROL`: no revela direcciones
+  físicas). Tope de 1 MiB por objeto.
+* Protocolo de la sección 8 del ABI, en user-space:
+  1. `init` arranca `contador-v2` **sin** capacidades de servicio.
+  2. Envía `UPGRADE_PREPARE` a `contador-v1`, que deja de atender, escribe
+     su estado (formato `CNT1`) en un objeto `Memory` y responde
+     `UPGRADE_STATE` adjuntando el objeto y el extremo de su cliente.
+  3. `init` reenvía ambas capacidades a la v2 con `UPGRADE_RESTORE`. La v2
+     migra el estado a `CNT2` y sigue atendiendo al mismo extremo.
+* El `cliente` nunca se reconecta: su extremo es el mismo y el pedido que
+  quedó encolado durante el cambio viaja con el extremo del servidor. El
+  test exige que el contador avance de a uno, sin saltos ni repeticiones,
+  con al menos 5 respuestas de cada versión.
+* Limitaciones: falta el rollback (si la v2 rechaza el estado, devolverlo a
+  la v1), y la v1 sondea dos canales porque todavía no hay `wait`
+  multi-handle.
+
+## Hito 8 en detalle (próximo)
+
+1. Tests de aislamiento sistemáticos: cada syscall con handles, punteros y
+   derechos inválidos (ampliar `intruso`), y fuzzing del decodificador de
+   mensajes y del validador ELF.
+2. Benchmarks reproducibles: ida y vuelta de IPC, `cell_spawn` y arranque,
+   con resultados en CI para comparar entre PRs.
 
 ## Riesgos
 

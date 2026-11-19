@@ -196,7 +196,13 @@ fn image(name: &str) -> Result<cell::KCap, &'static str> {
 /// Arranca `init`, el supervisor, con las imágenes de las cells que vigila.
 fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<(), &'static str> {
     let init = module("init").ok_or("falta el módulo init")?;
-    let caps = alloc::vec![image("fragil")?, image("dormilona")?];
+    let caps = alloc::vec![
+        image("fragil")?,
+        image("dormilona")?,
+        image("contador-v1")?,
+        image("contador-v2")?,
+        image("cliente")?,
+    ];
     cell::spawn("init", init, caps).map_err(report)?;
     Ok(())
 }

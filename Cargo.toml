@@ -13,6 +13,9 @@ members = [
     "cells/init",
     "cells/fragil",
     "cells/dormilona",
+    "cells/contador-v1",
+    "cells/contador-v2",
+    "cells/cliente",
 ]
 # El kernel solo compila para `x86_64-unknown-none`; `cargo test` en el host
 # se limita a las crates portables.

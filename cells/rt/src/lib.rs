@@ -165,6 +165,11 @@ pub fn cell_status(h: CapHandle, flags: u64) -> SysResult<abi::syscall::CellStat
     abi::syscall::CellStatus::from_bytes(&out).ok_or(Error::BadMessage)
 }
 
+/// Crea un objeto de memoria de `size` bytes (redondeado a páginas), a cero.
+pub fn mem_create(size: usize) -> SysResult<CapHandle> {
+    decode_ret(syscall4(Syscall::MemCreate, size as u64, 0, 0, 0)).map(|v| CapHandle(v as u32))
+}
+
 /// Mapea un objeto de memoria en `vaddr` con `rights` (READ obligatorio).
 pub fn mem_map(h: CapHandle, vaddr: u64, rights: Rights) -> SysResult<Mapped> {
     let info = mem_info(h)?;

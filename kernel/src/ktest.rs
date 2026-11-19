@@ -375,6 +375,12 @@ pub fn run_cells() -> bool {
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),
     );
+    check(
+        "actualización en vivo: contador-v1, v2 y cliente terminaron con 0",
+        ["contador-v1", "contador-v2", "cliente"]
+            .iter()
+            .all(|n| status(n) == Some(Exited(0))),
+    );
     let fragil: alloc::vec::Vec<_> = exits
         .iter()
         .filter(|(n, _)| n == "fragil")

@@ -1,0 +1,64 @@
+//! Cell `cliente`: usa el servidor `contador` mientras lo actualizan.
+//!
+//! Capacidad de arranque 1: canal con el servidor. Pide `INC` una y otra vez
+//! y comprueba que el contador avanza de a uno, sin saltos ni retrocesos,
+//! aunque en el medio cambie la versión del servidor. Termina con 0 cuando
+//! vio al menos `MIN_PER_VERSION` respuestas de la versión 1 y de la 2.
+
+#![no_std]
+#![no_main]
+#![deny(unsafe_code)]
+
+use nsos_rt::abi::Message;
+use nsos_rt::{bootstrap, channel_recv, channel_send, println};
+
+const INC: u64 = 1;
+const COUNT: u64 = 2;
+const MIN_PER_VERSION: u32 = 5;
+const MAX_REQUESTS: u64 = 10_000;
+
+nsos_rt::entry!(main);
+
+fn main() -> i32 {
+    let srv = bootstrap(1);
+    let mut m = Message::default();
+    let mut seen = [0u32; 3];
+    let mut last_version = 0;
+    for expected in 1..=MAX_REQUESTS {
+        if channel_send(srv, &Message::new(INC, b"").unwrap(), 0).is_err() {
+            println!("cliente: send falló");
+            return 1;
+        }
+        if channel_recv(srv, &mut m, 0).is_err() || m.header.label != COUNT {
+            println!("cliente: se cortó la conexión en el pedido {}", expected);
+            return 2;
+        }
+        let d = m.payload();
+        let count = u64::from_le_bytes(d[..8].try_into().unwrap());
+        let version = u32::from_le_bytes(d[8..12].try_into().unwrap());
+        if count != expected || !(1..=2).contains(&version) || version < last_version {
+            println!(
+                "cliente: respuesta inválida: contador {} (esperaba {}), versión {}",
+                count, expected, version
+            );
+            return 3;
+        }
+        if version != last_version {
+            println!(
+                "cliente: ahora me atiende la versión {} (contador {})",
+                version, count
+            );
+            last_version = version;
+        }
+        seen[version as usize] += 1;
+        if seen[1] >= MIN_PER_VERSION && seen[2] >= MIN_PER_VERSION {
+            println!(
+                "cliente: {} pedidos sin saltos ({} a v1, {} a v2)",
+                count, seen[1], seen[2]
+            );
+            return 0;
+        }
+    }
+    println!("cliente: nunca vi la versión 2");
+    4
+}

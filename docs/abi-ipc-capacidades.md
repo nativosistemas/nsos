@@ -97,9 +97,9 @@ para una versión posterior; el formato del handle ya la permite.
   para evitar TOCTOU con otros hilos de la misma cell.
 
 Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
-implementación (hito 5): `debug_log`, `yield`, `exit`, `clock_monotonic`,
+implementación (hito 7): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
-`channel_recv`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
+`channel_recv`, `mem_create`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
 `cell_spawn`, `cell_kill` y `cell_status`. El resto devuelve `Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
@@ -227,7 +227,13 @@ Se implementa encima de las primitivas anteriores, por cell:
    mismos; solo cambió quién tiene el otro extremo. Los mensajes encolados
    viajan con el extremo.
 6. Si la nueva falla al restaurar, el supervisor devuelve estado y canales a
-   la vieja (rollback).
+   la vieja (rollback). *Pendiente: hoy la vieja termina después de
+   entregar su estado.*
+
+Implementado en el hito 7 con `init` (supervisor), `contador-v1`,
+`contador-v2` y `cliente`. El formato del estado lo define cada servicio
+(con un número mágico de versión, `CNT1`/`CNT2`) y la versión nueva es la
+que sabe migrar desde la anterior.
 
 Las etiquetas están en `nsos_abi::msg::labels` (rango
 `0xFFFF_0000_0000_0000..` reservado al sistema).
