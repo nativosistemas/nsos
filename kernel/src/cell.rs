@@ -156,8 +156,12 @@ impl Drop for QueuedMsg {
 static IN_FLIGHT: IrqSpinLock<Vec<Weak<Endpoint>>> = IrqSpinLock::new(Vec::new());
 
 fn mark_in_flight(caps: &[KCap]) {
+    // Solo los extremos de canal pueden formar ciclos (son los únicos objetos
+    // que contienen capacidades).
     for c in caps {
-        let KObject::Channel(e) = &c.object;
+        let KObject::Channel(e) = &c.object else {
+            continue;
+        };
         if e.in_flight.fetch_add(1, Ordering::Relaxed) == 0 {
             IN_FLIGHT.lock().push(Arc::downgrade(e));
         }
@@ -166,7 +170,9 @@ fn mark_in_flight(caps: &[KCap]) {
 
 fn unmark_in_flight(caps: &[KCap]) {
     for c in caps {
-        let KObject::Channel(e) = &c.object;
+        let KObject::Channel(e) = &c.object else {
+            continue;
+        };
         e.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -210,7 +216,9 @@ pub fn ipc_gc() -> usize {
                     .iter()
                     .flat_map(|m| m.caps.iter())
                     .filter_map(|c| {
-                        let KObject::Channel(x) = &c.object;
+                        let KObject::Channel(x) = &c.object else {
+                            return None;
+                        };
                         index.get(&(Arc::as_ptr(x) as usize)).copied()
                     })
                     .collect();
