@@ -23,7 +23,8 @@ if [[ "${1:-}" == "--uefi" ]]; then
     FIRMWARE=(-bios "$OVMF")
 fi
 
-ACCEL=()
+# Sin KVM, `-cpu max` emula todas las extensiones (SMEP, SMAP, ...).
+ACCEL=(-cpu max)
 [[ -w /dev/kvm ]] && ACCEL=(-enable-kvm -cpu host)
 
 exec qemu-system-x86_64 \

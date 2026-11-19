@@ -272,7 +272,7 @@ El kernel solo enmascara la IRQ, activa `IRQ_PENDING` y espera `irq_ack`.
   caber en él. Un driver nunca nombra puertos absolutos.
 Para DMA (virtio) el driver recibe objetos `Memory` cuyas direcciones físicas
 conoce el kernel; sin IOMMU el driver sigue siendo de confianza respecto al
-DMA, y así se documenta en el modelo de amenazas.
+DMA, y así se documenta en el [modelo de amenazas](amenazas.md).
 
 ## 10. Versionado
 

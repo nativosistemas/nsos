@@ -4,7 +4,7 @@
 //! # Invariantes (`unsafe`)
 //! Las funciones de solo lectura (`read_cr2`, `read_cr3`, `rdtsc`, `rflags`)
 //! no tienen efectos y son seguras. Las que modifican estado global de la CPU
-//! (`write_cr3`, `wrmsr`, `write_cr0`) son `unsafe`: el llamador garantiza que
+//! (`write_cr3`, `wrmsr`, `write_cr0`, `write_cr4`, `clac`) son `unsafe`: el llamador garantiza que
 //! el nuevo estado mantiene válido el código y la pila en ejecución.
 
 use core::arch::asm;
@@ -50,6 +50,39 @@ pub fn read_cr0() -> u64 {
 pub unsafe fn write_cr0(v: u64) {
     // SAFETY: delegada al llamador.
     unsafe { asm!("mov cr0, {}", in(reg) v, options(nostack, preserves_flags)) };
+}
+
+/// Lee CR4.
+pub fn read_cr4() -> u64 {
+    let v;
+    // SAFETY: lectura sin efectos.
+    unsafe { asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Escribe CR4.
+///
+/// # Safety
+/// Solo puede activar bits que la CPU soporta (si no, #GP) y que no
+/// invaliden el código en ejecución.
+pub unsafe fn write_cr4(v: u64) {
+    // SAFETY: delegada al llamador.
+    unsafe { asm!("mov cr4, {}", in(reg) v, options(nostack, preserves_flags)) };
+}
+
+/// `cpuid(leaf, subleaf)` → `(eax, ebx, ecx, edx)`.
+pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+/// `clac`: vuelve a prohibir el acceso del kernel a páginas de usuario.
+///
+/// # Safety
+/// Solo con SMAP soportado (si no, #UD).
+pub unsafe fn clac() {
+    // SAFETY: delegada al llamador.
+    unsafe { asm!("clac", options(nomem, nostack)) };
 }
 
 /// Lee un MSR.

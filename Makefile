@@ -28,6 +28,7 @@ lint:
 	cargo clippy -p nsos-kernel --target x86_64-unknown-none -- -D warnings
 	RUSTFLAGS="-C relocation-model=static" cargo clippy --target x86_64-unknown-none \
 		--target-dir target/cells -p nsos-rt -p cell-ping -p cell-pong -p cell-intruso -p cell-virtcon -p cell-hola -p cell-init -p cell-fragil -p cell-dormilona -p cell-contador-v1 -p cell-contador-v2 -p cell-cliente -p cell-contador-roto -p cell-caos -p cell-bench -- -D warnings
+	tools/audit-unsafe.sh
 
 # Demostraciones en Lean y regeneración de las trazas del modelo
 verify:

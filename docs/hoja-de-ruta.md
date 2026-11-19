@@ -12,7 +12,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ✅ supervisor `init` que reinicia `fragil` y mata `dormilona` |
 | 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente`, con rollback |
 | 8 | Tests de aislamiento y benchmark de IPC | ✅ `intruso` (27 abusos), fuzzer `caos`, `bench` con resumen en la CI |
-| 9 | Documentar límites de `unsafe` y modelo de amenazas | ⏳ registro inicial en `docs/unsafe.md` |
+| 9 | Documentar límites de `unsafe` y modelo de amenazas | ✅ `docs/amenazas.md`, auditoría `tools/audit-unsafe.sh`, SMEP/SMAP |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ○ |
 
 ## Criterios de aceptación del MVP
@@ -23,7 +23,7 @@ Cada hito se entrega como un PR con tests y documentación.
 - [x] Un driver en user-space (`virtcon`).
 - [x] Un fallo de cell no afecta al kernel (la cell se termina, se libera su memoria y un supervisor puede reiniciarla).
 - [x] Actualización en vivo de una cell sin reinicio (protocolo de supervisor con rollback, modelado en Lean).
-- [ ] `unsafe` confinado y documentado (en curso: lint obligatorio + registro).
+- [x] `unsafe` confinado y documentado (lint obligatorio, registro en `docs/unsafe.md` y auditoría automática en la CI).
 - [x] Benchmarks básicos de IPC y arranque (cell `bench` en una corrida aparte; la CI publica la tabla en el resumen de cada PR).
 
 ## Hito 3 (hecho)
@@ -162,13 +162,33 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   contenedor (QEMU TCG, sin KVM): arranque 15,7 ms, IPC 23,8 µs, ciclo de
   vida 447 µs, memoria 66 µs.
 
-## Hito 9 en detalle (próximo)
+## Hito 9 (hecho)
 
-1. Modelo de amenazas (`docs/amenazas.md`): qué protege cada capa (lenguaje,
-   MMU, capacidades), qué no (DMA sin IOMMU, canales laterales, la versión
-   vieja que conserva mapeos tras una actualización).
-2. Auditoría de `unsafe`: script que compare `grep unsafe` con el registro y
-   corra en la CI.
+* `docs/amenazas.md`: activos, adversario (una cell con código nativo
+  cualquiera), qué se garantiza con qué mecanismo y con qué prueba, y 8
+  huecos conocidos ordenados por gravedad (canales laterales sin KPTI, DMA
+  sin IOMMU, mapeos que sobreviven a mover un `Memory`, DoS sin cuotas,
+  consola falsificable, caída de la versión nueva en una actualización,
+  arranque sin firmas, un solo núcleo).
+* `tools/audit-unsafe.sh` (en `make lint` y en la CI): cada archivo con
+  `unsafe` tiene que estar en `docs/unsafe.md` y al revés; `abi` y `kcore`
+  con `forbid(unsafe_code)`, cada cell con `deny(unsafe_code)`.
+* SMEP y SMAP activados si la CPU los tiene. La entrada de syscalls y de
+  interrupciones limpia `AC`. QEMU corre con `-cpu max`. La prueba negativa
+  `test-smap-fault` lee una página de usuario desde el kernel y espera #PF.
+  El kernel no necesitó cambios: ya copiaba todo por el HHDM.
+
+## Hito 10 en detalle (próximo)
+
+Migración de una cell entre dos instancias QEMU (fase 2):
+
+1. Serializar el estado de una cell con el mismo protocolo de la
+   actualización en vivo (`UPGRADE_STATE`), sin congelar la memoria entera.
+2. Un canal entre máquinas: driver virtio-net o puerto serie entre dos QEMU,
+   como cell.
+3. Proxy de capacidades: los canales de la cell migrada se reenvían por el
+   enlace; el cliente no nota la mudanza (mismo invariante que
+   `Upgrade.client_sees_consecutive`, a modelar en Lean antes de escribirlo).
 
 ## Riesgos
 

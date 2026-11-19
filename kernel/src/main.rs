@@ -97,6 +97,9 @@ extern "C" fn kmain() -> ! {
     );
     let (_, heap_free) = mm::heap::usage();
     kprintln!("mm: heap del kernel de {} KiB", heap_free / 1024);
+    let (smep, smap) = mm::smep_smap();
+    let yn = |b| if b { "sí" } else { "no (la CPU no lo tiene)" };
+    kprintln!("mm: SMEP {}, SMAP {}", yn(smep), yn(smap));
 
     // Interrupciones y scheduler.
     apic::init(TIMER_HZ);
@@ -124,6 +127,20 @@ extern "C" fn kmain() -> ! {
         // SAFETY: deliberadamente inválido; se espera el fallo de página.
         unsafe { (&RO as *const u64 as *mut u64).write_volatile(1) };
         kprintln!("ERROR: se pudo escribir en .rodata");
+    }
+
+    if has_flag("test-smap-fault") {
+        // Test negativo: con SMAP, que el kernel lea una página de usuario
+        // directamente (sin `usercopy`) debe producir #PF y un pánico.
+        let v = ktest::map_user_test_page();
+        kprintln!(
+            "test-smap-fault: el kernel lee una página de usuario en {:#x}",
+            v
+        );
+        // SAFETY: deliberadamente prohibido por SMAP; se espera el #PF.
+        let x = unsafe { (v as *const u64).read_volatile() };
+        kprintln!("ERROR: el kernel leyó memoria de usuario sin SMAP ({})", x);
+        arch::qemu_exit(arch::QemuExit::Failure);
     }
 
     if has_flag("bench") {

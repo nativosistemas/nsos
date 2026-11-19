@@ -7,7 +7,7 @@ use crate::arch::cpu;
 use crate::arch::paging::{flags, AddressSpace, PAGE_SIZE};
 use crate::boot::limine::{ExecutableAddress, MemKind, Memmap};
 use crate::sync::IrqSpinLock;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Dirección física.
 pub type PhysAddr = u64;
@@ -141,8 +141,39 @@ pub fn init(memmap: &Memmap, exec: &ExecutableAddress) {
     }
     KERNEL_ROOT.store(space.root(), Ordering::Relaxed);
     *KERNEL_SPACE.lock() = Some(space);
+    enable_smep_smap();
 
     heap::init();
+}
+
+static SMEP: AtomicBool = AtomicBool::new(false);
+static SMAP: AtomicBool = AtomicBool::new(false);
+
+/// SMEP: el kernel no puede ejecutar páginas de usuario. SMAP: no puede
+/// leerlas ni escribirlas (salvo con `RFLAGS.AC`, que el kernel nunca pone).
+/// El kernel ya no las toca por diseño (`usercopy` copia por el HHDM); con
+/// SMAP la CPU lo garantiza. Se activan si la CPU los tiene.
+fn enable_smep_smap() {
+    let (_, ebx, _, _) = cpu::cpuid(7, 0);
+    let smep = ebx & (1 << 7) != 0;
+    let smap = ebx & (1 << 20) != 0;
+    let mut cr4 = cpu::read_cr4();
+    if smep {
+        cr4 |= 1 << 20;
+    }
+    if smap {
+        cr4 |= 1 << 21;
+    }
+    // SAFETY: solo se activan bits que CPUID reporta; ninguno afecta al
+    // kernel, que no ejecuta ni toca páginas de usuario.
+    unsafe { cpu::write_cr4(cr4) };
+    SMEP.store(smep, Ordering::Relaxed);
+    SMAP.store(smap, Ordering::Relaxed);
+}
+
+/// ¿Están activos SMEP y SMAP?
+pub fn smep_smap() -> (bool, bool) {
+    (SMEP.load(Ordering::Relaxed), SMAP.load(Ordering::Relaxed))
 }
 
 /// Mapea un rango MMIO en el HHDM del kernel sin caché y devuelve su

@@ -220,5 +220,11 @@ extern "C" fn trap_entry(frame: *mut TrapFrame) -> *mut TrapFrame {
     // SAFETY: el stub pasa un puntero a un TrapFrame recién guardado en la
     // pila actual, válido y exclusivo durante esta llamada.
     let f = unsafe { &mut *frame };
+    // Una interrupción no limpia RFLAGS.AC: si la cell lo había puesto, SMAP
+    // quedaría desactivado dentro del kernel.
+    if crate::mm::smep_smap().1 {
+        // SAFETY: SMAP está soportado (se activó tras verificarlo con CPUID).
+        unsafe { crate::arch::cpu::clac() };
+    }
     crate::trap::dispatch(f, frame)
 }
