@@ -6,8 +6,8 @@ Cada hito se entrega como un PR con tests y documentación.
 |---|---|---|
 | 1 | Especificar ABI de IPC y modelo de capacidades | ✅ `docs/abi-ipc-capacidades.md`, `crates/abi` |
 | 2 | Imagen booteable mínima: Limine + kernel que imprime por serial (BIOS y UEFI) | ✅ |
-| 3 | Allocador físico/virtual, paginación, GDT/IDT, scheduler básico | ⏳ siguiente |
-| 4 | IPC seguro (canales + transferencia de capacidades) y creación de cells | ○ |
+| 3 | Allocador físico/virtual, paginación, GDT/IDT, scheduler básico | ✅ 9 tests en QEMU + 7 en host |
+| 4 | IPC seguro (canales + transferencia de capacidades) y creación de cells | ⏳ siguiente |
 | 5 | "hello cell" y driver virtio de consola como cell | ○ |
 | 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ○ |
 | 7 | Actualización en vivo de una cell | ○ |
@@ -24,18 +24,33 @@ Cada hito se entrega como un PR con tests y documentación.
 - [ ] Un fallo de cell no afecta al kernel.
 - [ ] Actualización en vivo de una cell sin reinicio.
 - [ ] `unsafe` confinado y documentado (en curso: lint obligatorio + registro).
-- [ ] Benchmarks básicos de IPC y arranque (hoy: tiempo total de QEMU en el test de humo).
+- [ ] Benchmarks básicos de IPC y arranque (arranque: el kernel mide su tiempo desde `kmain` con el TSC; IPC pendiente).
 
-## Hito 3 en detalle (próximo)
+## Hito 3 (hecho)
 
-1. GDT + TSS, IDT con handlers de excepción que imprimen y detienen.
-2. Allocador de marcos físicos (bitmap) a partir del mapa de memoria de
-   Limine, reclamando `BootloaderReclaimable` al final.
-3. Tablas de páginas propias (4 niveles), mapeo del kernel y HHDM.
-4. Heap del kernel (`alloc`) acotado.
-5. APIC timer y scheduler round-robin de hilos del kernel.
-6. Tests en QEMU: un mini framework `#[kernel_test]` que ejecuta pruebas al
-   arrancar con `test-exit`.
+* GDT + TSS con pila IST para el doble fallo; IDT con 256 stubs y un único
+  punto de entrada que devuelve el frame a reanudar (el cambio de contexto
+  es "devolver otro frame").
+* Allocador de marcos con bitmap (`crates/kcore`, sin `unsafe`, probado
+  contra un modelo de referencia en el host).
+* Tablas de páginas propias: HHDM sin ejecución, kernel con W^X por sección
+  (text R-X, rodata R--, data RW-), NX y CR0.WP activos.
+* Heap del kernel de 8 MiB con allocador seguro frente a interrupciones.
+* APIC local con timer periódico a 100 Hz calibrado con el PIT; PIC 8259
+  deshabilitado.
+* Scheduler round-robin apropiativo de hilos de kernel; `yield` por
+  interrupción de software; liberación diferida de pilas de hilos muertos.
+* `ktest`: tests dentro del kernel en QEMU, más un test negativo que
+  comprueba que escribir en `.rodata` produce #PF.
+
+## Hito 4 en detalle (próximo)
+
+1. Espacios de direcciones por cell (mitad alta compartida con el kernel).
+2. Entrada a anillo 3 y syscalls con `syscall`/`sysret` (STAR/LSTAR/SFMASK).
+3. CSpace por cell (`crates/kcore`, testeable en host) y objetos del kernel.
+4. Canales: `channel_create/send/recv` con transferencia de capacidades.
+5. Carga de cells desde módulos ELF de Limine; `cell_spawn`.
+6. Dos cells de prueba intercambiando mensajes.
 
 ## Riesgos
 

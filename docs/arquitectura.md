@@ -55,24 +55,53 @@ direcciones). Después de Spectre eso no alcanza, por eso nsos mantiene la MMU
 como barrera obligatoria y usa el lenguaje como defensa adicional y como
 herramienta de productividad.
 
-## Arranque (hito 1)
+## Arranque
 
 1. El firmware (BIOS o UEFI) carga **Limine** desde la ISO.
 2. Limine carga el ELF del kernel en la mitad alta
    (`0xffffffff80000000`), arma un mapeo directo de la memoria física (HHDM)
    y rellena las *requests* del kernel (`kernel/src/boot/limine.rs`).
-3. `kmain` inicializa COM1, valida la revisión del protocolo, imprime el mapa
-   de memoria y escribe `nsos: arranque OK`.
-4. Con `test-exit` en la línea de comandos, sale de QEMU por
-   `isa-debug-exit` con código de éxito (usado por los tests de humo y la CI).
+3. `kmain` inicializa COM1 y valida la revisión del protocolo.
+4. **CPU**: GDT, TSS (pila IST para doble fallo) e IDT.
+5. **Memoria**: bitmap de marcos desde el mapa de memoria; tablas de páginas
+   propias con W^X; heap del kernel.
+6. **Interrupciones**: PIC deshabilitado, APIC local con timer periódico
+   calibrado con el PIT.
+7. **Scheduler**: el contexto de arranque pasa a ser el hilo idle; se
+   habilitan interrupciones e imprime `nsos: arranque OK` con el tiempo de
+   arranque medido con el TSC.
+8. Con `test-exit` corre `ktest` y sale de QEMU por `isa-debug-exit`.
+
+## Mapa de memoria virtual
+
+| Rango | Uso | Permisos |
+|---|---|---|
+| `0x0000_0000_0000_0000 – 0x0000_7fff_ffff_ffff` | espacio de la cell (hito 4) | por cell |
+| `0xffff_8000_0000_0000 + física` | HHDM: toda la RAM y MMIO mapeado | RW-, sin ejecución |
+| `0xffff_a000_0000_0000 …` | reservado para mapeos de prueba / futuros | — |
+| `0xffff_ffff_8000_0000 …` | imagen del kernel | text R-X, rodata R--, data RW- |
+
+## Interrupciones y cambio de contexto
+
+Todos los vectores pasan por el mismo stub: guarda los registros en un
+`TrapFrame` en la pila actual y llama a `trap::dispatch`, que devuelve el
+frame desde el cual continuar. Si el timer decide cambiar de hilo, devuelve
+el frame guardado del otro hilo y el stub lo restaura con `iretq`. No hay
+otra rutina de *context switch*: un hilo nuevo es una pila con un frame
+fabricado que apunta a su función.
 
 ## Organización del repositorio
 
 ```
 crates/abi/        ABI kernel↔cells (no_std, sin unsafe, testeable en host)
+crates/kcore/      lógica del kernel sin hardware (allocador de marcos...)
 kernel/            microkernel (x86_64-unknown-none)
   src/arch/        código dependiente de arquitectura
   src/boot/        protocolo Limine
+  src/mm/          marcos físicos, tablas de páginas del kernel, heap
+  src/sched.rs     scheduler
+  src/trap.rs      despacho de interrupciones y excepciones
+  src/ktest.rs     tests dentro del kernel
 docs/              especificaciones y documentación
 tools/             construcción de imagen, QEMU, tests de humo
 ```

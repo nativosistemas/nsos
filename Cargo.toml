@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/abi", "kernel"]
+members = ["crates/abi", "crates/kcore", "kernel"]
 # El kernel solo compila para `x86_64-unknown-none`; `cargo test` en el host
 # se limita a las crates portables.
-default-members = ["crates/abi"]
+default-members = ["crates/abi", "crates/kcore"]
 
 [workspace.package]
 version = "0.1.0"
