@@ -4,3 +4,4 @@ import Nsos.CSpace
 import Nsos.System
 import Nsos.Security
 import Nsos.Examples
+import Nsos.Ipc

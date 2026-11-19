@@ -11,9 +11,10 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Rights.lean` | Derechos y atenuación (`nsos_abi::cap::Rights`). |
 | `Nsos/Handle.lean` | Handles `[gen:12 \| slot:20]` y errores del ABI. |
 | `Nsos/CSpace.lean` | Modelo ejecutable de `nsos_kcore::cspace::CSpace`, paso a paso. |
-| `Nsos/System.lean` | Cells, canales y syscalls `cap_dup`, `cap_drop`, `channel_create`, `channel_send`, `channel_recv`, con cierre de extremos en cascada. |
+| `Nsos/System.lean` | Cells, canales y syscalls `cap_dup`, `cap_drop`, `channel_create`, `channel_send`, `channel_recv`, bloqueo (`waitRecv`, `waitSend`) y recolección de extremos inalcanzables. |
 | `Nsos/Security.lean` | Teoremas de seguridad. |
-| `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, handles viejos). |
+| `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
+| `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
 
 ## Teoremas demostrados
@@ -40,6 +41,26 @@ Todos sin `sorry` ni axiomas extra.
 * `Sys.step_no_leak`: después de cada syscall, todo extremo que ya nadie puede
   alcanzar está cerrado y con la cola vacía.
 
+### IPC completo (`Nsos/Ipc.lean`)
+
+El modelo sigue cada mensaje con un número propio y registra qué fue de él
+(`unsent`, `queued o`, `delivered`, `dropped`).
+
+* `Sys.step_msgInv`: **ningún mensaje se pierde ni se duplica**. Todo mensaje
+  enviado está exactamente una vez en exactamente una cola, o se entregó, o se
+  descartó porque su extremo quedó inalcanzable (nadie podía recibirlo).
+* `Sys.step_fate_final`: entregado y descartado son finales. Un mensaje se
+  entrega a lo sumo una vez.
+* `Sys.mem_reachSet` y `Sys.gc_keeps_reachable`: el recolector calcula
+  exactamente lo alcanzable y **nunca cierra un extremo vivo** ni le vacía la
+  cola.
+* `Sys.step_wakeInv`: **sin despertares perdidos**. Toda cell bloqueada está
+  registrada en el extremo que la va a despertar, y su condición de espera
+  sigue sin cumplirse (cola vacía y peer abierto, o cola de destino llena y
+  abierta). Apenas la condición se cumple, la cell ya no está bloqueada.
+* `Sys.run_inv`: los tres invariantes valen en toda ejecución que arranca de un
+  estado inicial (`Sys.inv_init`).
+
 ## Tests derivados del modelo
 
 `lake exe tracegen` ejecuta el modelo de la CSpace con unas 4800 operaciones
@@ -65,6 +86,10 @@ a `kcore`.
    viejo volvía a valer. Ahora el slot se retira
    (`CSpace.stale_handle_never_revives`) y la última traza comprueba que Rust
    hace lo mismo. Ver `Examples.noWrap`.
+3. **Despertares perdidos.** Cada extremo guardaba un solo hilo en espera. Si
+   dos cells con el mismo extremo se bloqueaban, la segunda pisaba a la
+   primera y esa no se despertaba nunca. Ahora el kernel guarda una lista y
+   despierta a todos (`Sys.step_wakeInv`, `Examples.wakeBoth`).
 
 ## Uso
 
