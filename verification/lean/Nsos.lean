@@ -1,9 +1,9 @@
 import Nsos.Rights
 import Nsos.Handle
+import Nsos.Memory
 import Nsos.CSpace
 import Nsos.System
 import Nsos.Security
 import Nsos.Examples
 import Nsos.Upgrade
 import Nsos.Ipc
-import Nsos.Memory
