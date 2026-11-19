@@ -375,6 +375,12 @@ pub fn run_cells() -> bool {
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),
     );
+    check(
+        "actualización en vivo con rollback: contador-v1, roto, v2 y cliente terminaron con 0",
+        ["contador-v1", "contador-roto", "contador-v2", "cliente"]
+            .iter()
+            .all(|n| status(n) == Some(Exited(0))),
+    );
     let fragil: alloc::vec::Vec<_> = exits
         .iter()
         .filter(|(n, _)| n == "fragil")

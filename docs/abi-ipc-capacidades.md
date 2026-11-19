@@ -97,9 +97,9 @@ para una versión posterior; el formato del handle ya la permite.
   para evitar TOCTOU con otros hilos de la misma cell.
 
 Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
-implementación (hito 5): `debug_log`, `yield`, `exit`, `clock_monotonic`,
+implementación (hito 7): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
-`channel_recv`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
+`channel_recv`, `mem_create`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
 `cell_spawn`, `cell_kill` y `cell_status`. El resto devuelve `Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
@@ -221,13 +221,26 @@ Se implementa encima de las primitivas anteriores, por cell:
 2. Envía `UPGRADE_PREPARE` a la cell vieja por su canal de control.
 3. La vieja deja de aceptar trabajo nuevo, serializa su estado en un objeto
    `Memory` y responde `UPGRADE_STATE` adjuntando ese objeto **y** los
-   extremos de canal que estaba sirviendo.
-4. El supervisor reenvía todo a la nueva con `UPGRADE_RESTORE`.
+   extremos de canal que estaba sirviendo. No termina: espera la decisión.
+4. El supervisor reenvía todo a la nueva con `UPGRADE_RESTORE`. La nueva
+   valida el estado **sin escribirlo** y responde `UPGRADE_ACCEPT` (se queda
+   con todo) o `UPGRADE_REJECT` (devuelve las capacidades sin usarlas).
+   Tras aceptar, el supervisor manda `UPGRADE_COMMIT` a la vieja, que
+   termina.
 5. Los clientes no notan el cambio: sus extremos de canal siguen siendo los
    mismos; solo cambió quién tiene el otro extremo. Los mensajes encolados
    viajan con el extremo.
-6. Si la nueva falla al restaurar, el supervisor devuelve estado y canales a
-   la vieja (rollback).
+6. Si la nueva rechaza, el supervisor devuelve estado y canales a la vieja
+   con `UPGRADE_ROLLBACK` y la vieja retoma releyendo el estado (rollback).
+   Si la nueva *falla* con las capacidades, el rollback no es posible: el
+   extremo se cierra y los clientes ven `PEER_CLOSED`.
+
+Modelo y demostraciones: [`Nsos/Upgrade.lean`](../verification/lean/Nsos/Upgrade.lean).
+
+Implementado en el hito 7 con `init` (supervisor), `contador-v1`,
+`contador-v2`, `contador-roto` (rechaza) y `cliente`. El formato del estado lo define cada servicio
+(con un número mágico de versión, `CNT1`/`CNT2`) y la versión nueva es la
+que sabe migrar desde la anterior.
 
 Las etiquetas están en `nsos_abi::msg::labels` (rango
 `0xFFFF_0000_0000_0000..` reservado al sistema).

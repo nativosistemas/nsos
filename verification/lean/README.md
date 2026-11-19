@@ -14,6 +14,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/System.lean` | Cells, canales y syscalls `cap_dup`, `cap_drop`, `channel_create`, `channel_send`, `channel_recv`, con cierre de extremos en cascada. |
 | `Nsos/Security.lean` | Teoremas de seguridad. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, handles viejos). |
+| `Nsos/Upgrade.lean` | Protocolo de actualización en vivo con rollback (supervisor, versión vieja y nueva). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
 
 ## Teoremas demostrados
@@ -39,6 +40,16 @@ Todos sin `sorry` ni axiomas extra.
   secuencia de operaciones lo vuelve a hacer válido.
 * `Sys.step_no_leak`: después de cada syscall, todo extremo que ya nadie puede
   alcanzar está cerrado y con la cola vacía.
+* `Upgrade.client_sees_consecutive`: con cualquier intercalado de pedidos,
+  actualizaciones aceptadas y rechazos con rollback, el cliente ve el
+  contador `1, 2, …, n` sin saltos ni repeticiones.
+* `Upgrade.server_holds_everything`: la versión que atiende tiene el estado y
+  el extremo del cliente; nunca atienden dos versiones a la vez.
+* `Upgrade.rollback_resumes` y `Upgrade.accept_continues`: la versión que
+  retoma (vieja tras un rollback, nueva tras aceptar) sigue la cuenta desde
+  la última respuesta del cliente. Si la nueva escribiera el estado antes de
+  decidir, o la vieja no lo releyera al retomar, la demostración falla (se
+  probó mutando el modelo).
 
 ## Tests derivados del modelo
 
