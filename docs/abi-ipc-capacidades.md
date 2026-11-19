@@ -92,7 +92,10 @@ para una versión posterior; el formato del handle ya la permite.
   páginas mapeadas con el permiso adecuado) y se **copia** antes de usarse,
   para evitar TOCTOU con otros hilos de la misma cell.
 
-Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Resumen:
+Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
+implementación (hito 4): `debug_log`, `yield`, `exit`, `clock_monotonic`,
+`cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send` y
+`channel_recv`. El resto devuelve `Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|

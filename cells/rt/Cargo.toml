@@ -1,0 +1,9 @@
+[package]
+name = "nsos-rt"
+description = "Runtime mínimo de las cells: entrada, syscalls, consola y panic"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+nsos-abi = { path = "../../crates/abi" }

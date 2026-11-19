@@ -123,6 +123,50 @@ pub struct ExecutableAddress {
     pub virtual_base: u64,
 }
 
+/// Archivo cargado por Limine (módulo).
+#[repr(C)]
+pub struct File {
+    revision: u64,
+    address: *const u8,
+    size: u64,
+    path: *const c_char,
+    cmdline: *const c_char,
+}
+
+impl File {
+    /// Ruta del módulo en el medio de arranque.
+    pub fn path(&self) -> &'static str {
+        BootloaderInfo::cstr(self.path)
+    }
+    /// Contenido del módulo.
+    pub fn bytes(&self) -> &'static [u8] {
+        if self.address.is_null() {
+            return &[];
+        }
+        // SAFETY: Limine garantiza `size` bytes válidos en `address` (memoria
+        // KernelAndModules, nunca reclamada por el kernel).
+        unsafe { core::slice::from_raw_parts(self.address, self.size as usize) }
+    }
+}
+
+/// Respuesta con los módulos cargados.
+#[repr(C)]
+pub struct Modules {
+    revision: u64,
+    count: u64,
+    modules: *const *const File,
+}
+
+impl Modules {
+    /// Itera los módulos.
+    pub fn iter(&self) -> impl Iterator<Item = &'static File> + '_ {
+        (0..self.count as usize).filter_map(move |i| {
+            // SAFETY: Limine garantiza `count` punteros válidos.
+            unsafe { (*self.modules.add(i)).as_ref() }
+        })
+    }
+}
+
 /// Respuesta HHDM: desplazamiento del mapeo directo de la memoria física.
 #[repr(C)]
 pub struct Hhdm {
@@ -219,6 +263,10 @@ pub static CMDLINE: Request<Cmdline> = Request::new([0x4b161536e598651e, 0xb390a
 #[link_section = ".requests"]
 pub static EXECUTABLE_ADDRESS: Request<ExecutableAddress> =
     Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487]);
+
+#[used]
+#[link_section = ".requests"]
+pub static MODULES: Request<Modules> = Request::new([0x3e7e279702be32af, 0xca1c4f3bd1280cee]);
 
 #[used]
 #[link_section = ".requests"]

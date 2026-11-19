@@ -1,0 +1,14 @@
+[package]
+name = "cell-ping"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ping"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+nsos-rt = { path = "../rt" }

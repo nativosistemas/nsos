@@ -268,3 +268,46 @@ fn many_threads() -> Result<(), &'static str> {
         "las pilas de los hilos muertos no se liberaron",
     )
 }
+
+/// Test de integración: tres cells en anillo 3. `ping` y `pong` hablan por
+/// IPC (con transferencia de capacidades); `intruso` intenta violar el
+/// aislamiento y termina por fallo de página. El kernel debe seguir vivo.
+pub fn run_cells() -> bool {
+    kprintln!("ktest: cells en anillo 3");
+    let free_before = pmm::stats().free_frames;
+    if let Err(e) = crate::boot_demo_cells() {
+        kprintln!("  FALLO: {}", e);
+        return false;
+    }
+    sched::wait_all();
+    let exits = crate::cell::EXITS.lock().clone();
+    let status = |n: &str| exits.iter().find(|(name, _)| name == n).map(|(_, s)| *s);
+    use crate::cell::ExitStatus::*;
+    let mut ok = true;
+    let mut check = |name: &str, cond: bool| {
+        kprintln!("  {} ... {}", name, if cond { "ok" } else { "FALLO" });
+        ok &= cond;
+    };
+    check("ping terminó con 0", status("ping") == Some(Exited(0)));
+    check("pong terminó con 0", status("pong") == Some(Exited(0)));
+    check(
+        "intruso terminado por #PF al leer el kernel",
+        matches!(
+            status("intruso"),
+            Some(Faulted {
+                vector: 14,
+                addr: 0xffff_ffff_8000_0000,
+                ..
+            })
+        ),
+    );
+    check(
+        "la memoria de las cells se liberó",
+        pmm::stats().free_frames == free_before,
+    );
+    check(
+        "el kernel sigue: el heap responde",
+        Box::new(1u8) == Box::new(1u8),
+    );
+    ok
+}

@@ -5,13 +5,17 @@
 //! su pila de kernel; el hilo de arranque (`kmain`) se convierte en el hilo
 //! *idle*, que solo corre cuando la cola está vacía.
 //!
-//! Hito 4: los hilos pasarán a pertenecer a cells y a entrar en anillo 3.
+//! Un hilo puede pertenecer a una cell: entonces corre en anillo 3 con el
+//! espacio de direcciones de la cell, y al cambiar a él se cargan su CR3 y
+//! su pila de kernel (TSS y `syscall`).
 
-use crate::arch::gdt;
 use crate::arch::idt::TrapFrame;
+use crate::arch::{cpu, gdt, syscall};
+use crate::cell::Cell;
 use crate::sync::IrqSpinLock;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -25,6 +29,8 @@ const STACK_SIZE: usize = 64 * 1024;
 enum State {
     Ready,
     Running,
+    /// Esperando un evento (`wake`).
+    Blocked,
     Dead,
 }
 
@@ -36,6 +42,10 @@ struct Thread {
     _stack: Option<Box<[u8]>>,
     frame: *mut TrapFrame,
     state: State,
+    /// Cell dueña (None = hilo de kernel).
+    cell: Option<Arc<Cell>>,
+    /// Tope de la pila de kernel (para entradas desde anillo 3).
+    kstack_top: u64,
 }
 
 // SAFETY: `frame` apunta dentro de la pila propia del hilo; solo el scheduler
@@ -69,6 +79,8 @@ pub fn init() {
         _stack: None,
         frame: core::ptr::null_mut(),
         state: State::Running,
+        cell: None,
+        kstack_top: 0,
     };
     *SCHED.lock() = Some(Scheduler {
         threads: vec![idle],
@@ -92,22 +104,46 @@ extern "C" fn thread_trampoline(closure: *mut Box<dyn FnOnce() + Send>) -> ! {
 /// Crea un hilo de kernel que ejecuta `f`.
 pub fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> ThreadId {
     let closure: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
+    let init = TrapFrame {
+        rip: thread_trampoline as *const () as u64,
+        cs: gdt::KERNEL_CS as u64,
+        rflags: 0x202, // IF=1
+        ss: gdt::KERNEL_DS as u64,
+        rdi: Box::into_raw(closure) as u64,
+        ..TrapFrame::default()
+    };
+    add_thread(name, init, None, true)
+}
+
+/// Crea el hilo principal de una cell: empieza en `entry` (anillo 3) con la
+/// pila de usuario en `user_rsp`.
+pub fn spawn_user(name: &'static str, cell: Arc<Cell>, entry: u64, user_rsp: u64) -> ThreadId {
+    let init = TrapFrame {
+        rip: entry,
+        cs: gdt::USER_CS as u64,
+        rflags: 0x202,
+        rsp: user_rsp,
+        ss: gdt::USER_DS as u64,
+        ..TrapFrame::default()
+    };
+    add_thread(name, init, Some(cell), false)
+}
+
+fn add_thread(
+    name: &'static str,
+    mut init: TrapFrame,
+    cell: Option<Arc<Cell>>,
+    kernel: bool,
+) -> ThreadId {
     let mut stack = vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_mut_ptr() as u64 + STACK_SIZE as u64) & !0xF;
     let frame_addr = top - 16 - size_of::<TrapFrame>() as u64;
     let frame = frame_addr as *mut TrapFrame;
-    // SAFETY: `frame` está dentro de `stack`, alineado a 8 y sin alias.
-    unsafe {
-        frame.write(TrapFrame {
-            rip: thread_trampoline as *const () as u64,
-            cs: gdt::KERNEL_CS as u64,
-            rflags: 0x202, // IF=1
-            rsp: top - 8,  // como si se hubiera hecho un `call`
-            ss: gdt::KERNEL_DS as u64,
-            rdi: Box::into_raw(closure) as u64,
-            ..TrapFrame::default()
-        });
+    if kernel {
+        init.rsp = top - 8; // como si se hubiera hecho un `call`
     }
+    // SAFETY: `frame` está dentro de `stack`, alineado a 8 y sin alias.
+    unsafe { frame.write(init) };
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler sin inicializar");
     let id = s.next_id;
@@ -118,6 +154,8 @@ pub fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> ThreadId 
         _stack: Some(stack),
         frame,
         state: State::Ready,
+        cell,
+        kstack_top: top,
     });
     s.ready.push_back(id);
     id
@@ -156,6 +194,7 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
         }
         cur.state
     };
+    // Bloqueado o muerto: no vuelve a la cola.
     if cur_state == State::Ready && cur_id != idle {
         s.ready.push_back(cur_id);
     }
@@ -171,7 +210,65 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
     s.current = next_id;
     let next = s.find(next_id).expect("hilo listo inexistente");
     next.state = State::Running;
+    let root = match &next.cell {
+        Some(c) => {
+            syscall::set_kernel_stack(next.kstack_top);
+            c.root()
+        }
+        None => crate::mm::kernel_root(),
+    };
+    if root != 0 && cpu::read_cr3() & !0xFFF != root {
+        // SAFETY: tanto el espacio del kernel como el de cada cell mapean la
+        // mitad alta completa (kernel, HHDM, pilas de kernel).
+        unsafe { cpu::write_cr3(root) };
+    }
     next.frame
+}
+
+/// Marca el hilo actual como bloqueado. No cambia de contexto: el llamador
+/// suelta sus locks y luego llama a `arch::yield_now()`. Si entre medio llega
+/// un `wake`, el hilo simplemente sigue corriendo (no se pierde el aviso).
+pub fn block_current() {
+    let mut g = SCHED.lock();
+    let s = g.as_mut().expect("scheduler sin inicializar");
+    let cur = s.current;
+    s.find(cur).unwrap().state = State::Blocked;
+}
+
+/// Despierta un hilo bloqueado (no hace nada si no lo está o ya no existe).
+pub fn wake(id: ThreadId) {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    let current = s.current;
+    if let Some(t) = s.find(id) {
+        if t.state == State::Blocked {
+            if id == current {
+                t.state = State::Running;
+            } else {
+                t.state = State::Ready;
+                s.ready.push_back(id);
+            }
+        }
+    }
+}
+
+/// Cell del hilo actual.
+pub fn current_cell() -> Option<Arc<Cell>> {
+    let mut g = SCHED.lock();
+    let s = g.as_mut()?;
+    let cur = s.current;
+    s.find(cur).and_then(|t| t.cell.clone())
+}
+
+/// Desde la ruta de interrupción: termina el hilo actual y elige otro.
+pub fn exit_from_trap(frame: *mut TrapFrame) -> *mut TrapFrame {
+    {
+        let mut g = SCHED.lock();
+        let s = g.as_mut().expect("scheduler sin inicializar");
+        let cur = s.current;
+        s.find(cur).unwrap().state = State::Dead;
+    }
+    schedule(frame)
 }
 
 /// Hilos vivos sin contar el idle.
@@ -186,7 +283,6 @@ pub fn switches() -> u64 {
 }
 
 /// Id del hilo actual.
-#[allow(dead_code)]
 pub fn current() -> ThreadId {
     SCHED.lock().as_ref().map(|s| s.current).unwrap_or(0)
 }

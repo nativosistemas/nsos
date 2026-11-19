@@ -83,7 +83,6 @@ impl AddressSpace {
     }
 
     /// Dirección física de la raíz (valor para CR3).
-    #[allow(dead_code)] // hito 4
     pub fn root(&self) -> PhysAddr {
         self.pml4
     }
@@ -203,6 +202,84 @@ impl AddressSpace {
             table = table_mut(e & ADDR_MASK);
         }
         None
+    }
+
+    /// Traduce y devuelve los permisos *efectivos* (USER y WRITABLE solo si
+    /// están en todos los niveles; NX si está en alguno).
+    pub fn translate_with_flags(&self, virt: VirtAddr) -> Option<(PhysAddr, u64)> {
+        let mut table = table_mut(self.pml4);
+        let mut eff = flags::USER | flags::WRITABLE;
+        let mut nx = 0;
+        for level in (1..=4).rev() {
+            let e = table[index(virt, level)];
+            if e & flags::PRESENT == 0 {
+                return None;
+            }
+            eff &= e;
+            nx |= e & flags::NO_EXECUTE;
+            if level == 1 || e & flags::HUGE != 0 {
+                let page = match level {
+                    1 => PAGE_SIZE,
+                    2 => HUGE_PAGE_SIZE,
+                    _ => 1 << 30,
+                };
+                let base = e & ADDR_MASK & !(page - 1);
+                return Some((base + (virt & (page - 1)), eff | nx | flags::PRESENT));
+            }
+            table = table_mut(e & ADDR_MASK);
+        }
+        None
+    }
+
+    /// Crea las tablas de nivel 3 de toda la mitad alta (entradas 256..512),
+    /// para que cualquier mapeo posterior del kernel sea visible en todos los
+    /// espacios de cells que copian estas entradas.
+    pub fn prealloc_kernel_half(
+        &mut self,
+        alloc: &mut dyn FnMut() -> Option<PhysAddr>,
+    ) -> Result<(), MapError> {
+        let pml4 = table_mut(self.pml4);
+        for e in pml4[256..].iter_mut() {
+            if *e & flags::PRESENT == 0 {
+                *e = alloc().ok_or(MapError::OutOfFrames)? | flags::PRESENT | flags::WRITABLE;
+            }
+        }
+        Ok(())
+    }
+
+    /// Crea un espacio de cell: mitad baja vacía, mitad alta compartida con
+    /// `kernel` (mismas tablas de nivel 3, sin el bit USER).
+    pub fn new_user(
+        kernel: &AddressSpace,
+        alloc: &mut dyn FnMut() -> Option<PhysAddr>,
+    ) -> Option<Self> {
+        let s = Self { pml4: alloc()? };
+        let src = table_mut(kernel.pml4);
+        let dst = table_mut(s.pml4);
+        dst[256..].copy_from_slice(&src[256..]);
+        Some(s)
+    }
+
+    /// Libera las tablas de la mitad baja y el PML4 (no las páginas hoja,
+    /// que pertenecen a la cell y se liberan aparte).
+    pub fn destroy_user(self, free: &mut dyn FnMut(PhysAddr)) {
+        fn walk(table: PhysAddr, level: u32, free: &mut dyn FnMut(PhysAddr)) {
+            if level > 1 {
+                for &e in table_mut(table).iter() {
+                    if e & flags::PRESENT != 0 && e & flags::HUGE == 0 {
+                        walk(e & ADDR_MASK, level - 1, free);
+                    }
+                }
+            }
+            free(table);
+        }
+        let pml4 = table_mut(self.pml4);
+        for &e in pml4[..256].iter() {
+            if e & flags::PRESENT != 0 {
+                walk(e & ADDR_MASK, 3, free);
+            }
+        }
+        free(self.pml4);
     }
 
     /// Activa este espacio en la CPU actual.

@@ -13,12 +13,15 @@ extern crate alloc;
 
 mod arch;
 mod boot;
+mod cell;
 mod console;
 mod ktest;
 mod mm;
 mod sched;
 mod sync;
+mod syscall;
 mod trap;
+mod usercopy;
 
 use arch::{apic, cpu};
 use boot::limine::{self, MemKind};
@@ -122,7 +125,7 @@ extern "C" fn kmain() -> ! {
     }
 
     if has_flag("test-exit") {
-        let ok = ktest::run();
+        let ok = ktest::run() & ktest::run_cells();
         kprintln!(
             "sched: {} cambios de contexto, {} ticks",
             sched::switches(),
@@ -135,10 +138,45 @@ extern "C" fn kmain() -> ! {
         });
     }
 
+    // Demo: arrancar las cells de ejemplo.
+    if let Err(e) = boot_demo_cells() {
+        kprintln!("no se pudieron arrancar las cells: {}", e);
+    }
+
     // Este contexto es ahora el hilo idle.
     loop {
         cpu::wait_for_interrupt();
     }
+}
+
+/// Busca un módulo de Limine cuyo path termina en `/name`.
+pub fn module(name: &str) -> Option<&'static [u8]> {
+    limine::MODULES
+        .response()?
+        .iter()
+        .find(|m| m.path().rsplit('/').next() == Some(name))
+        .map(|m| m.bytes())
+}
+
+/// Arranca `ping` y `pong` conectados por un canal, y la cell `intruso`.
+pub fn boot_demo_cells() -> Result<(), &'static str> {
+    use nsos_kcore::cspace::Cap;
+    let (a, b) = cell::channel_create();
+    let cap = |e| Cap {
+        object: cell::KObject::Channel(e),
+        rights: cell::ENDPOINT_RIGHTS,
+    };
+    let pong = module("pong").ok_or("falta el módulo pong")?;
+    let ping = module("ping").ok_or("falta el módulo ping")?;
+    let intruso = module("intruso").ok_or("falta el módulo intruso")?;
+    let report = |e: cell::SpawnError| {
+        kprintln!("cell::spawn: {:?}", e);
+        "una cell no arrancó"
+    };
+    cell::spawn("pong", pong, alloc::vec![cap(b)]).map_err(report)?;
+    cell::spawn("ping", ping, alloc::vec![cap(a)]).map_err(report)?;
+    cell::spawn("intruso", intruso, alloc::vec![]).map_err(report)?;
+    Ok(())
 }
 
 #[panic_handler]

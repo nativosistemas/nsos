@@ -3,6 +3,27 @@
 version = 4
 
 [[package]]
+name = "cell-intruso"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-ping"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-pong"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "linked_list_allocator"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -27,6 +48,9 @@ version = "0.1.0"
 [[package]]
 name = "nsos-kcore"
 version = "0.1.0"
+dependencies = [
+ "nsos-abi",
+]
 
 [[package]]
 name = "nsos-kernel"
@@ -35,6 +59,13 @@ dependencies = [
  "linked_list_allocator",
  "nsos-abi",
  "nsos-kcore",
+]
+
+[[package]]
+name = "nsos-rt"
+version = "0.1.0"
+dependencies = [
+ "nsos-abi",
 ]
 
 [[package]]
