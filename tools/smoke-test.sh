@@ -3,6 +3,9 @@
 #   1. arranque + tests internos del kernel (ktest), debe salir con éxito;
 #   2. test negativo: una escritura en .rodata debe terminar en #PF y pánico
 #      controlado (comprueba W^X y la ruta de excepciones);
+#   2b. test negativo de SMAP: que el kernel lea una página de usuario
+#      directamente debe terminar en #PF (la CPU hace cumplir que solo se
+#      copie por `usercopy`);
 #   3. benchmarks (bandera `bench`, kernel en release): solo la cell `bench`
 #      corriendo; ver tools/bench-summary.sh.
 # En el caso 1 además se exige que el texto de la cell `hola` haya salido
@@ -49,5 +52,6 @@ run_case() {
 # isa-debug-exit: éxito 0x10 -> 33, fallo 0x11 -> 35
 VIRTCON_PATTERN="hola desde una cell" run_case boot "test-exit" 33 "ktest: .* 0 fallos" "$@"
 run_case wx-fault "test-wx-fault" 35 "escritura sin permiso" "$@"
+run_case smap-fault "test-smap-fault" 35 "lectura sin permiso" "$@"
 PROFILE=release run_case bench "bench" 33 "bench: ipc_ida_y_vuelta_ns" "$@"
 echo "OK: todos los tests en QEMU pasaron"

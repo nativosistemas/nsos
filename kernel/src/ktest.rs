@@ -102,6 +102,26 @@ fn frames() -> Result<(), &'static str> {
 
 const TEST_VADDR: u64 = 0xffff_a000_0000_0000;
 
+/// Para el test negativo de SMAP: mapea una página *de usuario* (bit USER)
+/// en el espacio actual y devuelve su dirección.
+pub fn map_user_test_page() -> u64 {
+    const USER_VADDR: u64 = 0x7000_0000;
+    let phys = pmm::alloc_frame().expect("sin marcos");
+    let mut g = mm::KERNEL_SPACE.lock();
+    let space = g.as_mut().expect("mm sin inicializar");
+    let mut alloc = pmm::alloc_frame;
+    space
+        .map(
+            USER_VADDR,
+            phys,
+            PageSize::Size4K,
+            flags::USER | flags::NO_EXECUTE,
+            &mut alloc,
+        )
+        .expect("map falló");
+    USER_VADDR
+}
+
 fn paging() -> Result<(), &'static str> {
     let phys = pmm::alloc_frame().ok_or("sin marcos")?;
     {

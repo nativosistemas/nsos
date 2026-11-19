@@ -70,7 +70,9 @@ pub fn init() {
             ((0x10u64) << 48) | ((gdt::KERNEL_CS as u64) << 32),
         );
         cpu::wrmsr(MSR_LSTAR, nsos_syscall_entry as *const () as u64);
-        cpu::wrmsr(MSR_SFMASK, 0x700); // limpiar TF, IF y DF
+        // Limpiar TF, IF, DF y AC: con AC=1 heredado de la cell, SMAP no
+        // protegería las páginas de usuario durante la syscall.
+        cpu::wrmsr(MSR_SFMASK, 0x4_0700);
     }
 }
 

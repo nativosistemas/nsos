@@ -20,17 +20,17 @@ Política:
 | `kernel/src/arch/x86_64/serial.rs` | construir los `Port` de COM1 | 0x3F8..0x3FD son de COM1 y solo los usa la consola (bajo lock) |
 | `kernel/src/arch/x86_64/mod.rs` | `cli; hlt`, puerto `isa-debug-exit` | no acceden a memoria |
 | `kernel/src/sync.rs` | `Sync` para `SpinLock`, acceso a `UnsafeCell` | acceso serializado por un `AtomicBool` con acquire/release |
-| `kernel/src/arch/x86_64/cpu.rs` | CR0/CR2/CR3, MSR, `rdtsc`, `sti`/`cli`/`hlt`, `invlpg` | escribir CR3/CR0/MSR es `unsafe fn`: el llamador garantiza que el estado nuevo mantiene válidos código y pila |
+| `kernel/src/arch/x86_64/cpu.rs` | CR0/CR2/CR3/CR4, MSR, `rdtsc`, `sti`/`cli`/`hlt`, `invlpg`, `clac` | escribir CR0/CR3/CR4/MSR y `clac` son `unsafe fn`: el llamador garantiza que el estado nuevo mantiene válidos código y pila (y que la CPU soporta el bit o la instrucción) |
 | `kernel/src/arch/x86_64/gdt.rs` | `lgdt`, recarga de segmentos, `ltr`, escritura del TSS | se inicializa una vez en el BSP sin interrupciones; GDT/TSS son `static` |
-| `kernel/src/arch/x86_64/idt.rs` | stubs en ensamblador, `lidt`, puntero al `TrapFrame` | layout del frame fijo y verificado en compilación; el frame devuelto siempre fue guardado por un stub o fabricado por el scheduler |
+| `kernel/src/arch/x86_64/idt.rs` | stubs en ensamblador, `lidt`, puntero al `TrapFrame`, `clac` al entrar | layout del frame fijo y verificado en compilación; el frame devuelto siempre fue guardado por un stub o fabricado por el scheduler; `clac` solo si SMAP está activo |
 | `kernel/src/arch/x86_64/paging.rs` | acceso a tablas vía HHDM | toda tabla proviene del allocador de marcos o de una entrada presente |
 | `kernel/src/arch/x86_64/apic.rs` | MMIO del APIC, puertos del PIC y del PIT | página MMIO mapeada sin caché; puertos exclusivos del módulo |
-| `kernel/src/mm/mod.rs` | activar NX/WP y cambiar CR3 | el espacio nuevo mapea kernel, HHDM y la pila de arranque |
+| `kernel/src/mm/mod.rs` | activar NX/WP, SMEP/SMAP y cambiar CR3 | el espacio nuevo mapea kernel, HHDM y la pila de arranque; SMEP/SMAP solo si CPUID los reporta, y el kernel nunca toca páginas de usuario (copia por el HHDM) |
 | `kernel/src/mm/pmm.rs` | bitmap y puesta a cero vía HHDM | memoria `Usable` reservada en el propio bitmap; marcos recién reservados |
 | `kernel/src/mm/heap.rs` | `GlobalAlloc`, región del heap | delega en `linked_list_allocator` con interrupciones deshabilitadas |
 | `kernel/src/sched.rs` | fabricar el `TrapFrame` inicial, `Send` de `Thread` | el frame vive en la pila propia del hilo; solo el scheduler lo toca bajo lock |
 | `kernel/src/ktest.rs` | `int3`, escrituras de prueba, lectura de tablas | solo en modo test; direcciones mapeadas por el propio test |
-| `kernel/src/main.rs` | test negativo `test-wx-fault` | solo con esa bandera; se espera el #PF |
+| `kernel/src/main.rs` | tests negativos `test-wx-fault` y `test-smap-fault` | solo con esas banderas; se espera el #PF |
 | `kernel/src/arch/x86_64/syscall.rs` | MSR de `syscall`, stub de entrada | un solo núcleo: la pila de kernel del hilo actual está en `NSOS_KSTACK_TOP` (con SMP: por CPU vía `swapgs`) |
 | `kernel/src/usercopy.rs` | copiar desde/hacia memoria de cells vía HHDM | cada página se traduce con las tablas de la cell y exige USER (y WRITABLE al escribir) |
 | `kernel/src/cell.rs` | copiar segmentos ELF a marcos nuevos | marcos recién reservados; rangos validados por `kcore::elf` |
@@ -40,5 +40,12 @@ Política:
 | `kernel/src/cell.rs` (`MemObj`) | poner a cero marcos de un objeto `Memory` | marcos contiguos recién reservados, vía HHDM |
 | `kernel/src/syscall.rs` (`ioport`) | `in`/`out` en nombre de un driver | el puerto es `base + off` con `off + width` dentro del rango de la capacidad `IoPorts` |
 | `cells/rt/src/lib.rs` | instrucción `syscall`, `_start`, accesos volátiles de `Mapped` | convención del ABI; el kernel valida todo argumento; `Mapped` solo existe tras un `mem_map` exitoso y cada acceso comprueba rango y alineación |
+| `cells/intruso/src/main.rs` | leer memoria del kernel a propósito | test de aislamiento: se espera #PF y que el kernel termine la cell |
+| `cells/fragil/src/main.rs` | escribir en la dirección 0 a propósito | test del supervisor: se espera #PF y un reinicio |
 
-Revisión: `grep -rn "unsafe" kernel/src` debe coincidir con esta tabla.
+Revisión automática: `tools/audit-unsafe.sh` (en `make lint` y en la CI)
+falla si un archivo usa `unsafe` sin estar en esta tabla, si la tabla nombra
+un archivo que ya no lo usa, si `crates/abi` o `crates/kcore` pierden
+`#![forbid(unsafe_code)]`, o si una cell no declara `#![deny(unsafe_code)]`.
+También imprime cuántos usos hay por archivo, para ver en cada PR si crecen.
+El modelo de amenazas está en [`amenazas.md`](amenazas.md).
