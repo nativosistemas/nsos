@@ -17,6 +17,7 @@ mod cell;
 mod console;
 mod ktest;
 mod mm;
+mod pci;
 mod sched;
 mod sync;
 mod syscall;
@@ -176,6 +177,56 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("pong", pong, alloc::vec![cap(b)]).map_err(report)?;
     cell::spawn("ping", ping, alloc::vec![cap(a)]).map_err(report)?;
     cell::spawn("intruso", intruso, alloc::vec![]).map_err(report)?;
+    boot_virtio_console(report)
+}
+
+/// virtio-console (PCI legacy, `1af4:1003`).
+pub const VIRTIO_CONSOLE: (u16, u16) = (0x1AF4, 0x1003);
+
+/// Si hay una consola virtio, arranca su driver (`virtcon`) en user-space
+/// y una cell cliente (`hola`) conectada a él por un canal. El kernel solo
+/// descubre el dispositivo y entrega sus recursos como capacidades.
+fn boot_virtio_console(
+    report: impl Fn(cell::SpawnError) -> &'static str,
+) -> Result<(), &'static str> {
+    use nsos_kcore::cspace::Cap;
+    let Some(dev) = pci::find(VIRTIO_CONSOLE.0, VIRTIO_CONSOLE.1) else {
+        kprintln!("pci: no hay virtio-console; no arranco virtcon");
+        return Ok(());
+    };
+    let (base, len) = dev.io_bar(0).ok_or("virtio-console sin BAR0 de E/S")?;
+    dev.enable_io_and_dma();
+    kprintln!(
+        "pci: virtio-console en {:02x}:{:02x}.{} (puertos {:#x}+{:#x})",
+        dev.bus,
+        dev.dev,
+        dev.func,
+        base,
+        len
+    );
+    let ports = Cap {
+        object: cell::KObject::IoPorts(alloc::sync::Arc::new(cell::PortRange { base, len })),
+        rights: cell::PORT_RIGHTS,
+    };
+    let dma = |pages| {
+        cell::MemObj::new(pages)
+            .map(|m| Cap {
+                object: cell::KObject::Memory(m),
+                rights: cell::DMA_RIGHTS,
+            })
+            .ok_or("sin memoria contigua para DMA")
+    };
+    let ring = dma(8)?;
+    let buf = dma(1)?;
+    let (a, b) = cell::channel_create();
+    let chan = |e| Cap {
+        object: cell::KObject::Channel(e),
+        rights: cell::ENDPOINT_RIGHTS,
+    };
+    let virtcon = module("virtcon").ok_or("falta el módulo virtcon")?;
+    let hola = module("hola").ok_or("falta el módulo hola")?;
+    cell::spawn("virtcon", virtcon, alloc::vec![ports, ring, buf, chan(a)]).map_err(&report)?;
+    cell::spawn("hola", hola, alloc::vec![chan(b)]).map_err(&report)?;
     Ok(())
 }
 

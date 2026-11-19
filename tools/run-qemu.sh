@@ -3,10 +3,14 @@
 #
 # Uso: tools/run-qemu.sh [--uefi] [args extra de QEMU...]
 # Salir: Ctrl-A X
+#
+# La consola virtio (que maneja la cell `virtcon`) se vuelca en
+# $VIRTCON_LOG (por defecto build/virtcon.log).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ISO="${ISO:-$ROOT/build/nsos.iso}"
+VIRTCON_LOG="${VIRTCON_LOG:-$ROOT/build/virtcon.log}"
 
 FIRMWARE=()
 if [[ "${1:-}" == "--uefi" ]]; then
@@ -28,5 +32,8 @@ exec qemu-system-x86_64 \
     -cdrom "$ISO" \
     -serial mon:stdio -display none \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -chardev file,id=vc0,path="$VIRTCON_LOG" \
+    -device virtio-serial-pci,id=vser0 \
+    -device virtconsole,chardev=vc0,bus=vser0.0 \
     -no-reboot \
     "$@"

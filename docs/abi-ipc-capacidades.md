@@ -27,7 +27,7 @@ Si ambos divergen, es un bug.
 | Tipo (`ObjectType`) | Qué representa | Derechos válidos |
 |---|---|---|
 | `Channel` (1) | Un extremo de un canal bidireccional | `SEND RECV` |
-| `Memory` (2) | Conjunto de marcos físicos mapeable | `READ WRITE EXEC` |
+| `Memory` (2) | Conjunto de marcos físicos mapeable | `READ WRITE EXEC CONTROL` (`CONTROL`: conocer la dirección física, para DMA) |
 | `Cell` (3) | Control de una cell hija | `CONTROL` |
 | `Irq` (4) | Línea de interrupción para un driver | `CONTROL` |
 | `IoPorts` (5) | Rango de puertos x86 para un driver | `READ WRITE` |
@@ -93,9 +93,10 @@ para una versión posterior; el formato del handle ya la permite.
   para evitar TOCTOU con otros hilos de la misma cell.
 
 Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
-implementación (hito 4): `debug_log`, `yield`, `exit`, `clock_monotonic`,
-`cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send` y
-`channel_recv`. El resto devuelve `Unsupported`. Resumen:
+implementación (hito 5): `debug_log`, `yield`, `exit`, `clock_monotonic`,
+`cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
+`channel_recv`, `mem_map`, `mem_info`, `ioport_read` e `ioport_write`. El
+resto devuelve `Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|
@@ -103,7 +104,7 @@ implementación (hito 4): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 | 1x | capacidades | `cap_dup`, `cap_drop`, `cap_info` |
 | 2x | canales | `channel_create`, `channel_send`, `channel_recv`, `channel_call` |
 | 3x | espera | `wait` |
-| 4x | memoria | `mem_create`, `mem_map`, `mem_unmap` |
+| 4x | memoria | `mem_create`, `mem_map`, `mem_unmap`, `mem_info` |
 | 5x | cells | `cell_spawn`, `cell_kill`, `cell_status` |
 | 6x | hardware | `irq_ack`, `ioport_read`, `ioport_write` |
 
@@ -220,6 +221,15 @@ Un driver es una cell que recibe en su vector de arranque:
 * un canal hacia sus clientes.
 
 El kernel solo enmascara la IRQ, activa `IRQ_PENDING` y espera `irq_ack`.
+
+* `mem_map(h, vaddr, rights)`: mapea el objeto entero en `vaddr` (alineada a
+  página, en el rango de usuario, sin pisar otro mapeo). Exige `READ` en la
+  capacidad y los derechos pedidos; W^X se aplica también aquí.
+* `mem_info(h, out)`: escribe `MemInfo { size, phys }`; `phys` es 0 salvo
+  que la capacidad tenga `CONTROL`.
+* `ioport_read(h, off, width)` / `ioport_write(h, off, width, v)`: `width`
+  es 1, 2 o 4 y `off` es relativo al rango concedido; `off + width` debe
+  caber en él. Un driver nunca nombra puertos absolutos.
 Para DMA (virtio) el driver recibe objetos `Memory` cuyas direcciones físicas
 conoce el kernel; sin IOMMU el driver sigue siendo de confianza respecto al
 DMA, y así se documenta en el modelo de amenazas.

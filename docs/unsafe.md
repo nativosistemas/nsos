@@ -35,6 +35,9 @@ Política:
 | `kernel/src/usercopy.rs` | copiar desde/hacia memoria de cells vía HHDM | cada página se traduce con las tablas de la cell y exige USER (y WRITABLE al escribir) |
 | `kernel/src/cell.rs` | copiar segmentos ELF a marcos nuevos | marcos recién reservados; rangos validados por `kcore::elf` |
 | `kernel/src/boot/limine.rs` (módulos) | leer módulos cargados por Limine | `size` bytes válidos en memoria que el kernel nunca reclama |
-| `cells/rt/src/lib.rs` | instrucción `syscall`, `_start` | convención del ABI; el kernel valida todo argumento |
+| `kernel/src/pci.rs` | puertos de configuración PCI 0xCF8/0xCFC | solo este módulo los usa, serializado por un lock |
+| `kernel/src/cell.rs` (`MemObj`) | poner a cero marcos de un objeto `Memory` | marcos contiguos recién reservados, vía HHDM |
+| `kernel/src/syscall.rs` (`ioport`) | `in`/`out` en nombre de un driver | el puerto es `base + off` con `off + width` dentro del rango de la capacidad `IoPorts` |
+| `cells/rt/src/lib.rs` | instrucción `syscall`, `_start`, accesos volátiles de `Mapped` | convención del ABI; el kernel valida todo argumento; `Mapped` solo existe tras un `mem_map` exitoso y cada acceso comprueba rango y alineación |
 
 Revisión: `grep -rn "unsafe" kernel/src` debe coincidir con esta tabla.

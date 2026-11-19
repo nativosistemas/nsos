@@ -111,6 +111,27 @@ fabricado que apunta a su función.
      +-----------------------------------------------+  termina en #PF
 ```
 
+## Drivers en user-space
+
+El kernel no maneja dispositivos: los *descubre* y entrega sus recursos como
+capacidades. Para la consola virtio:
+
+```
+kernel: pci::find(1af4:1003) -> BAR0 (puertos) + 2 objetos Memory (DMA)
+          |
+          v  capacidades de arranque
++---------+   canal (WRITE/WRITTEN)   +--------+
+| virtcon | <-----------------------> |  hola  |
++---------+                           +--------+
+     | ioport_read/write (relativo a BAR0), anillos virtio en Memory
+     v
+dispositivo virtio-console (QEMU) -> archivo build/virtcon.log
+```
+
+Sin IOMMU, un driver con DMA puede escribir cualquier memoria física: el
+driver sigue siendo de confianza respecto al DMA (documentado en el modelo
+de amenazas). Lo que sí garantiza el kernel es que solo toca *sus* puertos.
+
 ## Organización del repositorio
 
 ```
@@ -119,6 +140,8 @@ crates/kcore/      lógica del kernel sin hardware (marcos, CSpace, validador EL
 cells/rt/          runtime de las cells (entrada, syscalls, println!)
 cells/ping|pong/   cells de ejemplo que hablan por IPC
 cells/intruso/     test de aislamiento
+cells/virtcon/     driver virtio-console en user-space
+cells/hola/        cliente del driver: escribe por la consola virtio
 kernel/            microkernel (x86_64-unknown-none)
   src/arch/        código dependiente de arquitectura
   src/boot/        protocolo Limine
@@ -127,6 +150,7 @@ kernel/            microkernel (x86_64-unknown-none)
   src/cell.rs      cells, objetos del kernel y canales
   src/syscall.rs   implementación de las syscalls
   src/usercopy.rs  copias seguras kernel↔cell
+  src/pci.rs       descubrimiento PCI (solo encuentra y entrega recursos)
   src/trap.rs      despacho de interrupciones y excepciones
   src/ktest.rs     tests dentro del kernel
 docs/              especificaciones y documentación

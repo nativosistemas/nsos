@@ -133,6 +133,121 @@ pub fn cap_info(h: CapHandle) -> SysResult<CapInfo> {
     Ok(info)
 }
 
+/// Mapea un objeto de memoria en `vaddr` con `rights` (READ obligatorio).
+pub fn mem_map(h: CapHandle, vaddr: u64, rights: Rights) -> SysResult<Mapped> {
+    let info = mem_info(h)?;
+    decode_ret(syscall4(
+        Syscall::MemMap,
+        h.0 as u64,
+        vaddr,
+        rights.bits() as u64,
+        0,
+    ))?;
+    Ok(Mapped {
+        base: vaddr,
+        len: info.size as usize,
+    })
+}
+
+/// Tamaño y dirección física (si la capacidad tiene CONTROL).
+pub fn mem_info(h: CapHandle) -> SysResult<abi::syscall::MemInfo> {
+    let mut out = abi::syscall::MemInfo::default();
+    decode_ret(syscall4(
+        Syscall::MemInfo,
+        h.0 as u64,
+        &mut out as *mut _ as u64,
+        0,
+        0,
+    ))?;
+    Ok(out)
+}
+
+/// Lee el puerto `off` (relativo al inicio del rango concedido); `width` =
+/// 1, 2 o 4 bytes.
+pub fn ioport_read(h: CapHandle, off: u16, width: u8) -> SysResult<u32> {
+    decode_ret(syscall4(
+        Syscall::IoPortRead,
+        h.0 as u64,
+        off as u64,
+        width as u64,
+        0,
+    ))
+    .map(|v| v as u32)
+}
+
+/// Escribe el puerto `off` (relativo al inicio del rango concedido).
+pub fn ioport_write(h: CapHandle, off: u16, width: u8, value: u32) -> SysResult<()> {
+    decode_ret(syscall4(
+        Syscall::IoPortWrite,
+        h.0 as u64,
+        off as u64,
+        width as u64,
+        value as u64,
+    ))
+    .map(|_| ())
+}
+
+/// Región de memoria mapeada con accesos volátiles y con control de rango.
+/// Es la forma segura de que un driver comparta estructuras con un
+/// dispositivo (DMA) sin escribir `unsafe`.
+#[derive(Clone, Copy)]
+pub struct Mapped {
+    base: u64,
+    len: usize,
+}
+
+macro_rules! accessors {
+    ($($r:ident $w:ident $t:ty),*) => {$(
+        /// Lectura volátil (pánico si se sale del rango o no está alineada).
+        pub fn $r(&self, off: usize) -> $t {
+            let p = self.ptr::<$t>(off);
+            // SAFETY: `ptr` comprobó rango y alineación dentro de la región
+            // que el kernel mapeó para esta cell.
+            unsafe { core::ptr::read_volatile(p) }
+        }
+        /// Escritura volátil (pánico si se sale del rango o no está alineada).
+        pub fn $w(&self, off: usize, v: $t) {
+            let p = self.ptr::<$t>(off) as *mut $t;
+            // SAFETY: ídem.
+            unsafe { core::ptr::write_volatile(p, v) }
+        }
+    )*};
+}
+
+impl Mapped {
+    /// Tamaño en bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    /// `true` si está vacía.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    fn ptr<T>(&self, off: usize) -> *const T {
+        let n = core::mem::size_of::<T>();
+        assert!(
+            off.checked_add(n).is_some_and(|e| e <= self.len),
+            "acceso fuera de la región"
+        );
+        assert!(off.is_multiple_of(n), "acceso desalineado");
+        (self.base as usize + off) as *const T
+    }
+    accessors!(read_u8 write_u8 u8, read_u16 write_u16 u16, read_u32 write_u32 u32, read_u64 write_u64 u64);
+
+    /// Copia bytes a la región.
+    pub fn write_bytes(&self, off: usize, data: &[u8]) {
+        for (i, b) in data.iter().enumerate() {
+            self.write_u8(off + i, *b);
+        }
+    }
+}
+
+/// Barrera de memoria completa (ordena accesos a memoria compartida con un
+/// dispositivo).
+pub fn fence() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 /// Llamada cruda para tests de aislamiento (argumentos arbitrarios).
 pub fn raw_syscall(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;

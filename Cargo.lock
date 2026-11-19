@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "cell-hola"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-intruso"
 version = "0.1.0"
 dependencies = [
@@ -18,6 +25,13 @@ dependencies = [
 
 [[package]]
 name = "cell-pong"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-virtcon"
 version = "0.1.0"
 dependencies = [
  "nsos-rt",

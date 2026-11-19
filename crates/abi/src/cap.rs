@@ -107,7 +107,10 @@ impl ObjectType {
             common
                 | match self {
                     ObjectType::Channel => Rights::SEND.0 | Rights::RECV.0,
-                    ObjectType::Memory => Rights::READ.0 | Rights::WRITE.0 | Rights::EXEC.0,
+                    ObjectType::Memory => {
+                        // CONTROL en memoria = conocer su dirección física (DMA).
+                        Rights::READ.0 | Rights::WRITE.0 | Rights::EXEC.0 | Rights::CONTROL.0
+                    }
                     ObjectType::Cell => Rights::CONTROL.0,
                     ObjectType::Irq => Rights::CONTROL.0,
                     ObjectType::IoPorts => Rights::READ.0 | Rights::WRITE.0,
