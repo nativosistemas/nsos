@@ -27,7 +27,7 @@ KERNEL="$ROOT/target/x86_64-unknown-none/$PROFILE/nsos-kernel"
 # 1b. Cells: siempre en release (son chicas y así el benchmark es realista).
 # Se compilan aparte, con sus propios RUSTFLAGS (sin el modelo de código del
 # kernel) y su propio directorio de salida.
-CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino)
+CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet)
 CELL_PKGS=()
 for c in "${CELLS[@]}"; do CELL_PKGS+=(-p "cell-$c"); done
 RUSTFLAGS="-C relocation-model=static" cargo build --release \
@@ -54,6 +54,12 @@ for c in "${CELLS[@]}"; do
     cp "$CELL_DIR/$c" "$ISO_ROOT/boot/cells/$c"
     MODULES+="    module_path: boot():/boot/cells/$c"$'\n'
 done
+# Clave compartida del enlace entre máquinas (32 bytes), si se pide. La usa
+# el kernel para configurar la cell `enlace` (ver tools/migrate-test.sh).
+if [[ -n "${LINK_KEY:-}" ]]; then
+    cp "$LINK_KEY" "$ISO_ROOT/boot/enlace.key"
+    MODULES+="    module_path: boot():/boot/enlace.key"$'\n'
+fi
 cat > "$ISO_ROOT/boot/limine/limine.conf" <<EOF
 timeout: 0
 serial: yes

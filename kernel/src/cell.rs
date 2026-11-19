@@ -89,6 +89,22 @@ impl MemObj {
         Some(Arc::new(MemObj { phys, pages }))
     }
 
+    /// Objeto nuevo con `data` al principio (el resto a cero).
+    pub fn from_bytes(data: &[u8]) -> Option<Arc<MemObj>> {
+        let pages = (data.len() as u64).div_ceil(PAGE_SIZE).max(1) as usize;
+        let m = MemObj::new(pages)?;
+        // SAFETY: marcos recién reservados y nuestros (nadie más tiene el
+        // `Arc` todavía); `data` cabe en `pages` páginas.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                phys_to_virt(m.phys) as *mut u8,
+                data.len(),
+            )
+        };
+        Some(m)
+    }
+
     /// Tamaño en bytes.
     pub fn size(&self) -> u64 {
         self.pages as u64 * PAGE_SIZE

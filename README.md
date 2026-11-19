@@ -12,8 +12,11 @@ El kernel arranca en QEMU x86_64 (BIOS y UEFI) con Limine, tiene tablas de
 páginas propias (W^X), heap, APIC timer y scheduler apropiativo. Corre
 **cells en anillo 3**, cada una con su espacio de direcciones y su tabla de
 capacidades, que se comunican por canales IPC y se pasan capacidades. Una
-cell que viola el aislamiento es terminada sin afectar al kernel. Siguiente:
-drivers como cells (virtio). Ver [hoja de ruta](docs/hoja-de-ruta.md).
+cell que viola el aislamiento es terminada sin afectar al kernel. Hay
+drivers como cells (virtio), actualización en vivo con rollback y migración
+de un servicio entre dos QEMU. Ver [hoja de ruta](docs/hoja-de-ruta.md),
+[modelo de amenazas](docs/amenazas.md) y [cómo contribuir](CONTRIBUTING.md)
+(incluye la regla de verificación formal).
 
 ## Requisitos
 

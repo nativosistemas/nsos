@@ -1,0 +1,14 @@
+[package]
+name = "cell-virtnet"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "virtnet"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+nsos-rt = { path = "../rt" }

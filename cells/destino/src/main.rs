@@ -2,7 +2,7 @@
 //! (hito 10, modelo: `verification/lean/Nsos/Migration.lean`).
 //!
 //! Capacidades de arranque:
-//! 1. Canal de control con `enlace` (el puerto serie hacia la otra máquina).
+//! 1. Canal de control con `enlace` (la red autenticada hacia la otra máquina).
 //! 2. Imagen de `contador-roto`. 3. Imagen de `contador-v2`.
 //!
 //! Cuando el enlace trae un estado (`UPGRADE_RESTORE [mem, ep]` con el

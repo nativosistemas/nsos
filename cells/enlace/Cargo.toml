@@ -12,3 +12,4 @@ bench = false
 
 [dependencies]
 nsos-rt = { path = "../rt" }
+nsos-link = { path = "../../crates/link" }

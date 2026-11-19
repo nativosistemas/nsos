@@ -1,195 +1,275 @@
-//! Cell `enlace`: une dos máquinas por un puerto serie (COM2) y lleva por
-//! él la migración de un servicio (modelo:
-//! `verification/lean/Nsos/Migration.lean`).
+//! Cell `enlace`: une dos máquinas por la red (virtio-net) con un canal
+//! autenticado y lleva por él la migración de un servicio.
+//!
+//! Modelos: `verification/lean/Nsos/Migration.lean` (la migración) y
+//! `verification/lean/Nsos/Link.lean` (el enlace: nada falsificado, nada
+//! repetido, todo en orden). La parte criptográfica está en `crates/link`.
 //!
 //! Capacidades de arranque:
-//! 1. `IoPorts`: los 8 registros del UART 16550 de COM2.
-//! 2. Canal de control con el supervisor de esta máquina.
+//! 1. Canal con `virtnet` (el driver de red): `SEND`/`RECV` de paquetes.
+//! 2. `Memory` de solo lectura con la configuración que puso el kernel: la
+//!    clave compartida (32 bytes) y el rol de esta máquina (byte 32: 0 =
+//!    origen, 1 = destino).
+//! 3. Canal de control con el supervisor de esta máquina.
 //!
-//! Por el cable solo viajan **bytes**: el estado del servicio (una copia),
-//! los pedidos del cliente y sus respuestas. Nunca capacidades.
+//! Al arrancar, negocia una sesión con la otra punta (`HELLO` con un nonce
+//! aleatorio de cada lado, confirmación autenticada). Si no lo logra en
+//! `HANDSHAKE_NS`, no hay migración: del lado de origen contesta
+//! `UPGRADE_REJECT` a cada pedido (el supervisor hace rollback y el servicio
+//! sigue local); del lado de destino termina con error. Una trama que no
+//! verifica se descarta y se cuenta.
 //!
-//! Para el supervisor del lado de origen, el enlace *es* la versión nueva:
-//! recibe `UPGRADE_RESTORE [mem, ep]` (con el nombre de la versión que debe
-//! arrancar en la otra máquina), manda una copia del estado y responde
-//! `UPGRADE_ACCEPT` o `UPGRADE_REJECT [mem, ep]` según decida la otra punta.
-//! Si aceptó, se queda con `ep` y reenvía cada pedido del cliente por el
-//! cable (un pedido por vez) hasta que el cliente cierre.
+//! Por la red solo viajan **bytes**: una copia del estado, los pedidos del
+//! cliente y sus respuestas. Nunca capacidades.
 //!
-//! Del lado de destino hace lo simétrico: al llegar la copia crea un objeto
-//! `Memory` nuevo con ella y un canal, y se los pasa a su supervisor con
-//! `UPGRADE_RESTORE`; con la decisión responde por el cable y, si aceptó,
-//! entrega los pedidos que llegan al servicio local.
-//!
-//! Tramas: `0xA5`, tipo (u8), largo (u16), datos, suma (u8) de tipo, largo
-//! y datos. El cable de QEMU es confiable; una suma mala es un error fatal
-//! (el cliente ve `PEER_CLOSED`, nunca un valor inventado).
+//! Para el supervisor de origen, el enlace *es* la versión nueva: recibe
+//! `UPGRADE_RESTORE [mem, ep]` (con el nombre de la versión que debe
+//! arrancar en la otra máquina) y contesta `UPGRADE_ACCEPT` o
+//! `UPGRADE_REJECT [mem, ep]` según decida la otra punta. Si aceptó, se queda
+//! con `ep` y reenvía cada pedido del cliente (uno por vez). Del lado de
+//! destino hace lo simétrico con un `Memory` y un canal locales.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
+use nsos_link::{Role, Session, NONCE_LEN};
 use nsos_rt::abi::msg::labels::{UPGRADE_ACCEPT, UPGRADE_REJECT, UPGRADE_RESTORE};
 use nsos_rt::abi::msg::MAX_DATA;
 use nsos_rt::abi::syscall::flags::NONBLOCK;
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    bootstrap, cap_drop, channel_create, channel_recv, channel_send, ioport_read, ioport_write,
-    mem_create, mem_map, println, yield_now,
+    bootstrap, cap_drop, channel_create, channel_recv, channel_send, clock_ns, mem_create, mem_map,
+    println, random_u64, yield_now,
 };
 
-// UART 16550 (desplazamientos desde la base de COM2).
-const DATA: u16 = 0;
-const IER: u16 = 1;
-const FCR: u16 = 2;
-const LCR: u16 = 3;
-const MCR: u16 = 4;
-const LSR: u16 = 5;
-const LSR_DATA_READY: u32 = 1 << 0;
-const LSR_THR_EMPTY: u32 = 1 << 5;
-const LSR_IDLE: u32 = 1 << 6;
+/// Etiquetas del protocolo con `virtnet`.
+const NET_SEND: u64 = 1;
+const NET_RECV: u64 = 2;
 
-// Tipos de trama.
-const SYNC: u8 = 0xA5;
-const F_MIGRATE: u8 = 1;
-const F_ACCEPT: u8 = 2;
-const F_REJECT: u8 = 3;
-const F_REQ: u8 = 4;
-const F_RESP: u8 = 5;
-const F_CLOSE: u8 = 6;
+// Tipos de mensaje dentro del enlace (primer byte de los datos).
+const T_MIGRATE: u8 = 1;
+const T_ACCEPT: u8 = 2;
+const T_REJECT: u8 = 3;
+const T_REQ: u8 = 4;
+const T_RESP: u8 = 5;
+const T_CLOSE: u8 = 6;
 
 /// Bytes del estado que se copian (formatos `CNT1`/`CNT2` del contador).
 const STATE_LEN: usize = 32;
 const NAME_MAX: usize = 32;
-/// Cada intento mapea el estado en una dirección nueva (no hay `mem_unmap`).
+const CONFIG_VADDR: u64 = 0x2000_0000;
+/// Cada intento mapea el estado en una dirección nueva.
 const STATE_VADDR: u64 = 0x3000_0000;
 const STATE_STRIDE: u64 = 0x10_0000;
 const MAX_ATTEMPTS: u64 = 8;
-const FRAME_MAX: usize = 8 + MAX_DATA;
+const HANDSHAKE_NS: u64 = 10_000_000_000;
+const HELLO_EVERY_NS: u64 = 50_000_000;
+/// Lo más largo que entra en un paquete (un mensaje del canal con `virtnet`).
+const PACKET_MAX: usize = MAX_DATA;
+/// Lo más largo que puede llevar un mensaje del enlace.
+const DATA_MAX: usize = PACKET_MAX - nsos_link::DATA_OVERHEAD;
 
 nsos_rt::entry!(main);
 
-struct Uart(CapHandle);
+struct Link {
+    net: CapHandle,
+    role: Role,
+    psk: [u8; 32],
+    nonce: [u8; NONCE_LEN],
+    peer_nonce: Option<[u8; NONCE_LEN]>,
+    session: Option<Session>,
+    /// La otra punta probó que tiene la misma clave de sesión.
+    established: bool,
+    /// Un mensaje que llegó antes de terminar la negociación.
+    pending: Option<([u8; DATA_MAX], usize)>,
+    dropped: u64,
+}
 
-impl Uart {
-    fn init(&self) -> Result<(), Error> {
-        ioport_write(self.0, IER, 1, 0)?; // sin interrupciones: se sondea
-        ioport_write(self.0, LCR, 1, 0x80)?; // DLAB
-        ioport_write(self.0, DATA, 1, 1)?; // divisor 1 (115200)
-        ioport_write(self.0, IER, 1, 0)?;
-        ioport_write(self.0, LCR, 1, 0x03)?; // 8N1
-                                             // Sin FIFO, y sobre todo sin limpiarla: si la otra máquina ya mandó
-                                             // algo, el primer byte espera en el registro de recepción y QEMU
-                                             // retiene el resto. Limpiar la FIFO aquí lo perdería.
-        ioport_write(self.0, FCR, 1, 0)?;
-        ioport_write(self.0, MCR, 1, 0x03) // DTR + RTS
+impl Link {
+    fn send_packet(&self, p: &[u8]) -> Result<(), Error> {
+        channel_send(self.net, &Message::new(NET_SEND, p)?, 0)
     }
 
-    fn put(&self, b: u8) -> Result<(), Error> {
-        while ioport_read(self.0, LSR, 1)? & LSR_THR_EMPTY == 0 {
-            yield_now();
-        }
-        ioport_write(self.0, DATA, 1, b as u32)
+    fn send_hello(&self) -> Result<(), Error> {
+        let mut buf = [0u8; nsos_link::HELLO_LEN];
+        let n =
+            nsos_link::hello(self.role, &self.nonce, &mut buf).map_err(|_| Error::BadMessage)?;
+        self.send_packet(&buf[..n])
     }
 
-    fn try_get(&self) -> Result<Option<u8>, Error> {
-        if ioport_read(self.0, LSR, 1)? & LSR_DATA_READY == 0 {
-            return Ok(None);
-        }
-        Ok(Some(ioport_read(self.0, DATA, 1)? as u8))
-    }
-
-    fn get(&self) -> Result<u8, Error> {
-        loop {
-            if let Some(b) = self.try_get()? {
-                return Ok(b);
-            }
-            yield_now();
-        }
-    }
-
-    /// Espera a que el UART haya sacado todo (antes de terminar).
-    fn drain(&self) -> Result<(), Error> {
-        while ioport_read(self.0, LSR, 1)? & LSR_IDLE == 0 {
-            yield_now();
+    fn send_confirm(&self) -> Result<(), Error> {
+        if let Some(s) = &self.session {
+            let mut buf = [0u8; nsos_link::DATA_OVERHEAD];
+            let n = s.confirm(&mut buf).map_err(|_| Error::BadMessage)?;
+            self.send_packet(&buf[..n])?;
         }
         Ok(())
     }
 
-    fn send(&self, kind: u8, parts: &[&[u8]]) -> Result<(), Error> {
-        let len: usize = parts.iter().map(|p| p.len()).sum();
-        if len > FRAME_MAX {
-            return Err(Error::BadMessage);
+    fn drop_frame(&mut self, why: &str) {
+        self.dropped += 1;
+        if self.dropped <= 3 {
+            println!("enlace: descarto una trama ({})", why);
         }
-        let hdr = [kind, len as u8, (len >> 8) as u8];
-        let mut sum = 0u8;
-        self.put(SYNC)?;
-        for &b in hdr.iter().chain(parts.iter().flat_map(|p| p.iter())) {
-            sum = sum.wrapping_add(b);
-            self.put(b)?;
-        }
-        self.put(sum)
     }
 
-    /// Recibe una trama completa; si `first` ya trae el byte de sincronía,
-    /// no lo vuelve a esperar.
-    fn recv<'a>(
-        &self,
-        buf: &'a mut [u8; FRAME_MAX],
-        first: Option<u8>,
-    ) -> Result<(u8, &'a [u8]), Error> {
-        let sync = match first {
-            Some(b) => b,
-            None => self.get()?,
+    /// Procesa un paquete recibido. Devuelve los datos si era un mensaje
+    /// aceptado (`Link.Step.deliver`).
+    fn process(&mut self, p: &[u8], out: &mut [u8; DATA_MAX]) -> Result<Option<usize>, Error> {
+        if let Some((role, n)) = nsos_link::parse_hello(p) {
+            if role != self.role.peer() {
+                self.drop_frame("HELLO con mi propio rol");
+                return Ok(None);
+            }
+            if self.peer_nonce != Some(n) {
+                if self.established {
+                    // La otra punta reinició (o alguien inventa HELLOs): no
+                    // se mezclan sesiones.
+                    println!("enlace: la otra punta cambió de sesión");
+                    return Err(Error::PeerClosed);
+                }
+                let (o, d) = match self.role {
+                    Role::Origin => (self.nonce, n),
+                    Role::Dest => (n, self.nonce),
+                };
+                self.session = Some(Session::new(&self.psk, self.role, &o, &d));
+                self.peer_nonce = Some(n);
+            }
+            self.send_confirm()?;
+            return Ok(None);
+        }
+        let Some(s) = self.session.as_mut() else {
+            self.drop_frame("sin sesión todavía");
+            return Ok(None);
         };
-        if sync != SYNC {
-            println!("enlace: byte de sincronía inválido {:#x}", sync);
-            return Err(Error::BadMessage);
+        if s.is_confirm(p) {
+            self.established = true;
+            return Ok(None);
         }
-        let kind = self.get()?;
-        let (lo, hi) = (self.get()?, self.get()?);
-        let len = u16::from_le_bytes([lo, hi]) as usize;
-        if len > FRAME_MAX {
-            return Err(Error::BadMessage);
+        match s.open(p) {
+            Ok(data) if data.len() <= DATA_MAX => {
+                // Un mensaje válido también prueba la clave.
+                self.established = true;
+                out[..data.len()].copy_from_slice(data);
+                Ok(Some(data.len()))
+            }
+            Ok(_) => Err(Error::BadMessage),
+            Err(e) => {
+                self.drop_frame(match e {
+                    nsos_link::LinkError::BadTag => "etiqueta inválida",
+                    nsos_link::LinkError::BadSequence => "secuencia repetida o fuera de orden",
+                    nsos_link::LinkError::WrongDirection => "dirección equivocada",
+                    _ => "mal formada",
+                });
+                Ok(None)
+            }
         }
-        let mut sum = kind.wrapping_add(lo).wrapping_add(hi);
-        for b in buf.iter_mut().take(len) {
-            *b = self.get()?;
-            sum = sum.wrapping_add(*b);
+    }
+
+    /// Un paquete de la red, si hay.
+    fn poll(&mut self, out: &mut [u8; DATA_MAX]) -> Result<Option<usize>, Error> {
+        let mut m = Message::default();
+        match channel_recv(self.net, &mut m, NONBLOCK) {
+            Ok(()) if m.header.label == NET_RECV => self.process(m.payload(), out),
+            Ok(()) => Err(Error::BadMessage),
+            Err(Error::WouldBlock) => Ok(None),
+            Err(e) => Err(e),
         }
-        if self.get()? != sum {
-            println!("enlace: suma de control inválida");
-            return Err(Error::BadMessage);
+    }
+
+    /// Negocia la sesión. `Ok(false)` si se venció el plazo.
+    fn handshake(&mut self) -> Result<bool, Error> {
+        let start = clock_ns();
+        let mut last = 0u64;
+        let mut buf = [0u8; DATA_MAX];
+        while !self.established {
+            let now = clock_ns();
+            if now - start > HANDSHAKE_NS {
+                return Ok(false);
+            }
+            if last == 0 || now - last > HELLO_EVERY_NS {
+                self.send_hello()?;
+                self.send_confirm()?;
+                last = now;
+            }
+            match self.poll(&mut buf)? {
+                Some(n) => self.pending = Some((buf, n)),
+                None => yield_now(),
+            }
         }
-        Ok((kind, &buf[..len]))
+        // Una confirmación más: la otra punta ya tiene la sesión (nos mandó
+        // la suya), así que esta la puede verificar aunque se haya perdido
+        // alguna anterior.
+        self.send_confirm()?;
+        Ok(true)
+    }
+
+    /// Manda un mensaje autenticado (`Link.Step.send`).
+    fn send(&mut self, kind: u8, parts: &[&[u8]]) -> Result<(), Error> {
+        let mut data = [0u8; DATA_MAX];
+        data[0] = kind;
+        let mut n = 1;
+        for p in parts {
+            let end = n + p.len();
+            if end > DATA_MAX {
+                return Err(Error::InvalidArgs);
+            }
+            data[n..end].copy_from_slice(p);
+            n = end;
+        }
+        let s = self.session.as_mut().ok_or(Error::PeerClosed)?;
+        let mut pkt = [0u8; PACKET_MAX];
+        let len = s
+            .seal(&data[..n], &mut pkt)
+            .map_err(|_| Error::InvalidArgs)?;
+        self.send_packet(&pkt[..len])
+    }
+
+    /// Espera el próximo mensaje autenticado. Devuelve su tipo y largo.
+    fn recv(&mut self, out: &mut [u8; DATA_MAX]) -> Result<(u8, usize), Error> {
+        if let Some((b, n)) = self.pending.take() {
+            *out = b;
+            return if n == 0 {
+                Err(Error::BadMessage)
+            } else {
+                Ok((out[0], n))
+            };
+        }
+        loop {
+            match self.poll(out)? {
+                Some(0) => return Err(Error::BadMessage),
+                Some(n) => return Ok((out[0], n)),
+                None => yield_now(),
+            }
+        }
     }
 }
 
 /// Origen, servicio aceptado en la otra punta: cada pedido del cliente
-/// cruza el cable y la respuesta vuelve por `ep`.
-fn proxy_out(uart: &Uart, ep: CapHandle) -> Result<u64, Error> {
+/// cruza la red y la respuesta vuelve por `ep`.
+fn proxy_out(link: &mut Link, ep: CapHandle) -> Result<u64, Error> {
     let mut m = Message::default();
-    let mut buf = [0u8; FRAME_MAX];
+    let mut buf = [0u8; DATA_MAX];
     let mut n = 0;
     loop {
         match channel_recv(ep, &mut m, 0) {
             Ok(()) => {
                 for &c in m.cap_slice() {
-                    // Las capacidades no cruzan el cable.
+                    // Las capacidades no cruzan de máquina.
                     cap_drop(c)?;
                 }
-                uart.send(F_REQ, &[&m.header.label.to_le_bytes(), m.payload()])?;
-                let (kind, data) = uart.recv(&mut buf, None)?;
-                if kind != F_RESP || data.len() < 8 {
+                link.send(T_REQ, &[&m.header.label.to_le_bytes(), m.payload()])?;
+                let (kind, len) = link.recv(&mut buf)?;
+                if kind != T_RESP || len < 9 {
                     return Err(Error::BadMessage);
                 }
-                let label = u64::from_le_bytes(data[..8].try_into().unwrap());
-                channel_send(ep, &Message::new(label, &data[8..])?, 0)?;
+                let label = u64::from_le_bytes(buf[1..9].try_into().unwrap());
+                channel_send(ep, &Message::new(label, &buf[9..len])?, 0)?;
                 n += 1;
             }
             Err(Error::PeerClosed) => {
-                uart.send(F_CLOSE, &[])?;
-                uart.drain()?;
+                link.send(T_CLOSE, &[])?;
                 return Ok(n);
             }
             Err(e) => return Err(e),
@@ -197,10 +277,16 @@ fn proxy_out(uart: &Uart, ep: CapHandle) -> Result<u64, Error> {
     }
 }
 
+fn reject(ctrl: CapHandle, mem: CapHandle, ep: CapHandle) -> Result<(), Error> {
+    let mut r = Message::new(UPGRADE_REJECT, b"")?;
+    r.push_cap(mem)?;
+    r.push_cap(ep)?;
+    channel_send(ctrl, &r, 0)
+}
+
 /// Origen: el supervisor entregó `[mem, ep]`. Manda la copia del estado y
-/// espera la decisión. Devuelve `true` si terminó el servicio (aceptado y
-/// el cliente cerró).
-fn migrate_out(uart: &Uart, ctrl: CapHandle, m: &Message, attempt: u64) -> Result<bool, Error> {
+/// espera la decisión. Devuelve `true` si terminó el servicio.
+fn migrate_out(link: &mut Link, ctrl: CapHandle, m: &Message, attempt: u64) -> Result<bool, Error> {
     let &[mem, ep] = m.cap_slice() else {
         return Err(Error::BadMessage);
     };
@@ -219,22 +305,22 @@ fn migrate_out(uart: &Uart, ctrl: CapHandle, m: &Message, attempt: u64) -> Resul
         STATE_LEN,
         core::str::from_utf8(name).unwrap_or("?")
     );
-    uart.send(F_MIGRATE, &[&[name.len() as u8], name, &copy])?;
-    let mut buf = [0u8; FRAME_MAX];
-    match uart.recv(&mut buf, None)?.0 {
-        F_ACCEPT => {
+    link.send(T_MIGRATE, &[&[name.len() as u8], name, &copy])?;
+    let mut buf = [0u8; DATA_MAX];
+    match link.recv(&mut buf)?.0 {
+        T_ACCEPT => {
             println!("enlace: la otra máquina aceptó; reenvío los pedidos del cliente");
             channel_send(ctrl, &Message::new(UPGRADE_ACCEPT, b"")?, 0)?;
-            let n = proxy_out(uart, ep)?;
-            println!("enlace: el cliente cerró; reenvié {} pedidos", n);
+            let n = proxy_out(link, ep)?;
+            println!(
+                "enlace: el cliente cerró; reenvié {} pedidos ({} tramas descartadas)",
+                n, link.dropped
+            );
             Ok(true)
         }
-        F_REJECT => {
+        T_REJECT => {
             println!("enlace: la otra máquina rechazó; devuelvo estado y cliente");
-            let mut r = Message::new(UPGRADE_REJECT, b"")?;
-            r.push_cap(mem)?;
-            r.push_cap(ep)?;
-            channel_send(ctrl, &r, 0)?;
+            reject(ctrl, mem, ep)?;
             Ok(false)
         }
         _ => Err(Error::BadMessage),
@@ -242,10 +328,10 @@ fn migrate_out(uart: &Uart, ctrl: CapHandle, m: &Message, attempt: u64) -> Resul
 }
 
 /// Destino: llegó una copia del estado. Arma `[mem, ep]` locales, se los
-/// pasa al supervisor y contesta su decisión por el cable. Devuelve el
-/// extremo del servicio si aceptó.
+/// pasa al supervisor y contesta su decisión. Devuelve el extremo del
+/// servicio si aceptó.
 fn migrate_in(
-    uart: &Uart,
+    link: &mut Link,
     ctrl: CapHandle,
     data: &[u8],
     attempt: u64,
@@ -271,7 +357,7 @@ fn migrate_in(
     channel_recv(ctrl, &mut m, 0)?;
     match m.header.label {
         UPGRADE_ACCEPT => {
-            uart.send(F_ACCEPT, &[])?;
+            link.send(T_ACCEPT, &[])?;
             Ok(Some(proxy_end))
         }
         UPGRADE_REJECT => {
@@ -279,32 +365,32 @@ fn migrate_in(
                 cap_drop(c)?;
             }
             cap_drop(proxy_end)?;
-            uart.send(F_REJECT, &[])?;
+            link.send(T_REJECT, &[])?;
             Ok(None)
         }
         _ => Err(Error::BadMessage),
     }
 }
 
-/// Destino, servicio aceptado: entrega cada pedido que llega por el cable.
-fn proxy_in(uart: &Uart, srv: CapHandle) -> Result<u64, Error> {
-    let mut buf = [0u8; FRAME_MAX];
+/// Destino, servicio aceptado: entrega cada pedido que llega por la red.
+fn proxy_in(link: &mut Link, srv: CapHandle) -> Result<u64, Error> {
+    let mut buf = [0u8; DATA_MAX];
     let mut m = Message::default();
     let mut n = 0;
     loop {
-        let (kind, data) = uart.recv(&mut buf, None)?;
+        let (kind, len) = link.recv(&mut buf)?;
         match kind {
-            F_REQ if data.len() >= 8 => {
-                let label = u64::from_le_bytes(data[..8].try_into().unwrap());
-                channel_send(srv, &Message::new(label, &data[8..])?, 0)?;
+            T_REQ if len >= 9 => {
+                let label = u64::from_le_bytes(buf[1..9].try_into().unwrap());
+                channel_send(srv, &Message::new(label, &buf[9..len])?, 0)?;
                 channel_recv(srv, &mut m, 0)?;
                 for &c in m.cap_slice() {
                     cap_drop(c)?;
                 }
-                uart.send(F_RESP, &[&m.header.label.to_le_bytes(), m.payload()])?;
+                link.send(T_RESP, &[&m.header.label.to_le_bytes(), m.payload()])?;
                 n += 1;
             }
-            F_CLOSE => {
+            T_CLOSE => {
                 cap_drop(srv)?;
                 return Ok(n);
             }
@@ -313,48 +399,103 @@ fn proxy_in(uart: &Uart, srv: CapHandle) -> Result<u64, Error> {
     }
 }
 
-fn run(uart: &Uart, ctrl: CapHandle) -> Result<(), Error> {
-    uart.init()?;
+fn run_origin(link: &mut Link, ctrl: CapHandle, authenticated: bool) -> Result<(), Error> {
     let mut m = Message::default();
-    let mut buf = [0u8; FRAME_MAX];
     for attempt in 0..MAX_ATTEMPTS {
-        // Lo que llegue primero define de qué lado estamos.
-        loop {
-            match channel_recv(ctrl, &mut m, NONBLOCK) {
-                Ok(()) if m.header.label == UPGRADE_RESTORE => {
-                    if migrate_out(uart, ctrl, &m, attempt)? {
-                        return Ok(());
-                    }
-                    break;
+        match channel_recv(ctrl, &mut m, 0) {
+            Ok(()) if m.header.label == UPGRADE_RESTORE => {
+                if !authenticated {
+                    println!("enlace: sin enlace autenticado; rechazo la migración");
+                    let &[mem, ep] = m.cap_slice() else {
+                        return Err(Error::BadMessage);
+                    };
+                    reject(ctrl, mem, ep)?;
+                    continue;
                 }
-                Ok(()) => return Err(Error::BadMessage),
-                Err(Error::WouldBlock) => {}
-                Err(Error::PeerClosed) => return Ok(()),
-                Err(e) => return Err(e),
-            }
-            if let Some(b) = uart.try_get()? {
-                let (kind, data) = uart.recv(&mut buf, Some(b))?;
-                if kind != F_MIGRATE {
-                    return Err(Error::BadMessage);
-                }
-                println!("enlace: llegó un estado de la otra máquina");
-                if let Some(srv) = migrate_in(uart, ctrl, data, attempt)? {
-                    let n = proxy_in(uart, srv)?;
-                    println!("enlace: el cliente remoto cerró; atendí {} pedidos", n);
+                if migrate_out(link, ctrl, &m, attempt)? {
                     return Ok(());
                 }
-                break;
             }
-            yield_now();
+            Ok(()) => return Err(Error::BadMessage),
+            Err(Error::PeerClosed) if authenticated => return Ok(()),
+            Err(e) => return Err(e),
         }
     }
     Err(Error::TimedOut)
 }
 
+fn run_dest(link: &mut Link, ctrl: CapHandle) -> Result<(), Error> {
+    let mut buf = [0u8; DATA_MAX];
+    for attempt in 0..MAX_ATTEMPTS {
+        let (kind, len) = link.recv(&mut buf)?;
+        if kind != T_MIGRATE {
+            return Err(Error::BadMessage);
+        }
+        println!("enlace: llegó un estado autenticado de la otra máquina");
+        if let Some(srv) = migrate_in(link, ctrl, &buf[1..len], attempt)? {
+            let n = proxy_in(link, srv)?;
+            println!(
+                "enlace: el cliente remoto cerró; atendí {} pedidos ({} tramas descartadas)",
+                n, link.dropped
+            );
+            return Ok(());
+        }
+    }
+    Err(Error::TimedOut)
+}
+
+fn run() -> Result<(), Error> {
+    let net = bootstrap(1);
+    let config = mem_map(bootstrap(2), CONFIG_VADDR, Rights::READ)?;
+    let ctrl = bootstrap(3);
+    let mut psk = [0u8; 32];
+    for (i, b) in psk.iter_mut().enumerate() {
+        *b = config.read_u8(i);
+    }
+    let role = match config.read_u8(32) {
+        0 => Role::Origin,
+        1 => Role::Dest,
+        _ => return Err(Error::InvalidArgs),
+    };
+    let mut nonce = [0u8; NONCE_LEN];
+    for half in nonce.chunks_mut(8) {
+        let r = random_u64().ok_or(Error::Unsupported)?;
+        half.copy_from_slice(&r.to_le_bytes());
+    }
+    let mut link = Link {
+        net,
+        role,
+        psk,
+        nonce,
+        peer_nonce: None,
+        session: None,
+        established: false,
+        pending: None,
+        dropped: 0,
+    };
+    let ok = link.handshake()?;
+    if ok {
+        println!("enlace: sesión autenticada con la otra máquina");
+    } else {
+        println!(
+            "enlace: no se pudo autenticar a la otra máquina ({} tramas descartadas)",
+            link.dropped
+        );
+    }
+    match role {
+        Role::Origin => run_origin(&mut link, ctrl, ok)?,
+        Role::Dest if ok => run_dest(&mut link, ctrl)?,
+        Role::Dest => return Err(Error::AccessDenied),
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::AccessDenied)
+    }
+}
+
 fn main() -> i32 {
-    let uart = Uart(bootstrap(1));
-    let ctrl = bootstrap(2);
-    match run(&uart, ctrl) {
+    match run() {
         Ok(()) => 0,
         Err(e) => {
             println!("enlace: error {:?}", e);

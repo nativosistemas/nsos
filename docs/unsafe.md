@@ -37,9 +37,9 @@ Política:
 | `kernel/src/boot/limine.rs` (módulos) | leer módulos cargados por Limine | `size` bytes válidos en memoria que el kernel nunca reclama |
 | `kernel/src/trap.rs` | reescribir el frame guardado de un hilo cuya cell se pidió matar | el frame es del hilo que se va a reanudar, en su propia pila de kernel; se lo convierte en un frame de anillo 0 hacia `kill_trampoline` |
 | `kernel/src/pci.rs` | puertos de configuración PCI 0xCF8/0xCFC | solo este módulo los usa, serializado por un lock |
-| `kernel/src/cell.rs` (`MemObj`) | poner a cero marcos de un objeto `Memory` | marcos contiguos recién reservados, vía HHDM |
+| `kernel/src/cell.rs` (`MemObj`) | poner a cero marcos de un objeto `Memory` y copiar en él los bytes iniciales (`from_bytes`) | marcos contiguos recién reservados, vía HHDM; la copia cabe en el objeto |
 | `kernel/src/syscall.rs` (`ioport`) | `in`/`out` en nombre de un driver | el puerto es `base + off` con `off + width` dentro del rango de la capacidad `IoPorts` |
-| `cells/rt/src/lib.rs` | instrucción `syscall`, `_start`, accesos volátiles de `Mapped` | convención del ABI; el kernel valida todo argumento; `Mapped` solo existe tras un `mem_map` exitoso y cada acceso comprueba rango y alineación |
+| `cells/rt/src/lib.rs` | instrucción `syscall`, `_start`, accesos volátiles de `Mapped`, `rdrand` | convención del ABI; el kernel valida todo argumento; `Mapped` solo existe tras un `mem_map` exitoso y cada acceso comprueba rango y alineación; `rdrand` solo si CPUID lo reporta |
 | `cells/intruso/src/main.rs` | leer memoria del kernel a propósito | test de aislamiento: se espera #PF y que el kernel termine la cell |
 | `cells/fragil/src/main.rs` | escribir en la dirección 0 a propósito | test del supervisor: se espera #PF y un reinicio |
 

@@ -1,0 +1,10 @@
+[package]
+name = "nsos-link"
+description = "Enlace autenticado entre máquinas: HMAC-SHA256, sesiones y secuencias (sin unsafe, testeable en el host)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+# `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

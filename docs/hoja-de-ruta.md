@@ -13,7 +13,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente`, con rollback |
 | 8 | Tests de aislamiento y benchmark de IPC | ✅ `intruso` (27 abusos), fuzzer `caos`, `bench` con resumen en la CI |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ✅ `docs/amenazas.md`, auditoría `tools/audit-unsafe.sh`, SMEP/SMAP |
-| 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B por COM2 sin cortar al `cliente`, con rollback |
+| 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B sin cortar al `cliente`, con rollback (ahora por un enlace autenticado sobre virtio-net) |
 
 ## Criterios de aceptación del MVP
 
@@ -202,11 +202,36 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   capacidades no cruzan de máquina y se migra un servicio cuyo estado cabe
   en 32 bytes (lo que define el formato del contador).
 
-## Próximos pasos posibles
+## Después del backlog
 
-* Revocar mapeos al mover un `Memory` (modelarlo en Lean junto con el IPC).
-* Enlace autenticado y una red de verdad (virtio-net como cell).
-* Rollback cuando la versión nueva falla (no solo cuando rechaza).
+* Hecho: revocar mapeos al mover un `Memory` (PR #15, modelo
+  `verification/lean/Nsos/Memory.lean` y Kani sobre la paginación).
+* Hecho: enlace autenticado entre máquinas sobre virtio-net (ver abajo).
+* En curso: rollback cuando la versión nueva se cae (no solo cuando
+  rechaza), extendiendo `Upgrade.lean`.
+* Regla para todo trabajo nuevo: evaluar la verificación formal desde el
+  diseño (ver [`CONTRIBUTING.md`](../CONTRIBUTING.md)).
+
+## Enlace autenticado (hecho)
+
+* Modelo primero: `verification/lean/Nsos/Link.lean`. Contra un adversario
+  que controla la red (descarta, reordena, repite, refleja e inyecta), lo
+  que el receptor entrega es un prefijo de lo que mandó la otra punta en la
+  sesión actual: nada falsificado, nada repetido, todo en orden. Cuatro
+  mutaciones (sin MAC, sin sesión, sin dirección, secuencia `≤`) rompen la
+  demostración.
+* `crates/link` (sin `unsafe`, en el host): SHA-256 y HMAC-SHA256 propios
+  con vectores FIPS 180-4 y RFC 4231; sesión con un nonce aleatorio
+  (`rdrand`) de cada punta; tramas con dirección, secuencia y etiqueta de
+  128 bits; tests de ataques (cada bit alterado, repetición, reorden,
+  reflejo, otra sesión, otra clave) y Kani sobre el parser.
+* Cell `virtnet`: driver virtio-net legacy en user-space (difusión con un
+  EtherType propio); no participa de la autenticación.
+* `enlace` usa la red en lugar de COM2; el kernel le da la clave
+  (`enlace.key` en la ISO) y el rol en un `Memory` de solo lectura.
+* Prueba negativa en QEMU (`tools/migrate-test.sh --clave-distinta`): con
+  otra clave, B descarta todo, no arranca ninguna versión y A hace rollback.
+* Ahora también corre con UEFI (OVMF ya no se mete en el enlace).
 
 ## Riesgos
 

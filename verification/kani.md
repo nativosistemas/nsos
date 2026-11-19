@@ -25,6 +25,7 @@ casos borde.
 | `walk_any_tables` | `crates/kcore/src/paging.rs` | Con tablas de páginas de contenido cualquiera (incluso corruptas), `map`, `unmap` y `translate` no entran en pánico ni desbordan, y nunca usan un índice fuera de la tabla. |
 | `map_then_translate` | `crates/kcore/src/paging.rs` | Mapear cualquier página de la mitad baja: después se traduce a esa física con exactamente los permisos pedidos (USER, WRITABLE, NX), y no se escribe nada en la mitad alta del PML4 ni en las tablas del kernel. |
 | `unmap_only_that_page` | `crates/kcore/src/paging.rs` | Con dos páginas mapeadas, `unmap` de cualquier dirección quita solo la página pedida. |
+| `parse_data_any`, `parse_hello_any` | `crates/link/src/lib.rs` | Con cualquier trama de hasta 40 bytes, el parser del enlace no entra en pánico; si acepta, la cabecera, los datos y la etiqueta cubren la trama exactamente (sin bytes de más ni de menos). |
 | `user_range_stays_low` | `crates/kcore/src/paging.rs` | Un rango que acepta `user_range_ok` (lo que exige `mem_map`) no desborda y queda entero en la mitad baja. |
 
 `check_invariants` (en `cspace.rs`) también corre en los tests unitarios.
