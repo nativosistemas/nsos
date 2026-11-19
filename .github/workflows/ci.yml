@@ -24,3 +24,26 @@ jobs:
         run: make smoke
       - name: Arranque en QEMU (UEFI)
         run: make smoke-uefi
+
+  lean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar Lean (elan)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Demostraciones
+        working-directory: verification/lean
+        run: |
+          lake build
+          if grep -rnw --include='*.lean' -e sorry -e admit Nsos TraceGen.lean; then
+            echo "hay demostraciones incompletas" >&2
+            exit 1
+          fi
+      - name: Trazas del modelo al día
+        run: |
+          cd verification/lean
+          lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace
+          git diff --exit-code -- ../../crates/kcore/tests/data/cspace_model.trace

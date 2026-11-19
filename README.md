@@ -33,6 +33,7 @@ make run-uefi    # ídem con firmware UEFI
 make test        # tests unitarios en el host
 make smoke       # arranca en QEMU, corre los tests internos y un test de fallo (como la CI)
 make lint        # rustfmt + clippy
+make verify      # demostraciones en Lean + tests derivados del modelo (requiere elan)
 ```
 
 Salida esperada:
@@ -67,3 +68,4 @@ además el mapa de memoria de Limine.
 * [ABI de IPC y modelo de capacidades](docs/abi-ipc-capacidades.md)
 * [Hoja de ruta](docs/hoja-de-ruta.md)
 * [Registro de `unsafe`](docs/unsafe.md)
+* [Verificación formal en Lean](verification/lean/README.md)

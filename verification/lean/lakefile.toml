@@ -1,0 +1,10 @@
+name = "nsos-model"
+version = "0.1.0"
+defaultTargets = ["Nsos", "tracegen"]
+
+[[lean_lib]]
+name = "Nsos"
+
+[[lean_exe]]
+name = "tracegen"
+root = "TraceGen"
