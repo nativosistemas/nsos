@@ -5,6 +5,11 @@
 //! `UPGRADE_RESTORE [mem, ep]` mira el estado **sin escribirlo**, lo rechaza
 //! y devuelve las dos capacidades con `UPGRADE_REJECT` sin haber tocado el
 //! canal del cliente. Así el supervisor puede hacer rollback.
+//!
+//! Si los datos de `UPGRADE_RESTORE` son `caer`, en cambio se porta como una
+//! versión con un bug: intenta escribir el estado. Como el supervisor le dio
+//! `mem` de solo lectura, el kernel la termina por la excepción, y el
+//! supervisor hace rollback igual (`Upgrade.crash_rolls_back`).
 
 #![no_std]
 #![no_main]
@@ -29,7 +34,16 @@ fn main() -> i32 {
         return 2;
     };
     // Solo lectura: si rechaza, el estado vuelve intacto a la versión vieja.
-    let magic = match mem_map(mem, STATE_VADDR, Rights::READ) {
+    let state = mem_map(mem, STATE_VADDR, Rights::READ);
+    if m.payload() == b"caer" {
+        if let Ok(state) = state {
+            println!("contador-roto: escribo el estado (no debería poder)");
+            state.write_u32(0, MAGIC_V9);
+        }
+        println!("contador-roto: ¡pude escribir un estado de solo lectura!");
+        return 6;
+    }
+    let magic = match state {
         Ok(state) => state.read_u32(0),
         Err(_) => 0,
     };

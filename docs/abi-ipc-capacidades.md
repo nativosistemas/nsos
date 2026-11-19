@@ -229,9 +229,13 @@ Se implementa encima de las primitivas anteriores, por cell:
 3. La vieja deja de aceptar trabajo nuevo, serializa su estado en un objeto
    `Memory` y responde `UPGRADE_STATE` adjuntando ese objeto **y** los
    extremos de canal que estaba sirviendo. No termina: espera la decisión.
-4. El supervisor reenvía todo a la nueva con `UPGRADE_RESTORE`. La nueva
-   valida el estado **sin escribirlo** y responde `UPGRADE_ACCEPT` (se queda
-   con todo) o `UPGRADE_REJECT` (devuelve las capacidades sin usarlas).
+4. El supervisor reenvía a la nueva, con `UPGRADE_RESTORE`, los extremos y
+   una copia **de solo lectura** del objeto de estado (`cap_dup` sin
+   `WRITE`). Se queda con la capacidad escribible y con una copia de cada
+   extremo hasta que la nueva decida. La nueva valida el estado (el kernel
+   no la deja escribirlo) y responde `UPGRADE_ACCEPT` (se queda con los
+   extremos y copia el estado a un objeto propio) o `UPGRADE_REJECT`
+   (devuelve las capacidades sin usarlas).
    Tras aceptar, el supervisor manda `UPGRADE_COMMIT` a la vieja, que
    termina.
 5. Los clientes no notan el cambio: sus extremos de canal siguen siendo los
@@ -240,13 +244,19 @@ Se implementa encima de las primitivas anteriores, por cell:
 6. Si la nueva rechaza, el supervisor devuelve estado y canales a la vieja
    con `UPGRADE_ROLLBACK` y la vieja retoma: vuelve a mapear el objeto (al
    enviarlo perdió el mapeo) y relee el estado (rollback).
-   Si la nueva *falla* con las capacidades, el rollback no es posible: el
-   extremo se cierra y los clientes ven `PEER_CLOSED`.
+   Si la nueva **se cae** antes de decidir, su canal de control se cierra y
+   el supervisor lo ve como `PEER_CLOSED`. Entonces hace el mismo rollback
+   con lo que guardó: el estado, que nadie más pudo escribir, y la copia de
+   los extremos, que los mantuvo abiertos. Los clientes no ven nada.
+   Demostrado en `Upgrade.crash_rolls_back` y `Upgrade.restoring_mem_at_sup`.
+   Si se cae *después* de aceptar, la vieja ya terminó: corresponde
+   reiniciarla (hito 6).
 
 Modelo y demostraciones: [`Nsos/Upgrade.lean`](../verification/lean/Nsos/Upgrade.lean).
 
 Implementado en el hito 7 con `init` (supervisor), `contador-v1`,
-`contador-v2`, `contador-roto` (rechaza) y `cliente`. El formato del estado lo define cada servicio
+`contador-v2`, `contador-roto` (rechaza, o con `caer` intenta escribir el
+estado y el kernel la termina) y `cliente`. El formato del estado lo define cada servicio
 (con un número mágico de versión, `CNT1`/`CNT2`) y la versión nueva es la
 que sabe migrar desde la anterior.
 
