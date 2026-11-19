@@ -45,7 +45,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-destino"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-dormilona"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-enlace"
 version = "0.1.0"
 dependencies = [
  "nsos-rt",
@@ -74,6 +88,13 @@ dependencies = [
 
 [[package]]
 name = "cell-intruso"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-origen"
 version = "0.1.0"
 dependencies = [
  "nsos-rt",

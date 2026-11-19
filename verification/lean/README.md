@@ -14,6 +14,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/System.lean` | Cells, canales y syscalls `cap_dup`, `cap_drop`, `channel_create`, `channel_send`, `channel_recv`, bloqueo (`waitRecv`, `waitSend`) y recolección de extremos inalcanzables. |
 | `Nsos/Security.lean` | Teoremas de seguridad. |
 | `Nsos/Upgrade.lean` | Protocolo de actualización en vivo con rollback (supervisor, versión vieja y nueva). |
+| `Nsos/Migration.lean` | Migración de un servicio a otra máquina: el mismo protocolo con la versión nueva del otro lado de un cable (hito 10). |
 | `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
@@ -51,6 +52,18 @@ Todos sin `sorry` ni axiomas extra.
   la última respuesta del cliente. Si la nueva escribiera el estado antes de
   decidir, o la vieja no lo releyera al retomar, la demostración falla (se
   probó mutando el modelo).
+* `Migration.client_sees_consecutive`: lo mismo cuando el servicio se muda
+  a otra máquina y el enlace reenvía los pedidos por el cable, con
+  migraciones rechazadas (rollback) y aceptadas en el medio.
+* `Migration.one_server`: nunca atienden las dos máquinas a la vez; mientras
+  atiende la remota, el estado y el extremo del cliente están en el enlace.
+* `Migration.rollback_resumes` y `Migration.remote_steps_local_untouched`:
+  la otra máquina solo recibe una *copia* del estado, así que tras un
+  rechazo la versión vieja retoma con exactamente la cuenta del cliente.
+  `Migration.remote_accept_continues`: la versión remota arranca desde el
+  último valor que vio el cliente. Tres mutaciones del modelo (copiar mal
+  el estado, arrancar la remota corrida en uno, reenviar sin tener el
+  extremo) hacen fallar las demostraciones.
 
 ### IPC completo (`Nsos/Ipc.lean`)
 

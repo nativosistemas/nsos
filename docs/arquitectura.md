@@ -150,6 +150,22 @@ El protocolo está modelado en Lean (`verification/lean/Nsos/Upgrade.lean`):
 con cualquier intercalado de pedidos, rechazos y aceptaciones, el cliente ve
 el contador sin saltos y solo atiende quien tiene estado y canal.
 
+### Migración entre máquinas (hito 10)
+
+```
+máquina A                                           máquina B
+cliente ==canal== enlace ~~~ COM2 (bytes) ~~~ enlace ==canal== contador-v2
+                    ^                            |
+   origen: PREPARE  |  UPGRADE_RESTORE           |  UPGRADE_RESTORE
+   a contador-v1 ---+  [Memory, extremo]         +-> destino -> contador-v2
+```
+
+Para `origen` (supervisor de A), el `enlace` es la versión nueva: el mismo
+protocolo de actualización, con rechazo y rollback incluidos. Por el cable
+viaja una copia del estado; las capacidades se quedan en su máquina. Cuando
+B acepta, el enlace de A reenvía cada pedido del cliente y el cliente no
+nota la mudanza. Modelo: `verification/lean/Nsos/Migration.lean`.
+
 ## Drivers en user-space
 
 El kernel no maneja dispositivos: los *descubre* y entrega sus recursos como

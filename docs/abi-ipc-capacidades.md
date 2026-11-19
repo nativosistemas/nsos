@@ -249,6 +249,21 @@ Implementado en el hito 7 con `init` (supervisor), `contador-v1`,
 (con un número mágico de versión, `CNT1`/`CNT2`) y la versión nueva es la
 que sabe migrar desde la anterior.
 
+### 8.1 Migración a otra máquina
+
+La migración (hito 10) es el mismo protocolo con la versión nueva en otra
+máquina. Un `enlace` (cell con un puerto serie) hace de versión nueva para
+el supervisor de origen: recibe `UPGRADE_RESTORE [Memory, extremo]` con el
+*nombre* de la versión a arrancar del otro lado, manda por el cable una
+**copia** del estado y contesta `UPGRADE_ACCEPT` o `UPGRADE_REJECT [Memory,
+extremo]` según lo que decida la otra máquina. Si aceptó, se queda con el
+extremo del cliente y reenvía cada pedido por el cable. Del otro lado, el
+`enlace` crea un `Memory` y un canal locales y se los pasa a su supervisor
+(`destino`) con `UPGRADE_RESTORE`. Por el cable no viajan capacidades: un
+mensaje del cliente con capacidades llega sin ellas.
+
+Modelo y demostraciones: [`Nsos/Migration.lean`](../verification/lean/Nsos/Migration.lean).
+
 Las etiquetas están en `nsos_abi::msg::labels` (rango
 `0xFFFF_0000_0000_0000..` reservado al sistema).
 

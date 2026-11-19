@@ -19,6 +19,9 @@ members = [
     "cells/contador-roto",
     "cells/caos",
     "cells/bench",
+    "cells/enlace",
+    "cells/origen",
+    "cells/destino",
 ]
 # El kernel solo compila para `x86_64-unknown-none`; `cargo test` en el host
 # se limita a las crates portables.

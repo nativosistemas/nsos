@@ -153,6 +153,18 @@ extern "C" fn kmain() -> ! {
         });
     }
 
+    for (flag, origin) in [("migrar-origen", true), ("migrar-destino", false)] {
+        if has_flag(flag) {
+            // Hito 10: una de las dos máquinas de la migración (COM2 las une).
+            let ok = ktest::run_migration(origin);
+            arch::qemu_exit(if ok {
+                arch::QemuExit::Success
+            } else {
+                arch::QemuExit::Failure
+            });
+        }
+    }
+
     if has_flag("test-exit") {
         let ok = ktest::run() & ktest::run_cells();
         kprintln!(
