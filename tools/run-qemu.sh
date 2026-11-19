@@ -20,9 +20,12 @@ if [[ "${ARCH:-x86_64}" == "aarch64" ]]; then
         [[ -z "$AAVMF" && -f "$c" ]] && AAVMF="$c"
     done
     [[ -z "$AAVMF" ]] && { echo "no se encontró QEMU_EFI.fd; definí AAVMF=/ruta" >&2; exit 1; }
-    # `-cpu max` emula ARMv8.x con PAN; semihosting para salir con un estado.
+    # Cortex-A76 (la CPU de la Pi 5, ARMv8.2 con PAN) por defecto: con
+    # `-cpu max` el firmware UEFI de Ubuntu 2025.11 se cuelga antes de
+    # cargar Limine. ARM_CPU=cortex-a72 emula la Pi 4 (sin PAN).
+    # Semihosting para salir con un estado.
     exec qemu-system-aarch64 \
-        -M virt,gic-version=2 -cpu max -m 256M \
+        -M virt,gic-version=2 -cpu "${ARM_CPU:-cortex-a76}" -m 256M \
         -bios "$AAVMF" \
         -drive if=none,format=raw,file="$ISO",id=hd0 \
         -device virtio-blk-pci,drive=hd0 \

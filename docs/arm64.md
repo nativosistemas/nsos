@@ -23,7 +23,7 @@ make smoke-arm    # tests en QEMU, como la CI
 | Tablas de páginas | una raíz (CR3); la mitad alta se copia en cada cell | dos raíces: `TTBR1_EL1` (kernel, fija) y `TTBR0_EL1` (cell); las cells no tienen nada del kernel en sus tablas |
 | Formato de las entradas | el de x86_64 | se traduce con un codec verificado (abajo) |
 | El kernel no ejecuta páginas de cells | SMEP (si la CPU lo tiene) | PXN en toda página de cell (siempre) |
-| El kernel no lee páginas de cells | SMAP (si la CPU lo tiene) | PAN (ARMv8.1; QEMU `-cpu max` y Pi 5 sí, Pi 4 no) |
+| El kernel no lee páginas de cells | SMAP (si la CPU lo tiene) | PAN (ARMv8.1; Cortex-A76 de la Pi 5, que es la CPU por defecto en QEMU, sí; Cortex-A72 de la Pi 4, no) |
 | W^X | en las tablas | en las tablas y además `SCTLR_EL1.WXN` (lo escribible nunca se ejecuta) |
 | Timer | APIC (calibrado con el PIT) | generic timer virtual (PPI 27) con GICv2 |
 | Consola | COM1 | PL011 (con búfer hasta que se mapea) |
@@ -91,7 +91,7 @@ activos, sin PBHA). `arch::aarch64::paging::install` los fuerza.
   consola de depuración es otro PL011 del RP1/BCM2712.
 * **CPU**: Cortex-A72 (Pi 4) no tiene PAN. El arranque lo detecta y lo
   informa (`mm: PXN sí, PAN no`), y el test negativo `test-smap-fault`
-  falla como debe (`qemu -cpu cortex-a72` lo reproduce). El aislamiento de
+  falla como debe (`ARM_CPU=cortex-a72 make run-arm` lo reproduce). El aislamiento de
   las cells no depende de PAN; PAN protege contra bugs del kernel.
 * **Pendiente también**: PCI (ECAM) para virtio en QEMU y para el RP1 de la
   Pi 5, `random_u64` en las cells (RNDR o una syscall), SMP.
