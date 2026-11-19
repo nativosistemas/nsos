@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/abi", "kernel"]
+# El kernel solo compila para `x86_64-unknown-none`; `cargo test` en el host
+# se limita a las crates portables.
+default-members = ["crates/abi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/nativosistemas/nsos"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true
