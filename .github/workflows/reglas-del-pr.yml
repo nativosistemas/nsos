@@ -1,0 +1,20 @@
+name: Reglas del PR
+
+# CONTRIBUTING.md §1: cada PR dice si necesita verificación formal. Corre
+# también cuando se edita la descripción (sin repetir la CI completa).
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  verificacion-formal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sección "Verificación formal"
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s\n' "$BODY" | grep -qE '^##+[[:space:]]+Verificaci(ó|o)n formal'; then
+            echo "::error::El PR necesita una sección '## Verificación formal' (ver CONTRIBUTING.md)."
+            exit 1
+          fi

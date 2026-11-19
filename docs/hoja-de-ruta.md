@@ -203,11 +203,17 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   capacidades no cruzan de máquina y se migra un servicio cuyo estado cabe
   en 32 bytes (lo que define el formato del contador).
 
-## Próximos pasos posibles
+## Después del backlog
 
-* Revocar mapeos al mover un `Memory` (modelarlo en Lean junto con el IPC).
-* Enlace autenticado y una red de verdad (virtio-net como cell).
-* Rollback cuando la versión nueva falla (no solo cuando rechaza).
+* Hecho: revocar mapeos al mover un `Memory` (PR #15, modelo
+  `verification/lean/Nsos/Memory.lean` y Kani sobre la paginación).
+* En curso: enlace autenticado entre máquinas sobre virtio-net, con el
+  modelo en Lean (no se pueden falsificar ni repetir mensajes) antes que el
+  código.
+* En curso: rollback cuando la versión nueva se cae (no solo cuando
+  rechaza), extendiendo `Upgrade.lean`.
+* Regla para todo trabajo nuevo: evaluar la verificación formal desde el
+  diseño (ver [`CONTRIBUTING.md`](../CONTRIBUTING.md)).
 
 ## Riesgos
 
