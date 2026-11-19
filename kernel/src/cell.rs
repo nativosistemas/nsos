@@ -277,10 +277,30 @@ struct Side {
     queue: VecDeque<QueuedMsg>,
     /// Este extremo ya no tiene dueños.
     closed: bool,
-    /// Hilo esperando recibir en este extremo.
-    recv_waiter: Option<ThreadId>,
-    /// Hilo esperando espacio para enviar *hacia* este extremo.
-    send_waiter: Option<ThreadId>,
+    /// Hilos esperando recibir en este extremo. Pueden ser varios (varias
+    /// cells con el mismo extremo): con un solo lugar, la segunda espera
+    /// pisaba a la primera y esa no se despertaba nunca (lo encontró el
+    /// modelo de `verification/lean/Nsos/Ipc.lean`).
+    recv_waiters: Vec<ThreadId>,
+    /// Hilos esperando espacio para enviar *hacia* este extremo.
+    send_waiters: Vec<ThreadId>,
+}
+
+/// Registra al hilo actual en una lista de espera (una sola vez) y lo marca
+/// bloqueado.
+fn wait_on(list: &mut Vec<ThreadId>) {
+    let me = sched::current();
+    if !list.contains(&me) {
+        list.push(me);
+    }
+    sched::block_current();
+}
+
+/// Despierta a todos los hilos de una lista de espera y la vacía.
+fn wake_all(list: &mut Vec<ThreadId>) {
+    for t in core::mem::take(list) {
+        sched::wake(t);
+    }
 }
 
 /// Par de extremos conectados.
@@ -342,16 +362,13 @@ impl Endpoint {
         }
         if peer.queue.len() >= QUEUE_LIMIT {
             if wait {
-                peer.send_waiter = Some(sched::current());
-                sched::block_current();
+                wait_on(&mut peer.send_waiters);
             }
             return Err(Error::WouldBlock);
         }
         let msg = build()?;
         peer.queue.push_back(msg);
-        if let Some(t) = peer.recv_waiter.take() {
-            sched::wake(t);
-        }
+        wake_all(&mut peer.recv_waiters);
         Ok(())
     }
 
@@ -363,17 +380,14 @@ impl Endpoint {
         let peer_closed = sides[self.peer()].closed;
         let me = &mut sides[self.side];
         if let Some(m) = me.queue.pop_front() {
-            if let Some(t) = me.send_waiter.take() {
-                sched::wake(t);
-            }
+            wake_all(&mut me.send_waiters);
             return Ok(m);
         }
         if peer_closed {
             return Err(Error::PeerClosed);
         }
         if wait {
-            me.recv_waiter = Some(sched::current());
-            sched::block_current();
+            wait_on(&mut me.recv_waiters);
         }
         Err(Error::WouldBlock)
     }
@@ -392,13 +406,16 @@ impl Drop for Endpoint {
             let me = &mut sides[self.side];
             me.closed = true;
             let orphans = core::mem::take(&mut me.queue);
-            let w1 = me.send_waiter.take();
+            // Todos los que esperaban en este extremo o en su peer: ninguno
+            // puede seguir esperando (como `gc` en el modelo de Lean).
+            let mut waiters = core::mem::take(&mut me.recv_waiters);
+            waiters.append(&mut me.send_waiters);
             let peer = &mut sides[1 - self.side];
-            let w2 = peer.recv_waiter.take();
-            let w3 = peer.send_waiter.take();
-            (orphans, [w1, w2, w3])
+            waiters.append(&mut peer.recv_waiters);
+            waiters.append(&mut peer.send_waiters);
+            (orphans, waiters)
         };
-        for t in waiters.into_iter().flatten() {
+        for t in waiters {
             sched::wake(t);
         }
         // Soltar fuera del lock: pueden contener extremos de este mismo canal.

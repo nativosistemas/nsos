@@ -157,12 +157,19 @@ entra desde una cell:
 * **call** = send + recv de la respuesta en el mismo canal. Permite al
   scheduler hacer *handoff* directo al servidor (camino rápido de RPC).
 * Orden FIFO por canal. Sin garantías de orden entre canales distintos.
+* **Varios hilos pueden esperar en el mismo extremo.** Un `send` despierta a
+  todos los que esperaban recibir; un `recv` despierta a todos los que
+  esperaban lugar; al cerrarse un extremo se despierta a todos los que
+  esperaban en él o en su peer. Los despertados reintentan. Demostrado: ningún
+  mensaje se pierde ni se duplica (`Sys.step_msgInv`) y ninguna cell queda
+  bloqueada si ya podría avanzar (`Sys.step_wakeInv`).
 * **Ciclos.** Un extremo puede viajar en la cola de otro, incluso en la suya.
   Si un grupo de extremos queda referenciado solo desde colas que nadie puede
   leer, el kernel lo detecta (recolector de extremos en vuelo, como el de
   sockets Unix en Linux) y lo cierra: sus colas se descartan y los peers ven
   `PeerClosed`. Corre tras `send` con capacidades, `cap_drop` y al morir una
-  cell. Demostrado en `Sys.step_no_leak` (verification/lean).
+  cell. Demostrado en `Sys.step_no_leak` (verification/lean), y que nunca
+  cierra un extremo alcanzable en `Sys.gc_keeps_reachable`.
 
 ### 5.3 Zero-copy seguro
 

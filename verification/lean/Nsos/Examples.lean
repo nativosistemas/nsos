@@ -12,7 +12,10 @@ namespace Examples
 
 /-- Cells vacías, sin canales. -/
 def empty (n : Nat) : Sys :=
-  ⟨List.replicate n (CSpace.new CSPACE_LIMIT), fun _ => [], fun _ => false, 0⟩
+  { cells := List.replicate n (CSpace.new CSPACE_LIMIT), queue := fun _ => [],
+    closed := fun _ => false, nextPair := 0, recvWaiters := fun _ => [],
+    sendWaiters := fun _ => [], blocked := fun _ => none, nextMsg := 0,
+    fate := fun _ => .unsent }
 
 /-- Ejecuta una lista de syscalls; devuelve el estado y el resultado de cada una. -/
 def runAll (s : Sys) : List (Nat × Op) → Sys × List (Except Err (List Nat))
@@ -103,6 +106,42 @@ def twoCycle : Sys × List (Except Err (List Nat)) :=
 #guard [Obj.endpoint 0 false, .endpoint 0 true, .endpoint 1 false, .endpoint 1 true].all
   twoCycle.1.closed
 #guard (twoCycle.1.queue (.endpoint 0 true)).isEmpty && (twoCycle.1.queue (.endpoint 1 true)).isEmpty
+
+/-! ## Dos cells esperando en el mismo extremo
+
+Las cells 1 y 2 tienen el mismo extremo y se bloquean esperando recibir. Un
+`send` las despierta a las dos. Si el kernel guardara un solo hilo en espera
+por extremo, la segunda espera pisaría a la primera y esa cell no se
+despertaría nunca (el bug que encontró este modelo). -/
+
+def twoWaiters : Sys :=
+  let s := (runAll (empty 3) [(0, .create)]).1
+  let give (cs : CSpace Obj) : CSpace Obj :=
+    match cs.insert ⟨.endpoint 0 true, ENDPOINT_RIGHTS⟩ with
+    | .ok (cs', _) => cs'
+    | .error _ => cs
+  { s with cells := s.cells.mapIdx fun i cs => if i = 0 then cs else give cs }
+
+def wakeBoth : Sys × List (Except Err (List Nat)) :=
+  runAll twoWaiters [
+    (1, .recv h1),             -- [0] WouldBlock
+    (1, .waitRecv h1),         -- [1] la cell 1 se bloquea
+    (2, .waitRecv h1),         -- [2] la cell 2 también
+    (1, .recv h1),             -- [3] bloqueada: no ejecuta nada
+    (0, .send h1 5 []),        -- [4] despierta a las dos
+    (2, .recv h1),             -- [5] la cell 2 recibe el mensaje
+    (1, .recv h1)              -- [6] la cell 1 ya no está bloqueada: WouldBlock
+  ]
+
+#guard errIs .wouldBlock (wakeBoth.2.getD 0 (.ok []))
+#guard isOk (wakeBoth.2.getD 1 (.error .noMemory))
+#guard isOk (wakeBoth.2.getD 2 (.error .noMemory))
+#guard errIs .wouldBlock (wakeBoth.2.getD 3 (.ok []))
+#guard isOk (wakeBoth.2.getD 4 (.error .noMemory))
+#guard okIs [5] (wakeBoth.2.getD 5 (.error .noMemory))
+#guard errIs .wouldBlock (wakeBoth.2.getD 6 (.ok []))
+#guard (wakeBoth.1.blocked 1).isNone && (wakeBoth.1.blocked 2).isNone
+#guard wakeBoth.1.fate 0 == .delivered
 
 /-! ## Los handles viejos no reviven
 

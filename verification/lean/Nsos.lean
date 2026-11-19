@@ -5,3 +5,4 @@ import Nsos.System
 import Nsos.Security
 import Nsos.Examples
 import Nsos.Upgrade
+import Nsos.Ipc

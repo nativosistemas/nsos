@@ -51,8 +51,8 @@ theorem gc_queued {s : Sys} {c : Cap Obj} (h : s.gc.Queued c) : s.Queued c := by
   obtain ⟨o, m, hm, hc⟩ := h
   simp only [gc] at hm
   split at hm
-  · exact ⟨o, m, hm, hc⟩
   · simp at hm
+  · exact ⟨o, m, hm, hc⟩
 
 theorem gc_held {s : Sys} {a : Nat} {c : Cap Obj} : s.gc.Held a c ↔ s.Held a c := by
   simp [Held, gc_cells]
@@ -91,7 +91,7 @@ structure Spec (s s' : Sys) (a : Nat) (isRecv : Bool) : Prop where
   frame : ∃ cs cs', s.cells[a]? = some cs ∧ s'.cells = s.cells.set a cs' ∧
     ∀ c, c ∈ cs'.caps →
       (∃ c₀, c₀ ∈ cs.caps ∧ c₀.obj = c.obj ∧ c.rights ⊆ c₀.rights) ∨
-      s.nextPair ≤ c.obj.pair ∨ (isRecv = true ∧ s.Queued c)
+      (s.nextPair ≤ c.obj.pair ∧ c.obj.pair < s'.nextPair) ∨ (isRecv = true ∧ s.Queued c)
   next : s.nextPair ≤ s'.nextPair
   queues : ∀ c, s'.Queued c → s.Exists c
 
@@ -104,8 +104,8 @@ theorem exists_of_held {s : Sys} {a : Nat} {cs : CSpace Obj} {c : Cap Obj}
   .inl ⟨a, cs, hcs, h⟩
 
 theorem spec_dup {s s' : Sys} {a h mask : Nat} {r : List Nat}
-    (he : s.exec a (.dup h mask) = .ok (s', r)) : Spec s s' a false := by
-  simp only [exec] at he
+    (he : s.exec' a (.dup h mask) = .ok (s', r)) : Spec s s' a false := by
+  simp only [exec'] at he
   split at he
   · cases he
   split at he
@@ -124,8 +124,8 @@ theorem spec_dup {s s' : Sys} {a h mask : Nat} {r : List Nat}
   · intro c hq; exact .inr hq
 
 theorem spec_drop {s s' : Sys} {a h : Nat} {r : List Nat}
-    (he : s.exec a (.drop h) = .ok (s', r)) : Spec s s' a false := by
-  simp only [exec] at he
+    (he : s.exec' a (.drop h) = .ok (s', r)) : Spec s s' a false := by
+  simp only [exec'] at he
   split at he
   · cases he
   rename_i cs hcs
@@ -139,8 +139,8 @@ theorem spec_drop {s s' : Sys} {a h : Nat} {r : List Nat}
   · intro c hq; exact .inr hq
 
 theorem spec_create {s s' : Sys} {a : Nat} {r : List Nat}
-    (he : s.exec a .create = .ok (s', r)) : Spec s s' a false := by
-  simp only [exec] at he
+    (he : s.exec' a .create = .ok (s', r)) : Spec s s' a false := by
+  simp only [exec'] at he
   split at he
   · cases he
   rename_i cs hcs
@@ -155,16 +155,11 @@ theorem spec_create {s s' : Sys} {a : Nat} {r : List Nat}
     · right; left
       simp only [List.mem_cons, List.not_mem_nil, or_false] at h1
       rcases h1 with rfl | rfl <;> simp [Obj.pair]
-  · intro c ⟨o, m, hm, hc⟩
-    rcases mem_update hm with hm | hm
-    · simp at hm
-    rcases mem_update hm with hm | hm
-    · simp at hm
-    exact .inr ⟨o, m, hm, hc⟩
+  · intro c hq; exact .inr hq
 
 theorem spec_send {s s' : Sys} {a h l : Nat} {hs : List Nat} {r : List Nat}
-    (he : s.exec a (.send h l hs) = .ok (s', r)) : Spec s s' a false := by
-  simp only [exec] at he
+    (he : s.exec' a (.send h l hs) = .ok (s', r)) : Spec s s' a false := by
+  simp only [exec'] at he
   split at he
   · cases he
   split at he
@@ -194,8 +189,8 @@ theorem spec_send {s s' : Sys} {a h l : Nat} {hs : List Nat} {r : List Nat}
     · exact .inr ⟨o, m, hm, hx⟩
 
 theorem spec_recv {s s' : Sys} {a h : Nat} {r : List Nat}
-    (he : s.exec a (.recv h) = .ok (s', r)) : Spec s s' a true := by
-  simp only [exec] at he
+    (he : s.exec' a (.recv h) = .ok (s', r)) : Spec s s' a true := by
+  simp only [exec'] at he
   split at he
   · cases he
   rename_i cs hcs
@@ -220,14 +215,48 @@ theorem spec_recv {s s' : Sys} {a h : Nat} {r : List Nat}
       · exact .inr ⟨o, m', hm, hx⟩
   · split at he <;> cases he
 
+theorem cells_set_self {l : List (CSpace Obj)} {a : Nat} {cs : CSpace Obj}
+    (h : l[a]? = some cs) : l.set a cs = l := by
+  apply List.ext_getElem?
+  intro i
+  rw [List.getElem?_set]
+  split
+  · rename_i hi; subst hi
+    obtain ⟨hlt, hget⟩ := List.getElem?_eq_some_iff.1 h
+    simp [hlt, hget]
+  · rfl
+
+/-- Las esperas no tocan CSpaces ni colas. -/
+theorem spec_wait {s s' : Sys} {a : Nat} {op : Op} {r : List Nat}
+    (hw : op = .waitRecv h ∨ op = .waitSend h)
+    (he : s.exec' a op = .ok (s', r)) : Spec s s' a false := by
+  rcases hw with rfl | rfl <;> simp only [exec'] at he <;>
+  · split at he
+    · cases he
+    rename_i cs hcs
+    split at he
+    · cases he
+    split at he
+    · cases he
+    cases he
+    refine ⟨⟨cs, cs, cellAt_ok hcs, (cells_set_self (cellAt_ok hcs)).symm, ?_⟩,
+      Nat.le_refl _, ?_⟩
+    · intro c hc; exact .inl (same_cap hc)
+    · intro c hq; exact .inr hq
+
 theorem exec_spec {s s' : Sys} {a : Nat} {op : Op} {r : List Nat}
     (he : s.exec a op = .ok (s', r)) : Spec s s' a op.isRecv := by
+  unfold exec at he
+  split at he
+  · cases he
   cases op with
   | dup => exact spec_dup he
   | drop => exact spec_drop he
   | create => exact spec_create he
   | send => exact spec_send he
   | recv => exact spec_recv he
+  | waitRecv h => exact spec_wait (.inl rfl) he
+  | waitSend h => exact spec_wait (.inr rfl) he
 
 theorem step_spec {s s' : Sys} {a : Nat} {op : Op} {r : List Nat}
     (hs : s.step a op = .ok (s', r)) : Spec s s' a op.isRecv := by
@@ -265,7 +294,7 @@ theorem step_held {s s' : Sys} {a b : Nat} {op : Op} {r : List Nat}
     cases hb
     rcases h3 c hcb with ⟨c₀, h0, ho, hr⟩ | h | ⟨hr, hq⟩
     · exact .inl ⟨c₀, ⟨cs, h1, h0⟩, ho, hr⟩
-    · exact .inr (.inl h)
+    · exact .inr (.inl h.1)
     · exact .inr (.inr ⟨rfl, hr, hq⟩)
   · rw [h2, List.getElem?_set_ne (Ne.symm hab)] at hb
     exact .inl ⟨c, ⟨csb, hb, hcb⟩, rfl, Rights.subset_refl _⟩
@@ -287,11 +316,11 @@ exactamente un mensaje al final de la cola del otro extremo, y cada capacidad
 de ese mensaje estaba en la CSpace del emisor con el derecho `GRANT`. Las
 capacidades viajan tal cual: no ganan derechos en el camino. -/
 theorem send_requires_grant {s s' : Sys} {a h l : Nat} {hs r : List Nat}
-    (he : s.exec a (.send h l hs) = .ok (s', r)) :
+    (he : s.exec' a (.send h l hs) = .ok (s', r)) :
     ∃ cs c msg, s.cells[a]? = some cs ∧ cs.get h = .ok c ∧ c.rights.has .send = true ∧
       s'.queue c.obj.peer = s.queue c.obj.peer ++ [msg] ∧ msg.label = l ∧
       ∀ x, x ∈ msg.caps → x ∈ cs.caps ∧ x.rights.has .grant = true := by
-  simp only [exec] at he
+  simp only [exec'] at he
   split at he
   · cases he
   split at he
@@ -309,7 +338,7 @@ theorem send_requires_grant {s s' : Sys} {a h l : Nat} {hs r : List Nat}
   rename_i cs' moved hrm
   cases he
   obtain ⟨hget, hneed⟩ := CSpace.getWith_get hg
-  refine ⟨cs, c, ⟨l, moved⟩, cellAt_ok hcs, hget, hneed .send (by decide), ?_, rfl, ?_⟩
+  refine ⟨cs, c, ⟨s.nextMsg, l, moved⟩, cellAt_ok hcs, hget, hneed .send (by decide), ?_, rfl, ?_⟩
   · simp [update]
   · intro x hx
     obtain ⟨h1, h2⟩ := CSpace.removeAll_rights hrm x hx
@@ -379,6 +408,14 @@ inductive Reach (s : Sys) : Obj → Prop
   | queued {x : Obj} {m : Msg} {c : Cap Obj} :
       Reach s x → m ∈ s.queue x → c ∈ m.caps → Reach s c.obj
 
+theorem frontier_reach (s : Sys) {acc : List Obj} (h : ∀ x, x ∈ acc → s.Reach x)
+    {y : Obj} (hy : y ∈ s.frontier acc) : s.Reach y := by
+  simp only [frontier, List.mem_append, roots, queuedObjs, List.mem_flatMap,
+    List.mem_map] at hy
+  rcases hy with ⟨cs, hcs, c, hc, rfl⟩ | ⟨z, hz, m, hm, c, hc, rfl⟩
+  · exact .held hcs hc
+  · exact .queued (h z hz) hm hc
+
 theorem reachGo_sound (s : Sys) : ∀ (n : Nat) (acc : List Obj),
     (∀ x, x ∈ acc → s.Reach x) → ∀ x, x ∈ s.reachGo n acc → s.Reach x := by
   intro n
@@ -389,43 +426,36 @@ theorem reachGo_sound (s : Sys) : ∀ (n : Nat) (acc : List Obj),
     simp only [reachGo] at hx
     split at hx
     · exact h x hx
-    · apply ih _ _ x hx
-      intro y hy
-      simp only [List.mem_append] at hy
-      rcases hy with hy | hy
-      · exact h y hy
-      · have hy' := List.mem_eraseDups.1 hy
-        simp only [List.mem_filter, List.mem_flatMap] at hy'
-        obtain ⟨⟨z, hz, hyz⟩, _⟩ := hy'
-        simp only [queuedObjs, List.mem_flatMap, List.mem_map] at hyz
-        obtain ⟨m, hm, c, hc, rfl⟩ := hyz
-        exact .queued (h z hz) hm hc
+    · rename_i y hf
+      apply ih _ _ x hx
+      intro z hz
+      simp only [List.mem_cons] at hz
+      rcases hz with rfl | hz
+      · exact frontier_reach s h (List.mem_of_find?_eq_some hf)
+      · exact h z hz
 
-theorem reachSet_sound (s : Sys) {x : Obj} (hx : x ∈ s.reachSet) : s.Reach x := by
-  apply reachGo_sound s _ _ _ x hx
-  intro y hy
-  simp only [roots, List.mem_flatMap, List.mem_map] at hy
-  obtain ⟨cs, hcs, c, hc, rfl⟩ := hy
-  exact .held hcs hc
+theorem reachSet_sound (s : Sys) {x : Obj} (hx : x ∈ s.reachSet) : s.Reach x :=
+  reachGo_sound s _ _ (fun _ h => by simp at h) x hx
 
 /-- **La recolección no deja fugas**: todo extremo que ya nadie puede alcanzar
 queda cerrado y con la cola vacía (sus mensajes, y las capacidades que
 llevaban, se liberan). -/
-theorem gc_collects {s : Sys} {e : Obj} (h : ¬ s.Reach e) :
+theorem gc_collects {s : Sys} {e : Obj} (hp : e.pair < s.nextPair) (h : ¬ s.Reach e) :
     s.gc.closed e = true ∧ s.gc.queue e = [] := by
   have hn : e ∉ s.reachSet := fun hm => h (reachSet_sound s hm)
-  simp [gc, hn]
+  simp [gc, dead, hn, hp]
 
 /-- **Sin fugas tras cada syscall**: si después del efecto de una syscall un
-extremo quedó inalcanzable (por ejemplo, porque viaja solo en su propia cola,
+extremo (que existe) quedó inalcanzable (por ejemplo, porque viaja solo en su propia cola,
 o en un ciclo de colas), al terminar la syscall está cerrado y su cola vacía. -/
 theorem step_no_leak {s s₁ s' : Sys} {a : Nat} {op : Op} {r : List Nat} {e : Obj}
     (he : s.exec a op = .ok (s₁, r)) (hs : s.step a op = .ok (s', r))
-    (hu : ¬ s₁.Reach e) : s'.closed e = true ∧ s'.queue e = [] := by
+    (hp : e.pair < s₁.nextPair) (hu : ¬ s₁.Reach e) :
+    s'.closed e = true ∧ s'.queue e = [] := by
   unfold step at hs
   rw [he] at hs
   cases hs
-  exact gc_collects hu
+  exact gc_collects hp hu
 
 end Sys
 end Nsos
