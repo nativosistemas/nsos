@@ -279,6 +279,38 @@ impl Mapped {
     }
 }
 
+/// Reloj monótono en nanosegundos desde el arranque.
+pub fn clock_ns() -> u64 {
+    syscall4(Syscall::ClockMonotonic, 0, 0, 0, 0).max(0) as u64
+}
+
+/// 64 bits aleatorios del generador de la CPU (`rdrand`), o `None` si la CPU
+/// no lo tiene o no entregó un valor tras varios intentos.
+pub fn random_u64() -> Option<u64> {
+    let (_, _, ecx, _) = {
+        let r = core::arch::x86_64::__cpuid(1);
+        (r.eax, r.ebx, r.ecx, r.edx)
+    };
+    if ecx & (1 << 30) == 0 {
+        return None;
+    }
+    for _ in 0..16 {
+        let mut v = 0u64;
+        // SAFETY: CPUID.1:ECX[30] dice que la CPU tiene `rdrand`; la
+        // instrucción solo escribe `v` y no toca memoria compartida.
+        if unsafe { rdrand64(&mut v) } == 1 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Solo se puede llamar (con `unsafe`) si la CPU tiene `rdrand`.
+#[target_feature(enable = "rdrand")]
+fn rdrand64(v: &mut u64) -> i32 {
+    core::arch::x86_64::_rdrand64_step(v)
+}
+
 /// Barrera de memoria completa (ordena accesos a memoria compartida con un
 /// dispositivo).
 pub fn fence() {

@@ -330,8 +330,8 @@ fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -
     }
     let port = (base + off) as u16;
     // SAFETY: el kernel entregó este rango de puertos a la cell al crearla
-    // (un dispositivo PCI descubierto por el kernel o COM2; el kernel no usa
-    // ninguno de los dos), y el acceso cae completamente dentro del rango.
+    // (un dispositivo PCI descubierto por el kernel, que no lo usa), y el
+    // acceso cae completamente dentro del rango.
     unsafe {
         Ok(match (width, value) {
             (1, None) => Port::<u8>::new(port).read() as u64,

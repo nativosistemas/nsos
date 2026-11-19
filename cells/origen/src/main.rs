@@ -2,7 +2,7 @@
 //! (hito 10, modelo: `verification/lean/Nsos/Migration.lean`).
 //!
 //! Capacidades de arranque:
-//! 1. Canal de control con `enlace` (el puerto serie hacia la otra máquina).
+//! 1. Canal de control con `enlace` (la red autenticada hacia la otra máquina).
 //! 2. Imagen de `contador-v1`. 3. Imagen de `cliente`.
 //!
 //! Arranca `contador-v1` y su `cliente` y migra el servicio dos veces con el

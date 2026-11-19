@@ -1,43 +1,68 @@
 #!/usr/bin/env bash
-# Hito 10: migración de una cell entre dos instancias de QEMU.
+# Migración de una cell entre dos instancias de QEMU por un enlace
+# autenticado sobre virtio-net.
 #
 # La máquina A (`migrar-origen`) corre `contador-v1` y su `cliente`; la B
-# (`migrar-destino`) recibe el servicio. Las une el segundo puerto serie
-# (COM2) de cada una, conectado por un socket Unix: A lo abre como servidor
-# y espera a que B se conecte antes de arrancar.
+# (`migrar-destino`) recibe el servicio. Las une una red virtual (un socket
+# Unix, `-netdev stream`). Las dos ISO llevan la misma clave compartida
+# (`enlace.key`, generada en cada corrida).
 #
-# Las dos tienen que salir con éxito, y el cliente de A tiene que haber
-# visto el contador sin saltos aunque al final lo atendió B.
+# Caso normal: las dos tienen que salir con éxito, y el cliente de A tiene
+# que haber visto el contador sin saltos aunque al final lo atendió B.
 #
-# Uso: tools/migrate-test.sh
+# Con --clave-distinta (prueba negativa): B tiene otra clave, como un
+# impostor. Ninguna punta puede autenticar a la otra: B no recibe ningún
+# estado, no arranca ninguna versión y termina con error; A rechaza las
+# migraciones (rollback) y el servicio nunca sale de A.
 #
-# Solo con BIOS: OVMF usa COM2 como consola y los dos firmwares se
-# mandarían su salida (ver tools/smoke-test.sh).
+# Uso: tools/migrate-test.sh [--clave-distinta] [--uefi]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TIMEOUT="${TIMEOUT:-90}"
-SOCK="$ROOT/build/migra.sock"
+TIMEOUT="${TIMEOUT:-120}"
+NEGATIVE=0
+if [[ "${1:-}" == "--clave-distinta" ]]; then
+    NEGATIVE=1
+    shift
+fi
+NAME=migra
+[[ $NEGATIVE -eq 1 ]] && NAME=migra-impostor
+SOCK="$ROOT/build/$NAME.sock"
 mkdir -p "$ROOT/build"
 
-for side in origen destino; do
-    CMDLINE="migrar-$side" ISO="$ROOT/build/nsos-migra-$side.iso" \
-        "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
-done
+KEY_A="$ROOT/build/$NAME-a.key"
+KEY_B="$ROOT/build/$NAME-b.key"
+head -c 32 /dev/urandom >"$KEY_A"
+if [[ $NEGATIVE -eq 1 ]]; then
+    head -c 32 /dev/urandom >"$KEY_B"
+else
+    cp "$KEY_A" "$KEY_B"
+fi
+CMDLINE="migrar-origen" LINK_KEY="$KEY_A" ISO="$ROOT/build/nsos-$NAME-origen.iso" \
+    "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
+CMDLINE="migrar-destino" LINK_KEY="$KEY_B" ISO="$ROOT/build/nsos-$NAME-destino.iso" \
+    "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
+rm -f "$KEY_A" "$KEY_B"
 
+net() {
+    printf '%s\n' -netdev "stream,id=n0,server=$1,addr.type=unix,addr.path=$SOCK" \
+        -device "virtio-net-pci,netdev=n0,romfile="
+}
 rm -f "$SOCK"
 start=$(date +%s%N)
-ISO="$ROOT/build/nsos-migra-origen.iso" VIRTCON_LOG="$ROOT/build/migra-origen-virtcon.log" \
-    timeout "$TIMEOUT" "$ROOT/tools/run-qemu.sh" "$@" -serial "unix:$SOCK,server=on,wait=on" \
-    >"$ROOT/build/migra-origen.log" 2>&1 </dev/null &
+mapfile -t NET_A < <(net on)
+ISO="$ROOT/build/nsos-$NAME-origen.iso" VIRTCON_LOG="$ROOT/build/$NAME-origen-virtcon.log" \
+    timeout "$TIMEOUT" "$ROOT/tools/run-qemu.sh" "$@" "${NET_A[@]}" \
+    >"$ROOT/build/$NAME-origen.log" 2>&1 </dev/null &
 pid_a=$!
 for _ in $(seq 100); do
     [[ -S "$SOCK" ]] && break
     sleep 0.1
 done
-ISO="$ROOT/build/nsos-migra-destino.iso" VIRTCON_LOG="$ROOT/build/migra-destino-virtcon.log" \
-    timeout "$TIMEOUT" "$ROOT/tools/run-qemu.sh" "$@" -serial "unix:$SOCK" \
-    >"$ROOT/build/migra-destino.log" 2>&1 </dev/null &
+mapfile -t NET_B < <(net off)
+ISO="$ROOT/build/nsos-$NAME-destino.iso" VIRTCON_LOG="$ROOT/build/$NAME-destino-virtcon.log" \
+    timeout "$TIMEOUT" "$ROOT/tools/run-qemu.sh" "$@" "${NET_B[@]}" \
+    >"$ROOT/build/$NAME-destino.log" 2>&1 </dev/null &
 pid_b=$!
 set +e
 wait "$pid_a"; status_a=$?
@@ -48,21 +73,38 @@ rm -f "$SOCK"
 
 fail=0
 for side in origen destino; do
-    echo "=== migra-$side ==="
-    cat "$ROOT/build/migra-$side.log"
+    echo "=== $NAME-$side ==="
+    cat "$ROOT/build/$NAME-$side.log"
 done
-echo "=== migración: QEMU A ${status_a}, QEMU B ${status_b}, $(( (end - start) / 1000000 )) ms ==="
-# isa-debug-exit: éxito 0x10 -> 33
-[[ $status_a -eq 33 ]] || { echo "FALLO [migra]: la máquina A salió con $status_a" >&2; fail=1; }
-[[ $status_b -eq 33 ]] || { echo "FALLO [migra]: la máquina B salió con $status_b" >&2; fail=1; }
+echo "=== $NAME: QEMU A ${status_a}, QEMU B ${status_b}, $(( (end - start) / 1000000 )) ms ==="
 check() {
-    grep -q "$2" "$ROOT/build/migra-$1.log" || { echo "FALLO [migra]: falta \"$2\" en $1" >&2; fail=1; }
+    grep -q "$2" "$ROOT/build/$NAME-$1.log" || { echo "FALLO [$NAME]: falta \"$2\" en $1" >&2; fail=1; }
 }
-check origen "migración: OK"
-check origen "cliente: ahora me atiende la versión 2"
-check origen "cliente: .* pedidos sin saltos"
-check origen "origen: contador-roto rechazó; rollback"
-check destino "migración: OK"
-check destino "contador-v2: estado restaurado"
-[[ $fail -eq 0 ]] && echo "OK [migra]"
+check_absent() {
+    ! grep -q "$2" "$ROOT/build/$NAME-$1.log" || { echo "FALLO [$NAME]: no debería aparecer \"$2\" en $1" >&2; fail=1; }
+}
+# isa-debug-exit: éxito 0x10 -> 33, fallo 0x11 -> 35
+if [[ $NEGATIVE -eq 0 ]]; then
+    [[ $status_a -eq 33 ]] || { echo "FALLO [$NAME]: la máquina A salió con $status_a" >&2; fail=1; }
+    [[ $status_b -eq 33 ]] || { echo "FALLO [$NAME]: la máquina B salió con $status_b" >&2; fail=1; }
+    check origen "enlace: sesión autenticada"
+    check destino "enlace: sesión autenticada"
+    check origen "migración: OK"
+    check origen "cliente: ahora me atiende la versión 2"
+    check origen "cliente: .* pedidos sin saltos"
+    check origen "origen: contador-roto rechazó; rollback"
+    check destino "migración: OK"
+    check destino "contador-v2: estado restaurado"
+else
+    [[ $status_a -eq 35 ]] || { echo "FALLO [$NAME]: la máquina A salió con $status_a (se esperaba 35)" >&2; fail=1; }
+    [[ $status_b -eq 35 ]] || { echo "FALLO [$NAME]: la máquina B salió con $status_b (se esperaba 35)" >&2; fail=1; }
+    check origen "enlace: no se pudo autenticar"
+    check destino "enlace: no se pudo autenticar"
+    check destino "descarto una trama (etiqueta inválida)"
+    check origen "origen: contador-roto rechazó; rollback"
+    check_absent origen "ahora me atiende la versión 2"
+    check_absent destino "llegó un estado"
+    check_absent destino "arranco contador"
+fi
+[[ $fail -eq 0 ]] && echo "OK [$NAME]"
 exit $fail
