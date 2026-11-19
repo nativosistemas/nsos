@@ -114,6 +114,7 @@ extern "C" fn kmain() -> ! {
         boot_us / 1000,
         boot_us % 1000
     );
+    kprintln!("bench: arranque_kernel_us = {}", boot_us);
     kprintln!("{}", BOOT_OK);
 
     if has_flag("test-wx-fault") {
@@ -123,6 +124,16 @@ extern "C" fn kmain() -> ! {
         // SAFETY: deliberadamente inválido; se espera el fallo de página.
         unsafe { (&RO as *const u64 as *mut u64).write_volatile(1) };
         kprintln!("ERROR: se pudo escribir en .rodata");
+    }
+
+    if has_flag("bench") {
+        // Benchmarks: solo la cell `bench`, sin nada más compitiendo.
+        let ok = ktest::run_bench();
+        arch::qemu_exit(if ok {
+            arch::QemuExit::Success
+        } else {
+            arch::QemuExit::Failure
+        });
     }
 
     if has_flag("test-exit") {
@@ -177,12 +188,14 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("pong", pong, alloc::vec![cap(b)]).map_err(report)?;
     cell::spawn("ping", ping, alloc::vec![cap(a)]).map_err(report)?;
     cell::spawn("intruso", intruso, alloc::vec![]).map_err(report)?;
+    let caos = module("caos").ok_or("falta el módulo caos")?;
+    cell::spawn("caos", caos, alloc::vec![]).map_err(report)?;
     boot_supervisor(report)?;
     boot_virtio_console(report)
 }
 
 /// Capacidad a la imagen del módulo `name` (para que una cell cree otras).
-fn image(name: &str) -> Result<cell::KCap, &'static str> {
+pub fn image(name: &str) -> Result<cell::KCap, &'static str> {
     let bytes = module(name).ok_or("falta un módulo de cell")?;
     Ok(nsos_kcore::cspace::Cap {
         object: cell::KObject::Image(alloc::sync::Arc::new(cell::Image {

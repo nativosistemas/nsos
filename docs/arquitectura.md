@@ -184,6 +184,8 @@ cells/fragil|dormilona/  cells que fallan o no terminan, para el supervisor
 cells/contador-v1|v2/    servidor con estado en dos versiones (actualización en vivo)
 cells/contador-roto/  versión que rechaza el estado (prueba el rollback)
 cells/cliente/     cliente del contador
+cells/caos/        fuzzer de syscalls (50 000 llamadas al azar)
+cells/bench/       benchmarks (bandera de arranque `bench`)
 cells/virtcon/     driver virtio-console en user-space
 cells/hola/        cliente del driver: escribe por la consola virtio
 kernel/            microkernel (x86_64-unknown-none)

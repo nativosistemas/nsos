@@ -11,7 +11,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 5 | "hello cell" y driver virtio de consola como cell | ✅ `virtcon` (driver) + `hola` (cliente) |
 | 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ✅ supervisor `init` que reinicia `fragil` y mata `dormilona` |
 | 7 | Actualización en vivo de una cell | ✅ `contador-v1` → `contador-v2` sin cortar al `cliente`, con rollback |
-| 8 | Tests de aislamiento y benchmark de IPC | ⏳ primeros tests (`intruso`) y benchmark de ida y vuelta |
+| 8 | Tests de aislamiento y benchmark de IPC | ✅ `intruso` (27 abusos), fuzzer `caos`, `bench` con resumen en la CI |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ⏳ registro inicial en `docs/unsafe.md` |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ○ |
 
@@ -24,7 +24,7 @@ Cada hito se entrega como un PR con tests y documentación.
 - [x] Un fallo de cell no afecta al kernel (la cell se termina, se libera su memoria y un supervisor puede reiniciarla).
 - [x] Actualización en vivo de una cell sin reinicio (protocolo de supervisor con rollback, modelado en Lean).
 - [ ] `unsafe` confinado y documentado (en curso: lint obligatorio + registro).
-- [ ] Benchmarks básicos de IPC y arranque (arranque medido con el TSC; IPC: ida y vuelta entre `ping` y `pong`; falta automatizar y comparar).
+- [x] Benchmarks básicos de IPC y arranque (cell `bench` en una corrida aparte; la CI publica la tabla en el resumen de cada PR).
 
 ## Hito 3 (hecho)
 
@@ -139,13 +139,36 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
     y decidir si mover una capacidad `Memory` revoca los mapeos.
   * La v1 sondea dos canales porque todavía no hay `wait` multi-handle.
 
-## Hito 8 en detalle (próximo)
+## Hito 8 (hecho)
 
-1. Tests de aislamiento sistemáticos: cada syscall con handles, punteros y
-   derechos inválidos (ampliar `intruso`), y fuzzing del decodificador de
-   mensajes y del validador ELF.
-2. Benchmarks reproducibles: ida y vuelta de IPC, `cell_spawn` y arranque,
-   con resultados en CI para comparar entre PRs.
+* `intruso` prueba 27 abusos. A los 8 de antes suma las syscalls de memoria,
+  puertos y cells: tamaños y flags inválidos, mapear sobre el kernel o sobre
+  su código, W+X, desalinear, tipos de objeto equivocados, ver direcciones
+  físicas sin `CONTROL`, escribir con una capacidad de solo lectura, mover
+  una capacidad sin `GRANT`, `cell_spawn`/`cell_kill`/`cell_status` sin
+  derechos. Para probar derechos se fabrica sus propios objetos y los atenúa.
+* `caos` hace 50 000 syscalls con números y argumentos pseudoaleatorios
+  (semilla fija). El kernel tiene que devolver un resultado válido o un error
+  del ABI en cada una, y seguir: ktest exige que `caos` termine con 0 y que
+  no se pierda memoria. Corre a la vez que las demás cells.
+* Fuzzing en host: el del validador ELF ahora hace 50 000 mutaciones de las
+  cabeceras y verifica todas las reglas de carga sobre lo aceptado (W^X,
+  rangos, sin solapes, entrada en un segmento ejecutable); se suma uno para
+  `CellStatus`.
+* Benchmarks: la bandera de arranque `bench` corre solo la cell `bench`
+  (kernel en release) y mide ida y vuelta de IPC, ciclo de vida de una cell y
+  `mem_create` + `mem_map`; el arranque lo mide el kernel. La CI agrega la
+  tabla al resumen del job (`tools/bench-summary.sh`). Valores en este
+  contenedor (QEMU TCG, sin KVM): arranque 15,7 ms, IPC 23,8 µs, ciclo de
+  vida 447 µs, memoria 66 µs.
+
+## Hito 9 en detalle (próximo)
+
+1. Modelo de amenazas (`docs/amenazas.md`): qué protege cada capa (lenguaje,
+   MMU, capacidades), qué no (DMA sin IOMMU, canales laterales, la versión
+   vieja que conserva mapeos tras una actualización).
+2. Auditoría de `unsafe`: script que compare `grep unsafe` con el registro y
+   corra en la CI.
 
 ## Riesgos
 

@@ -342,6 +342,27 @@ fn ipc_reachable_kept() -> Result<(), &'static str> {
 /// Test de integración: tres cells en anillo 3. `ping` y `pong` hablan por
 /// IPC (con transferencia de capacidades); `intruso` intenta violar el
 /// aislamiento y termina por fallo de página. El kernel debe seguir vivo.
+/// Modo benchmark: arranca solo la cell `bench` y espera que termine con 0.
+pub fn run_bench() -> bool {
+    let caps =
+        (|| Ok::<_, &'static str>(alloc::vec![crate::image("pong")?, crate::image("fragil")?]))();
+    let (Some(bench), Ok(caps)) = (crate::module("bench"), caps) else {
+        kprintln!("bench: faltan módulos");
+        return false;
+    };
+    if let Err(e) = crate::cell::spawn("bench", bench, caps) {
+        kprintln!("bench: no arrancó: {:?}", e);
+        return false;
+    }
+    sched::wait_all();
+    let ok = crate::cell::EXITS
+        .lock()
+        .iter()
+        .any(|(n, s)| n == "bench" && *s == crate::cell::ExitStatus::Exited(0));
+    kprintln!("bench: {}", if ok { "terminó con 0" } else { "FALLO" });
+    ok
+}
+
 pub fn run_cells() -> bool {
     kprintln!("ktest: cells en anillo 3");
     let free_before = pmm::stats().free_frames;
@@ -370,6 +391,10 @@ pub fn run_cells() -> bool {
                 ..
             })
         ),
+    );
+    check(
+        "caos: 50000 syscalls al azar y termina con 0",
+        status("caos") == Some(Exited(0)),
     );
     check(
         "init (supervisor) terminó con 0",

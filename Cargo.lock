@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "cell-bench"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-caos"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-cliente"
 version = "0.1.0"
 dependencies = [

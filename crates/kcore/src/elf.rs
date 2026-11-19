@@ -299,21 +299,52 @@ mod tests {
             0x3000,
         );
         let mut seed = 0xDEADBEEFu64;
-        for _ in 0..5000 {
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Cabecera ELF (64) + 2 cabeceras de programa (2 × 56).
+        let headers = 64 + 2 * 56;
+        let mut accepted = 0;
+        for i in 0..50_000 {
             let mut b = base.clone();
-            for _ in 0..8 {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                let pos = (seed as usize) % 200;
-                b[pos] = (seed >> 32) as u8;
+            for _ in 0..1 + i % 8 {
+                let r = next();
+                let pos = (r as usize) % headers;
+                b[pos] = (r >> 32) as u8;
             }
             if let Ok(img) = parse(&b) {
-                for s in img.segments {
-                    assert!(!(s.write && s.exec));
-                    assert!(s.vaddr >= USER_MIN && s.vaddr + s.memsz <= USER_MAX);
+                accepted += 1;
+                // Lo que el parser acepta cumple todas las reglas de carga.
+                for (k, s) in img.segments.iter().enumerate() {
+                    assert!(!(s.write && s.exec), "segmento W+X");
+                    assert!(s.vaddr >= USER_MIN, "segmento bajo USER_MIN");
+                    assert!(
+                        s.vaddr.checked_add(s.memsz).is_some_and(|e| e <= USER_MAX),
+                        "segmento fuera del espacio de usuario"
+                    );
+                    assert!(s.filesz <= s.memsz);
+                    assert!(
+                        (s.offset as usize)
+                            .checked_add(s.filesz as usize)
+                            .is_some_and(|e| e <= b.len()),
+                        "segmento fuera del archivo"
+                    );
+                    for t in &img.segments[k + 1..] {
+                        let disjoint = s.vaddr + s.memsz <= t.vaddr || t.vaddr + t.memsz <= s.vaddr;
+                        assert!(disjoint, "segmentos solapados");
+                    }
                 }
+                assert!(
+                    img.segments
+                        .iter()
+                        .any(|s| s.exec && s.vaddr <= img.entry && img.entry < s.vaddr + s.memsz),
+                    "entrada fuera de un segmento ejecutable"
+                );
             }
         }
+        assert!(accepted > 0);
     }
 }

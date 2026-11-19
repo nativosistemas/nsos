@@ -195,6 +195,31 @@ pub struct WaitItem {
 mod tests {
     use super::*;
 
+    /// Ninguna entrada hace entrar en pánico al decodificador, y lo aceptado
+    /// vuelve a serializarse idéntico.
+    #[test]
+    fn pseudo_fuzz_cell_status() {
+        let mut seed: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut accepted = 0;
+        for _ in 0..20_000 {
+            let mut b = [0u8; CellStatus::SIZE];
+            for chunk in b.chunks_mut(8) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                chunk.copy_from_slice(&seed.to_le_bytes()[..chunk.len()]);
+            }
+            b[1..4].fill(0);
+            b[0] %= 6;
+            if let Some(s) = CellStatus::from_bytes(&b) {
+                accepted += 1;
+                assert!(s.state <= cell_state::KILLED);
+                assert_eq!(s.to_bytes(), b);
+            }
+        }
+        assert!(accepted > 0);
+    }
+
     #[test]
     fn cell_status_roundtrip() {
         let s = CellStatus {
