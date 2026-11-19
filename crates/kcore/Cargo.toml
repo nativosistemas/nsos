@@ -5,5 +5,9 @@ version.workspace = true
 edition.workspace = true
 repository.workspace = true
 
+# `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 nsos-abi = { path = "../abi" }

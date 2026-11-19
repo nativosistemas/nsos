@@ -259,11 +259,9 @@ mod tests {
                     let base = (rnd() % N) as u64 * FRAME_SIZE;
                     let len = (rnd() % 8) as u64 * FRAME_SIZE;
                     b.release_region(base, len);
-                    for f in (base / FRAME_SIZE) as usize..((base + len) / FRAME_SIZE) as usize {
-                        if f < N {
-                            model[f] = false;
-                        }
-                    }
+                    let lo = ((base / FRAME_SIZE) as usize).min(N);
+                    let hi = (((base + len) / FRAME_SIZE) as usize).min(N);
+                    model[lo..hi].fill(false);
                 }
                 1 => {
                     if let Some(f) = b.alloc() {
@@ -286,10 +284,8 @@ mod tests {
                 _ => {
                     let n = 1 + rnd() % 4;
                     if let Some(f) = b.alloc_contiguous(n, 1) {
-                        for g in f..f + n {
-                            assert!(!model[g]);
-                            model[g] = true;
-                        }
+                        assert!(model[f..f + n].iter().all(|&u| !u));
+                        model[f..f + n].fill(true);
                     }
                 }
             }

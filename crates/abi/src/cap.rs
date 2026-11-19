@@ -334,3 +334,39 @@ mod tests {
         assert!(ObjectType::from_raw(0).is_none());
     }
 }
+
+/// Pruebas de Kani sobre handles y derechos, para todos los valores de 32 bits.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn handle_roundtrip_any() {
+        let (slot, gen): (u32, u32) = (kani::any(), kani::any());
+        match CapHandle::new(slot, gen) {
+            Some(h) => {
+                assert_eq!(h.slot(), slot);
+                assert_eq!(h.generation(), gen & GEN_MASK);
+                assert!(h.is_valid());
+            }
+            None => assert!(slot == 0 || slot >= MAX_SLOTS),
+        }
+        let h = CapHandle(kani::any());
+        assert!(h.slot() < MAX_SLOTS && h.generation() < GEN_LIMIT);
+    }
+
+    #[kani::proof]
+    fn attenuate_any() {
+        let (r, m) = (Rights(kani::any()), Rights(kani::any()));
+        match r.attenuate(m) {
+            Some(a) => {
+                assert!(a.is_subset_of(r) && a.is_subset_of(m));
+                assert!(r.contains(Rights::DUPLICATE));
+            }
+            None => assert!(!r.contains(Rights::DUPLICATE)),
+        }
+        if let Some(x) = Rights::from_bits(kani::any()) {
+            assert!(x.is_subset_of(Rights::ALL));
+        }
+    }
+}
