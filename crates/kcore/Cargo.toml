@@ -3,5 +3,6 @@ name = "nsos-kcore"
 description = "Lógica del kernel independiente del hardware (sin unsafe, testeable en el host)"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 
 [dependencies]
