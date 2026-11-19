@@ -16,6 +16,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Upgrade.lean` | Protocolo de actualización en vivo con rollback (supervisor, versión vieja y nueva). |
 | `Nsos/Migration.lean` | Migración de un servicio a otra máquina: el mismo protocolo con la versión nueva del otro lado de un cable (hito 10). |
 | `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
+| `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
 
@@ -85,6 +86,23 @@ El modelo sigue cada mensaje con un número propio y registra qué fue de él
 * `Sys.run_inv`: los tres invariantes valen en toda ejecución que arranca de un
   estado inicial (`Sys.inv_init`).
 
+### Aislamiento de memoria (`Nsos/Memory.lean`)
+
+Cada marco físico tiene un dueño (kernel, libre, una cell o un objeto
+`Memory`), y cada cell una lista de mapeos.
+
+* `Mem.step_iso`: en cada paso (crear, mapear, desmapear, duplicar, soltar,
+  enviar, liberar un objeto, crear o terminar una cell), todo mapeo de una
+  cell apunta a un marco propio o a un marco de un objeto del que la cell
+  tiene una capacidad con los derechos del mapeo.
+* `Mem.never_maps_foreign`: una cell nunca mapea un marco del kernel, uno
+  libre (tampoco memoria ya liberada) ni uno propio de otra cell.
+* `Mem.write_needs_cap`: un mapeo escribible exige una capacidad con `WRITE`.
+* `Mem.send_revokes`: quien envía su única capacidad a un objeto pierde todos
+  sus mapeos de ese objeto.
+* `Mem.no_revocation_breaks`: sin revocación (el kernel antes de este cambio)
+  el invariante se rompe.
+
 ## Tests derivados del modelo
 
 `lake exe tracegen` ejecuta el modelo de la CSpace con unas 4800 operaciones
@@ -114,6 +132,10 @@ a `kcore`.
    dos cells con el mismo extremo se bloqueaban, la segunda pisaba a la
    primera y esa no se despertaba nunca. Ahora el kernel guarda una lista y
    despierta a todos (`Sys.step_wakeInv`, `Examples.wakeBoth`).
+4. **Mapeos que sobrevivían a la capacidad.** Quien enviaba o soltaba una
+   capacidad `Memory` seguía viendo el objeto mapeado. Ahora el kernel revoca
+   esos mapeos (`Cell::revoke_mappings`; `Mem.step_iso`,
+   `Mem.no_revocation_breaks`).
 
 ## Uso
 

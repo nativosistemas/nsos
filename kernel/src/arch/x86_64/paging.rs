@@ -11,54 +11,8 @@
 //!   acceso concurrente lo serializa quien lo contenga (un lock).
 
 use crate::mm::{phys_to_virt, PhysAddr, VirtAddr};
-
-/// Tamaño de página base.
-pub const PAGE_SIZE: u64 = 4096;
-/// Tamaño de página grande.
-pub const HUGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
-
-/// Bits de una entrada de tabla de páginas.
-pub mod flags {
-    pub const PRESENT: u64 = 1 << 0;
-    pub const WRITABLE: u64 = 1 << 1;
-    pub const USER: u64 = 1 << 2;
-    pub const WRITE_THROUGH: u64 = 1 << 3;
-    pub const NO_CACHE: u64 = 1 << 4;
-    pub const HUGE: u64 = 1 << 7;
-    pub const GLOBAL: u64 = 1 << 8;
-    pub const NO_EXECUTE: u64 = 1 << 63;
-}
-
-const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
-
-/// Errores al mapear.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MapError {
-    /// No hay marcos para tablas intermedias.
-    OutOfFrames,
-    /// La dirección ya estaba mapeada.
-    AlreadyMapped,
-    /// Dirección no alineada al tamaño de página pedido.
-    Misaligned,
-    /// Choca con una página grande existente.
-    HugePageConflict,
-}
-
-/// Tamaño de una página a mapear.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PageSize {
-    Size4K,
-    Size2M,
-}
-
-impl PageSize {
-    pub const fn bytes(self) -> u64 {
-        match self {
-            PageSize::Size4K => PAGE_SIZE,
-            PageSize::Size2M => HUGE_PAGE_SIZE,
-        }
-    }
-}
+use nsos_kcore::paging::{self as pt, Tables, ADDR_MASK};
+pub use nsos_kcore::paging::{flags, MapError, PageSize, HUGE_PAGE_SIZE, PAGE_SIZE};
 
 type Table = [u64; 512];
 
@@ -67,8 +21,16 @@ fn table_mut(phys: PhysAddr) -> &'static mut Table {
     unsafe { &mut *(phys_to_virt(phys) as *mut Table) }
 }
 
-fn index(virt: VirtAddr, level: u32) -> usize {
-    ((virt >> (12 + 9 * (level - 1))) & 0x1ff) as usize
+/// Las tablas vistas a través del HHDM.
+struct Hhdm;
+
+impl Tables for Hhdm {
+    fn read(&self, table: u64, i: usize) -> u64 {
+        table_mut(table)[i]
+    }
+    fn write(&mut self, table: u64, i: usize, v: u64) {
+        table_mut(table)[i] = v;
+    }
 }
 
 /// Un espacio de direcciones (raíz PML4).
@@ -96,38 +58,7 @@ impl AddressSpace {
         flags: u64,
         alloc: &mut dyn FnMut() -> Option<PhysAddr>,
     ) -> Result<(), MapError> {
-        if !virt.is_multiple_of(size.bytes()) || !phys.is_multiple_of(size.bytes()) {
-            return Err(MapError::Misaligned);
-        }
-        let leaf_level = match size {
-            PageSize::Size4K => 1,
-            PageSize::Size2M => 2,
-        };
-        let inter = flags::PRESENT | flags::WRITABLE | (flags & flags::USER);
-        let mut table = table_mut(self.pml4);
-        for level in (leaf_level + 1..=4).rev() {
-            let e = &mut table[index(virt, level)];
-            if *e & flags::PRESENT == 0 {
-                let f = alloc().ok_or(MapError::OutOfFrames)?;
-                *e = f | inter;
-            } else if *e & flags::HUGE != 0 {
-                return Err(MapError::HugePageConflict);
-            } else {
-                *e |= inter;
-            }
-            table = table_mut(*e & ADDR_MASK);
-        }
-        let e = &mut table[index(virt, leaf_level)];
-        if *e & flags::PRESENT != 0 {
-            return Err(MapError::AlreadyMapped);
-        }
-        let huge = if size == PageSize::Size2M {
-            flags::HUGE
-        } else {
-            0
-        };
-        *e = phys | flags | flags::PRESENT | huge;
-        Ok(())
+        pt::map(&mut Hhdm, self.pml4, virt, phys, size, flags, alloc)
     }
 
     /// Mapea un rango usando páginas de 2 MiB donde sea posible.
@@ -164,71 +95,20 @@ impl AddressSpace {
 
     /// Quita el mapeo de una página de 4 KiB. Devuelve la física que había.
     pub fn unmap(&mut self, virt: VirtAddr) -> Option<PhysAddr> {
-        let mut table = table_mut(self.pml4);
-        for level in (2..=4).rev() {
-            let e = table[index(virt, level)];
-            if e & flags::PRESENT == 0 || e & flags::HUGE != 0 {
-                return None;
-            }
-            table = table_mut(e & ADDR_MASK);
-        }
-        let e = &mut table[index(virt, 1)];
-        if *e & flags::PRESENT == 0 {
-            return None;
-        }
-        let phys = *e & ADDR_MASK;
-        *e = 0;
+        let phys = pt::unmap(&mut Hhdm, self.pml4, virt)?;
         super::cpu::invlpg(virt);
         Some(phys)
     }
 
     /// Traduce una dirección virtual a física.
     pub fn translate(&self, virt: VirtAddr) -> Option<PhysAddr> {
-        let mut table = table_mut(self.pml4);
-        for level in (1..=4).rev() {
-            let e = table[index(virt, level)];
-            if e & flags::PRESENT == 0 {
-                return None;
-            }
-            if level == 1 || e & flags::HUGE != 0 {
-                let page = match level {
-                    1 => PAGE_SIZE,
-                    2 => HUGE_PAGE_SIZE,
-                    _ => 1 << 30,
-                };
-                let base = e & ADDR_MASK & !(page - 1);
-                return Some(base + (virt & (page - 1)));
-            }
-            table = table_mut(e & ADDR_MASK);
-        }
-        None
+        pt::translate(&Hhdm, self.pml4, virt)
     }
 
     /// Traduce y devuelve los permisos *efectivos* (USER y WRITABLE solo si
     /// están en todos los niveles; NX si está en alguno).
     pub fn translate_with_flags(&self, virt: VirtAddr) -> Option<(PhysAddr, u64)> {
-        let mut table = table_mut(self.pml4);
-        let mut eff = flags::USER | flags::WRITABLE;
-        let mut nx = 0;
-        for level in (1..=4).rev() {
-            let e = table[index(virt, level)];
-            if e & flags::PRESENT == 0 {
-                return None;
-            }
-            eff &= e;
-            nx |= e & flags::NO_EXECUTE;
-            if level == 1 || e & flags::HUGE != 0 {
-                let page = match level {
-                    1 => PAGE_SIZE,
-                    2 => HUGE_PAGE_SIZE,
-                    _ => 1 << 30,
-                };
-                let base = e & ADDR_MASK & !(page - 1);
-                return Some((base + (virt & (page - 1)), eff | nx | flags::PRESENT));
-            }
-            table = table_mut(e & ADDR_MASK);
-        }
-        None
+        pt::translate_with_flags(&Hhdm, self.pml4, virt)
     }
 
     /// Crea las tablas de nivel 3 de toda la mitad alta (entradas 256..512),
@@ -239,7 +119,7 @@ impl AddressSpace {
         alloc: &mut dyn FnMut() -> Option<PhysAddr>,
     ) -> Result<(), MapError> {
         let pml4 = table_mut(self.pml4);
-        for e in pml4[256..].iter_mut() {
+        for e in pml4[pt::KERNEL_HALF..].iter_mut() {
             if *e & flags::PRESENT == 0 {
                 *e = alloc().ok_or(MapError::OutOfFrames)? | flags::PRESENT | flags::WRITABLE;
             }
@@ -256,7 +136,7 @@ impl AddressSpace {
         let s = Self { pml4: alloc()? };
         let src = table_mut(kernel.pml4);
         let dst = table_mut(s.pml4);
-        dst[256..].copy_from_slice(&src[256..]);
+        dst[pt::KERNEL_HALF..].copy_from_slice(&src[pt::KERNEL_HALF..]);
         Some(s)
     }
 
@@ -274,7 +154,7 @@ impl AddressSpace {
             free(table);
         }
         let pml4 = table_mut(self.pml4);
-        for &e in pml4[..256].iter() {
+        for &e in pml4[..pt::KERNEL_HALF].iter() {
             if e & flags::PRESENT != 0 {
                 walk(e & ADDR_MASK, 3, free);
             }

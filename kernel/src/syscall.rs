@@ -56,6 +56,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::CapDrop => {
             let cap = cell.cspace.lock().remove(h(a0))?;
             drop(cap); // fuera del lock
+            cell.revoke_mappings();
             cell::ipc_gc();
             Ok(0)
         }
@@ -170,6 +171,7 @@ fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64) -> SysResult<u64> 
         }
         cs.remove_all(&hs, Rights::GRANT)?
     };
+    cell.revoke_mappings();
     let child = cell::spawn(&image.name, image.bytes, caps).map_err(|e| {
         kprintln!("cell_spawn \"{}\": {:?}", image.name, e);
         Error::NoMemory
@@ -375,6 +377,8 @@ fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
         match r {
             Err(Error::WouldBlock) if wait => sleep(cell)?,
             Ok(()) if !msg.cap_slice().is_empty() => {
+                // Las capacidades de memoria enviadas ya no se ven.
+                cell.revoke_mappings();
                 // Mover extremos puede dejar un ciclo inalcanzable.
                 cell::ipc_gc();
                 return Ok(0);
