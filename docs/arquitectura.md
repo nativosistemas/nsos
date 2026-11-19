@@ -111,6 +111,26 @@ fabricado que apunta a su función.
      +-----------------------------------------------+  termina en #PF
 ```
 
+## Supervisión
+
+El kernel no tiene políticas de reinicio: solo termina una cell que falla y
+avisa a quien la espera. La política vive en una cell supervisora (`init`)
+con capacidades `Image` (para crear cells) y `Cell` (para esperarlas o
+matarlas):
+
+```
+init --cell_spawn(fragil, [canal])--> fragil   #PF       -> Faulted
+     <--cell_status (espera)--------           reiniciar
+init --cell_spawn(fragil, [canal'])-> fragil   panic     -> Exited(101)
+init --cell_spawn(fragil, [canal''])> fragil   ok        -> Exited(0)
+init --cell_kill--------------------> dormilona          -> Killed
+```
+
+`cell_kill` solo marca el pedido y despierta a la cell; la cell muere desde
+su propio hilo en la ruta de vuelta a anillo 3. Así nunca se destruye un
+espacio de direcciones que otro hilo está usando ni una cell a mitad de una
+syscall.
+
 ## Drivers en user-space
 
 El kernel no maneja dispositivos: los *descubre* y entrega sus recursos como
@@ -140,6 +160,8 @@ crates/kcore/      lógica del kernel sin hardware (marcos, CSpace, validador EL
 cells/rt/          runtime de las cells (entrada, syscalls, println!)
 cells/ping|pong/   cells de ejemplo que hablan por IPC
 cells/intruso/     test de aislamiento
+cells/init/        supervisor: reinicia cells que fallan, mata cells
+cells/fragil|dormilona/  cells que fallan o no terminan, para el supervisor
 cells/virtcon/     driver virtio-console en user-space
 cells/hola/        cliente del driver: escribe por la consola virtio
 kernel/            microkernel (x86_64-unknown-none)

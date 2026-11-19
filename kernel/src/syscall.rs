@@ -81,6 +81,9 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::ChannelRecv => channel_recv(cell, h(a0), a1, a2),
         Syscall::MemMap => mem_map(cell, h(a0), a1, a2),
         Syscall::MemInfo => mem_info(cell, h(a0), a1),
+        Syscall::CellSpawn => cell_spawn(cell, h(a0), a1, a2),
+        Syscall::CellKill => cell_kill(cell, h(a0)),
+        Syscall::CellStatus => cell_status(cell, h(a0), a1, a2),
         Syscall::IoPortRead => ioport(cell, h(a0), a1, a2, None),
         Syscall::IoPortWrite => ioport(cell, h(a0), a1, a2, Some(a3)),
         _ => Err(Error::Unsupported),
@@ -120,6 +123,113 @@ fn channel_create(cell: &Cell, out: u64) -> SysResult<u64> {
     bytes[0..4].copy_from_slice(&hs[0].0.to_le_bytes());
     bytes[4..8].copy_from_slice(&hs[1].0.to_le_bytes());
     copy_to_user(cell, out, &bytes)?;
+    Ok(0)
+}
+
+/// Cede la CPU tras marcarse bloqueado. Si mientras tanto se pidió matar a
+/// la cell, abandona la espera: la syscall vuelve y la ruta de salida a
+/// anillo 3 termina la cell (`trap::dispatch`).
+fn sleep(cell: &Cell) -> SysResult<()> {
+    crate::arch::yield_now();
+    if cell.kill_requested() {
+        return Err(Error::PeerClosed);
+    }
+    Ok(())
+}
+
+/// Máximo de capacidades que se pueden entregar al crear una cell.
+const SPAWN_MAX_CAPS: usize = 16;
+
+/// `cell_spawn(h_image, caps, n) -> h_cell`.
+fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64) -> SysResult<u64> {
+    let n = usize::try_from(n).map_err(|_| Error::InvalidArgs)?;
+    if n > SPAWN_MAX_CAPS {
+        return Err(Error::InvalidArgs);
+    }
+    let mut raw = [0u8; 4 * SPAWN_MAX_CAPS];
+    copy_from_user(cell, uptr, &mut raw[..4 * n])?;
+    let hs: alloc::vec::Vec<CapHandle> = raw[..4 * n]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| CapHandle(u32::from_le_bytes(*b)))
+        .collect();
+    let image = match &cell.cspace.lock().get_with(img, Rights::EXEC)?.object {
+        KObject::Image(i) => i.clone(),
+        _ => return Err(Error::WrongType),
+    };
+    // Validar la imagen antes de quitarle nada a quien llama.
+    nsos_kcore::elf::parse(image.bytes).map_err(|_| Error::InvalidArgs)?;
+    // Reservar el slot de la respuesta *antes* de mover las capacidades,
+    // para no fallar después de crear la cell.
+    let caps = {
+        let mut cs = cell.cspace.lock();
+        if cs.len() + 1 > crate::cell::CSPACE_LIMIT as usize {
+            return Err(Error::NoMemory);
+        }
+        cs.remove_all(&hs, Rights::GRANT)?
+    };
+    let child = cell::spawn(&image.name, image.bytes, caps).map_err(|e| {
+        kprintln!("cell_spawn \"{}\": {:?}", image.name, e);
+        Error::NoMemory
+    })?;
+    let r = cell.cspace.lock().insert(Cap {
+        object: KObject::Cell(child),
+        rights: cell::CELL_RIGHTS,
+    });
+    // Si aun así no entra, la cell nueva sigue corriendo sin supervisor.
+    r.map(|h| h.0 as u64)
+}
+
+fn target_cell(cell: &Cell, h: CapHandle, need: Rights) -> SysResult<Arc<Cell>> {
+    match &cell.cspace.lock().get_with(h, need)?.object {
+        KObject::Cell(c) => Ok(c.clone()),
+        _ => Err(Error::WrongType),
+    }
+}
+
+/// `cell_kill(h_cell)`: pide terminarla; no espera.
+fn cell_kill(cell: &Cell, h: CapHandle) -> SysResult<u64> {
+    let target = target_cell(cell, h, Rights::CONTROL)?;
+    target.request_kill();
+    Ok(0)
+}
+
+/// `cell_status(h_cell, out, flags)`.
+fn cell_status(cell: &Cell, h: CapHandle, out: u64, fl: u64) -> SysResult<u64> {
+    use nsos_abi::syscall::{cell_state, CellStatus};
+    if fl & !flags::NONBLOCK != 0 {
+        return Err(Error::InvalidArgs);
+    }
+    copy_to_user(cell, out, &[0u8; CellStatus::SIZE])?;
+    let wait = fl & flags::NONBLOCK == 0;
+    let target = target_cell(cell, h, if wait { Rights::WAIT } else { Rights::NONE })?;
+    let st = loop {
+        match target.exit_status(wait) {
+            Some(st) => break Some(st),
+            None if wait => sleep(cell)?,
+            None => break None,
+        }
+    };
+    let s = match st {
+        None => CellStatus::default(),
+        Some(ExitStatus::Exited(code)) => CellStatus {
+            state: cell_state::EXITED,
+            code,
+            ..CellStatus::default()
+        },
+        Some(ExitStatus::Faulted { vector, addr, .. }) => CellStatus {
+            state: cell_state::FAULTED,
+            vector,
+            addr,
+            ..CellStatus::default()
+        },
+        Some(ExitStatus::Killed) => CellStatus {
+            state: cell_state::KILLED,
+            ..CellStatus::default()
+        },
+    };
+    copy_to_user(cell, out, &s.to_bytes())?;
     Ok(0)
 }
 
@@ -243,7 +353,7 @@ fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
             })
         };
         match r {
-            Err(Error::WouldBlock) if wait => crate::arch::yield_now(),
+            Err(Error::WouldBlock) if wait => sleep(cell)?,
             Ok(()) if !msg.cap_slice().is_empty() => {
                 // Mover extremos puede dejar un ciclo inalcanzable.
                 cell::ipc_gc();
@@ -274,7 +384,7 @@ fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
                     }
                 }
             }
-            Err(Error::WouldBlock) if wait => crate::arch::yield_now(),
+            Err(Error::WouldBlock) if wait => sleep(cell)?,
             Err(e) => return Err(e),
         }
     };

@@ -5,7 +5,7 @@ Política:
 * `crates/abi` y `crates/kcore`: `#![forbid(unsafe_code)]`.
 * Cells de usuario: `#![deny(unsafe_code)]`; la única excepción es el `_start` que
   genera `nsos_rt::entry!`. El `unsafe` de usuario vive en `cells/rt` (instrucción
-  `syscall`). La cell `intruso` lo usa a propósito para probar el aislamiento.
+  `syscall`). Las cells `intruso` y `fragil` lo usan a propósito para provocar fallos de página.
 * Kernel: `#![deny(unsafe_op_in_unsafe_fn)]` y
   `#![deny(clippy::undocumented_unsafe_blocks)]`. Cada bloque lleva un
   comentario `// SAFETY:` con el invariante que lo justifica.
@@ -35,6 +35,7 @@ Política:
 | `kernel/src/usercopy.rs` | copiar desde/hacia memoria de cells vía HHDM | cada página se traduce con las tablas de la cell y exige USER (y WRITABLE al escribir) |
 | `kernel/src/cell.rs` | copiar segmentos ELF a marcos nuevos | marcos recién reservados; rangos validados por `kcore::elf` |
 | `kernel/src/boot/limine.rs` (módulos) | leer módulos cargados por Limine | `size` bytes válidos en memoria que el kernel nunca reclama |
+| `kernel/src/trap.rs` | reescribir el frame guardado de un hilo cuya cell se pidió matar | el frame es del hilo que se va a reanudar, en su propia pila de kernel; se lo convierte en un frame de anillo 0 hacia `kill_trampoline` |
 | `kernel/src/pci.rs` | puertos de configuración PCI 0xCF8/0xCFC | solo este módulo los usa, serializado por un lock |
 | `kernel/src/cell.rs` (`MemObj`) | poner a cero marcos de un objeto `Memory` | marcos contiguos recién reservados, vía HHDM |
 | `kernel/src/syscall.rs` (`ioport`) | `in`/`out` en nombre de un driver | el puerto es `base + off` con `off + width` dentro del rango de la capacidad `IoPorts` |

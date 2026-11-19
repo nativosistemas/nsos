@@ -177,7 +177,28 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("pong", pong, alloc::vec![cap(b)]).map_err(report)?;
     cell::spawn("ping", ping, alloc::vec![cap(a)]).map_err(report)?;
     cell::spawn("intruso", intruso, alloc::vec![]).map_err(report)?;
+    boot_supervisor(report)?;
     boot_virtio_console(report)
+}
+
+/// Capacidad a la imagen del módulo `name` (para que una cell cree otras).
+fn image(name: &str) -> Result<cell::KCap, &'static str> {
+    let bytes = module(name).ok_or("falta un módulo de cell")?;
+    Ok(nsos_kcore::cspace::Cap {
+        object: cell::KObject::Image(alloc::sync::Arc::new(cell::Image {
+            name: alloc::string::String::from(name),
+            bytes,
+        })),
+        rights: cell::IMAGE_RIGHTS,
+    })
+}
+
+/// Arranca `init`, el supervisor, con las imágenes de las cells que vigila.
+fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<(), &'static str> {
+    let init = module("init").ok_or("falta el módulo init")?;
+    let caps = alloc::vec![image("fragil")?, image("dormilona")?];
+    cell::spawn("init", init, caps).map_err(report)?;
+    Ok(())
 }
 
 /// virtio-console (PCI legacy, `1af4:1003`).
