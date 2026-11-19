@@ -99,8 +99,8 @@ para una versión posterior; el formato del handle ya la permite.
 Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
 implementación (hito 5): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
-`channel_recv`, `mem_map`, `mem_info`, `ioport_read` e `ioport_write`. El
-resto devuelve `Unsupported`. Resumen:
+`channel_recv`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
+`cell_spawn`, `cell_kill` y `cell_status`. El resto devuelve `Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|
@@ -192,16 +192,26 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
 
 ## 7. Cells
 
-* `cell_spawn(image, caps, n)` crea un espacio de direcciones nuevo, carga la
-  imagen y **mueve** las `n` capacidades al CSpace de la hija (slots 1..n en
-  ese orden: es su "vector de arranque"). Devuelve una capacidad `Cell`.
+* `cell_spawn(image, caps, n)` exige `EXEC` sobre la imagen y `GRANT` sobre
+  cada capacidad (hasta 16). Valida el ELF *antes* de quitarle nada a quien
+  llama, crea un espacio de direcciones nuevo, carga la imagen y **mueve**
+  las `n` capacidades al CSpace de la hija (slots 1..n en ese orden: es su
+  "vector de arranque"). Devuelve una capacidad `Cell` con
+  `CONTROL | WAIT | DUPLICATE | GRANT`.
 * Una cell no hereda nada que no se le pase explícitamente.
 * Si la cell falla (excepción de CPU, `panic`, violación de ABI), el kernel la
-  termina, libera sus capacidades (los peers ven `PEER_CLOSED`) y activa
-  `CELL_EXITED` en su capacidad `Cell`. El kernel sigue funcionando: así se
-  contienen fallos (hito 6).
+  termina y libera sus capacidades (los peers ven `PEER_CLOSED`). El kernel
+  sigue funcionando: así se contienen fallos (hito 6).
+* `cell_status(h, out, flags)` espera a que la cell termine (requiere `WAIT`)
+  o, con `NONBLOCK`, responde enseguida. Escribe
+  `CellStatus { state, code, vector, addr }` (24 bytes) con `state` en
+  `RUNNING`, `EXITED` (`code`), `FAULTED` (`vector`, `addr`) o `KILLED`.
+* `cell_kill(h)` (requiere `CONTROL`) pide terminarla y vuelve enseguida. La
+  cell muere desde su propio hilo antes de volver a anillo 3, nunca a mitad
+  de una syscall.
 * Un **supervisor** (cell normal con capacidades `Cell` de sus hijas) decide
-  si reinicia.
+  si reinicia. Al reiniciar crea canales nuevos: los extremos de la cell
+  muerta ya se cerraron.
 
 ## 8. Actualización en vivo (protocolo, no syscall)
 

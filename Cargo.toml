@@ -1,6 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/abi", "crates/kcore", "kernel", "cells/rt", "cells/ping", "cells/pong", "cells/intruso", "cells/virtcon", "cells/hola"]
+members = [
+    "crates/abi",
+    "crates/kcore",
+    "kernel",
+    "cells/rt",
+    "cells/ping",
+    "cells/pong",
+    "cells/intruso",
+    "cells/virtcon",
+    "cells/hola",
+    "cells/init",
+    "cells/fragil",
+    "cells/dormilona",
+]
 # El kernel solo compila para `x86_64-unknown-none`; `cargo test` en el host
 # se limita a las crates portables.
 default-members = ["crates/abi", "crates/kcore"]

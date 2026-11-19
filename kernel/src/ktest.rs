@@ -371,6 +371,38 @@ pub fn run_cells() -> bool {
             })
         ),
     );
+    check(
+        "init (supervisor) terminó con 0",
+        status("init") == Some(Exited(0)),
+    );
+    let fragil: alloc::vec::Vec<_> = exits
+        .iter()
+        .filter(|(n, _)| n == "fragil")
+        .map(|(_, s)| *s)
+        .collect();
+    check(
+        "fragil: #PF, pánico y al tercer intento sale con 0",
+        matches!(
+            fragil[..],
+            [
+                Faulted {
+                    vector: 14,
+                    addr: 0,
+                    ..
+                },
+                Exited(101),
+                Exited(0)
+            ]
+        ),
+    );
+    check(
+        "dormilona (bloqueada y girando) terminada por cell_kill",
+        exits
+            .iter()
+            .filter(|(n, s)| n == "dormilona" && *s == Killed)
+            .count()
+            == 2,
+    );
     if crate::pci::find(crate::VIRTIO_CONSOLE.0, crate::VIRTIO_CONSOLE.1).is_some() {
         check(
             "virtcon (driver virtio) terminó con 0",

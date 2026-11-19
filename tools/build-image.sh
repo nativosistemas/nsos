@@ -27,7 +27,7 @@ KERNEL="$ROOT/target/x86_64-unknown-none/$PROFILE/nsos-kernel"
 # 1b. Cells: siempre en release (son chicas y así el benchmark es realista).
 # Se compilan aparte, con sus propios RUSTFLAGS (sin el modelo de código del
 # kernel) y su propio directorio de salida.
-CELLS=(ping pong intruso virtcon hola)
+CELLS=(ping pong intruso virtcon hola init fragil dormilona)
 CELL_PKGS=()
 for c in "${CELLS[@]}"; do CELL_PKGS+=(-p "cell-$c"); done
 RUSTFLAGS="-C relocation-model=static" cargo build --release \

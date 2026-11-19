@@ -13,7 +13,7 @@ pub use nsos_abi as abi;
 
 use abi::cap::CapInfo;
 use abi::syscall::Syscall;
-use abi::{error::decode_ret, CapHandle, Message, Rights, SysResult};
+use abi::{error::decode_ret, CapHandle, Error, Message, Rights, SysResult};
 use core::arch::asm;
 use core::fmt::{self, Write};
 
@@ -131,6 +131,38 @@ pub fn cap_info(h: CapHandle) -> SysResult<CapInfo> {
         0,
     ))?;
     Ok(info)
+}
+
+/// Crea una cell a partir de la imagen `image` y le *mueve* `caps` (las
+/// recibe en los slots `1..=n`). Devuelve una capacidad a la cell nueva.
+pub fn cell_spawn(image: CapHandle, caps: &[CapHandle]) -> SysResult<CapHandle> {
+    decode_ret(syscall4(
+        Syscall::CellSpawn,
+        image.0 as u64,
+        caps.as_ptr() as u64,
+        caps.len() as u64,
+        0,
+    ))
+    .map(|v| CapHandle(v as u32))
+}
+
+/// Pide terminar una cell (requiere `CONTROL`). No espera.
+pub fn cell_kill(h: CapHandle) -> SysResult<()> {
+    decode_ret(syscall4(Syscall::CellKill, h.0 as u64, 0, 0, 0)).map(|_| ())
+}
+
+/// Cómo terminó una cell. Bloquea hasta que termine, salvo con `NONBLOCK`
+/// (entonces puede devolver `cell_state::RUNNING`).
+pub fn cell_status(h: CapHandle, flags: u64) -> SysResult<abi::syscall::CellStatus> {
+    let mut out = [0u8; abi::syscall::CellStatus::SIZE];
+    decode_ret(syscall4(
+        Syscall::CellStatus,
+        h.0 as u64,
+        out.as_mut_ptr() as u64,
+        flags,
+        0,
+    ))?;
+    abi::syscall::CellStatus::from_bytes(&out).ok_or(Error::BadMessage)
 }
 
 /// Mapea un objeto de memoria en `vaddr` con `rights` (READ obligatorio).

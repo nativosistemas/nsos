@@ -50,7 +50,41 @@ pub fn breakpoints() -> u64 {
 }
 
 /// Atiende una interrupción. Devuelve el frame desde el que reanudar.
+///
+/// Antes de volver a anillo 3 se comprueba si alguien pidió matar la cell
+/// del hilo elegido (`cell_kill`). En ese caso no se vuelve a la cell: el
+/// frame guardado se reescribe para que el hilo continúe en anillo 0, en su
+/// propia pila de kernel, en [`kill_trampoline`]. Así la cell siempre muere
+/// desde su propio hilo (como con `exit`) y nunca a mitad de una syscall.
 pub fn dispatch(f: &mut TrapFrame, raw: *mut TrapFrame) -> *mut TrapFrame {
+    let next = handle(f, raw);
+    // SAFETY: `next` es el frame guardado del hilo que se va a reanudar: lo
+    // escribió su stub de entrada en su pila de kernel (o el scheduler al
+    // crearlo) y nadie más lo toca hasta reanudarlo.
+    let frame = unsafe { &mut *next };
+    if frame.cs & 3 == 3 && sched::current_cell().is_some_and(|c| c.kill_requested()) {
+        let below = (next as u64 & !0xF) - 8; // como si se hubiera hecho un `call`
+        *frame = TrapFrame {
+            rip: kill_trampoline as *const () as u64,
+            cs: crate::arch::gdt::KERNEL_CS as u64,
+            rflags: 0x2, // sin interrupciones, como una syscall
+            rsp: below,
+            ss: crate::arch::gdt::KERNEL_DS as u64,
+            ..TrapFrame::default()
+        };
+    }
+    next
+}
+
+/// Termina la cell del hilo actual por `cell_kill` y el hilo con ella.
+extern "C" fn kill_trampoline() -> ! {
+    if let Some(cell) = sched::current_cell() {
+        crate::cell::terminate(&cell, crate::cell::ExitStatus::Killed);
+    }
+    sched::exit()
+}
+
+fn handle(f: &mut TrapFrame, raw: *mut TrapFrame) -> *mut TrapFrame {
     match f.vector {
         // Excepción en anillo 3: es culpa de la cell, no del kernel.
         0..=31 if f.cs & 3 == 3 => crate::syscall::user_fault(f, raw),

@@ -16,7 +16,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use nsos_abi::msg::{MsgHeader, MAX_DATA};
 use nsos_abi::{Error, ObjectType, Rights};
 use nsos_kcore::cspace::{CSpace, Cap};
@@ -42,6 +42,10 @@ pub enum KObject {
     Memory(Arc<MemObj>),
     /// Rango de puertos de E/S.
     IoPorts(Arc<PortRange>),
+    /// Una cell (para supervisarla: `cell_status`, `cell_kill`).
+    Cell(Arc<Cell>),
+    /// Imagen ELF desde la que se pueden crear cells.
+    Image(Arc<Image>),
 }
 
 impl KObject {
@@ -51,6 +55,8 @@ impl KObject {
             KObject::Channel(_) => ObjectType::Channel,
             KObject::Memory(_) => ObjectType::Memory,
             KObject::IoPorts(_) => ObjectType::IoPorts,
+            KObject::Cell(_) => ObjectType::Cell,
+            KObject::Image(_) => ObjectType::Image,
         }
     }
     /// Identificador para depuración.
@@ -59,6 +65,8 @@ impl KObject {
             KObject::Channel(e) => Arc::as_ptr(e) as u64,
             KObject::Memory(m) => Arc::as_ptr(m) as u64,
             KObject::IoPorts(p) => Arc::as_ptr(p) as u64,
+            KObject::Cell(c) => Arc::as_ptr(c) as u64,
+            KObject::Image(i) => Arc::as_ptr(i) as u64,
         }
     }
 }
@@ -100,6 +108,19 @@ pub struct PortRange {
     pub base: u16,
     pub len: u16,
 }
+
+/// Imagen ELF inmutable (un módulo del bootloader). Validarla es trabajo de
+/// `spawn`; tenerla solo permite crear cells a partir de ella.
+pub struct Image {
+    pub name: String,
+    pub bytes: &'static [u8],
+}
+
+/// Derechos de una capacidad a una imagen.
+pub const IMAGE_RIGHTS: Rights = Rights(Rights::EXEC.0 | Rights::DUPLICATE.0 | Rights::GRANT.0);
+/// Derechos de la capacidad que recibe quien crea una cell.
+pub const CELL_RIGHTS: Rights =
+    Rights(Rights::CONTROL.0 | Rights::WAIT.0 | Rights::DUPLICATE.0 | Rights::GRANT.0);
 
 /// Derechos de una capacidad de memoria DMA para un driver.
 pub const DMA_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::CONTROL.0);
@@ -391,6 +412,8 @@ pub enum ExitStatus {
     Exited(i32),
     /// El kernel la terminó por una excepción de CPU.
     Faulted { vector: u64, rip: u64, addr: u64 },
+    /// La terminó otra cell con `cell_kill`.
+    Killed,
 }
 
 /// Una cell.
@@ -405,6 +428,13 @@ pub struct Cell {
     /// Objetos de memoria mapeados (los mantiene vivos mientras estén
     /// mapeados, aunque la cell suelte la capacidad).
     mappings: IrqSpinLock<Vec<Arc<MemObj>>>,
+    /// Hilo principal (para despertarlo si se pide matarla).
+    thread: AtomicU64,
+    /// Se pidió terminarla (`cell_kill`): el hilo termina la próxima vez que
+    /// vaya a volver a anillo 3.
+    kill: AtomicBool,
+    /// Cómo terminó (`None` mientras corre) e hilos esperando ese momento.
+    exit: IrqSpinLock<(Option<ExitStatus>, Vec<ThreadId>)>,
 }
 
 static NEXT_CELL: AtomicU64 = AtomicU64::new(1);
@@ -421,6 +451,34 @@ impl Cell {
     /// Ejecuta `f` sobre el espacio de direcciones (si sigue vivo).
     pub fn with_space<R>(&self, f: impl FnOnce(&AddressSpace) -> R) -> Option<R> {
         self.space.lock().as_ref().map(f)
+    }
+
+    /// Pide terminar la cell. Si su hilo está bloqueado en el kernel, se lo
+    /// despierta: los bucles de espera de las syscalls miran
+    /// [`Cell::kill_requested`] y vuelven, y la ruta de vuelta a anillo 3
+    /// termina la cell (ver `trap::dispatch`).
+    pub fn request_kill(&self) {
+        if self.exit.lock().0.is_some() {
+            return;
+        }
+        self.kill.store(true, Ordering::Release);
+        sched::wake(self.thread.load(Ordering::Relaxed));
+    }
+
+    /// ¿Se pidió terminarla?
+    pub fn kill_requested(&self) -> bool {
+        self.kill.load(Ordering::Acquire)
+    }
+
+    /// Cómo terminó, o `None` si sigue viva. Con `wait`, si sigue viva deja
+    /// al hilo actual registrado y marcado bloqueado (como `try_recv`).
+    pub fn exit_status(&self, wait: bool) -> Option<ExitStatus> {
+        let mut g = self.exit.lock();
+        if g.0.is_none() && wait {
+            g.1.push(sched::current());
+            sched::block_current();
+        }
+        g.0
     }
 }
 
@@ -509,6 +567,9 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
         cspace: IrqSpinLock::new(cspace),
         frames: IrqSpinLock::new(frames),
         mappings: IrqSpinLock::new(Vec::new()),
+        thread: AtomicU64::new(0),
+        kill: AtomicBool::new(false),
+        exit: IrqSpinLock::new((None, Vec::new())),
     });
     kprintln!(
         "cell {} \"{}\": {} segmentos, entrada {:#x}",
@@ -519,7 +580,8 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
     );
     let tname: &'static str =
         alloc::boxed::Box::leak(alloc::string::String::from(name).into_boxed_str());
-    sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP - 8);
+    let tid = sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP - 8);
+    cell.thread.store(tid, Ordering::Relaxed);
     Ok(cell)
 }
 
@@ -527,6 +589,13 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
 /// propio hilo). Libera capacidades (los peers ven `PEER_CLOSED`), memoria y
 /// tablas. El llamador después termina el hilo.
 pub fn terminate(cell: &Cell, status: ExitStatus) {
+    // Si se pidió matarla, ese es el motivo aunque haya llegado antes a
+    // `exit` o a un fallo.
+    let status = if cell.kill_requested() {
+        ExitStatus::Killed
+    } else {
+        status
+    };
     kprintln!("cell {} \"{}\" terminó: {:?}", cell.id, cell.name, status);
     EXITS.lock().push((cell.name.clone(), status));
 
@@ -545,6 +614,16 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
         pmm::free_frame(p);
     }
     drop(core::mem::take(&mut *cell.mappings.lock()));
+
+    // Recién ahora (recursos liberados) se avisa a quienes esperan.
+    let waiters = {
+        let mut g = cell.exit.lock();
+        g.0 = Some(status);
+        core::mem::take(&mut g.1)
+    };
+    for t in waiters {
+        sched::wake(t);
+    }
 }
 
 impl Cell {

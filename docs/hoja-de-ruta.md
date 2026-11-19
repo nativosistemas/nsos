@@ -9,7 +9,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 3 | Allocador físico/virtual, paginación, GDT/IDT, scheduler básico | ✅ 9 tests en QEMU + 7 en host |
 | 4 | IPC seguro (canales + transferencia de capacidades) y creación de cells | ✅ ping/pong/intruso en anillo 3 |
 | 5 | "hello cell" y driver virtio de consola como cell | ✅ `virtcon` (driver) + `hola` (cliente) |
-| 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ⏳ matar ya funciona; falta reiniciar (supervisor) |
+| 6 | Fault containment: matar/reiniciar una cell sin tumbar el kernel | ✅ supervisor `init` que reinicia `fragil` y mata `dormilona` |
 | 7 | Actualización en vivo de una cell | ○ |
 | 8 | Tests de aislamiento y benchmark de IPC | ⏳ primeros tests (`intruso`) y benchmark de ida y vuelta |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ⏳ registro inicial en `docs/unsafe.md` |
@@ -19,9 +19,9 @@ Cada hito se entrega como un PR con tests y documentación.
 
 - [x] Arranca en QEMU x86_64.
 - [x] Kernel mínimo sin GC.
-- [ ] Al menos 3 cells aisladas comunicándose por IPC (hoy 3 cells aisladas, 2 de ellas por IPC).
-- [ ] Un driver en user-space.
-- [x] Un fallo de cell no afecta al kernel (la cell se termina y se libera su memoria).
+- [x] Al menos 3 cells aisladas comunicándose por IPC (`init` con `fragil`, `ping`/`pong`, `hola`/`virtcon`).
+- [x] Un driver en user-space (`virtcon`).
+- [x] Un fallo de cell no afecta al kernel (la cell se termina, se libera su memoria y un supervisor puede reiniciarla).
 - [ ] Actualización en vivo de una cell sin reinicio.
 - [ ] `unsafe` confinado y documentado (en curso: lint obligatorio + registro).
 - [ ] Benchmarks básicos de IPC y arranque (arranque medido con el TSC; IPC: ida y vuelta entre `ping` y `pong`; falta automatizar y comparar).
@@ -83,14 +83,32 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   que ambas cells terminen con 0 (al cerrarse `hola`, `virtcon` ve
   `PeerClosed` y termina).
 
-## Hito 6 en detalle (próximo)
+## Hito 6 (hecho)
 
-1. `cell_spawn`, `cell_kill`, `cell_status` desde una cell `init` que hace
-   de supervisor.
-2. Política de reinicio: si una cell falla, el supervisor la vuelve a
-   arrancar y reconecta sus canales.
-3. Test: una cell que falla a propósito y se reinicia sin afectar a las
-   demás.
+* Objetos `Image` (imagen ELF, derecho `EXEC`) y `Cell` (derecho
+  `CONTROL` para matarla, `WAIT` para esperarla).
+* Syscalls `cell_spawn` (mueve las capacidades a la hija, que las recibe en
+  los slots `1..=n`), `cell_kill` y `cell_status` (bloqueante o
+  `NONBLOCK`).
+* `cell_kill` no destruye la cell desde otro hilo: marca el pedido y
+  despierta a la cell. Sus esperas en el kernel abandonan y, al volver a
+  anillo 3, `trap::dispatch` la desvía a un trampolín en anillo 0 que la
+  termina desde su propio hilo (igual que `exit`). Funciona tanto si está
+  bloqueada en una syscall como si gira en anillo 3.
+* Cell `init` (supervisor): reinicia `fragil` (falla con #PF, luego con
+  pánico, y al tercer intento sale bien) con un canal nuevo por intento, y
+  mata a `dormilona` bloqueada y girando. Mientras tanto `ping`/`pong` y
+  el driver siguen corriendo. Los tests en QEMU verifican la secuencia de
+  terminaciones y que no se pierde memoria.
+
+## Hito 7 en detalle (próximo)
+
+1. Protocolo de actualización en vivo por cell (sección 8 del ABI): el
+   supervisor pide `UPGRADE_PREPARE`, la cell serializa su estado en un
+   objeto `Memory` y lo entrega con sus capacidades.
+2. El supervisor arranca la versión nueva con esas capacidades y el estado.
+3. Test: un servidor con estado (contador) se actualiza sin que su cliente
+   pierda la conexión ni el estado.
 
 ## Riesgos
 
