@@ -16,6 +16,7 @@ pub mod elf;
 pub mod frame_bitmap;
 pub mod ipc_gc;
 pub mod paging;
+pub mod paging_arm64;
 
 pub use cspace::CSpace;
 pub use frame_bitmap::FrameBitmap;

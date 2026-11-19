@@ -4,7 +4,8 @@
 //! segmentos y devuelve una descripción ya validada que el cargador solo
 //! tiene que copiar y mapear. Reglas:
 //!
-//! * ELF64, little-endian, x86_64, ejecutable estático (`ET_EXEC`).
+//! * ELF64, little-endian, de la arquitectura del kernel ([`MACHINE`]),
+//!   ejecutable estático (`ET_EXEC`).
 //! * Cada `PT_LOAD` vive en la mitad baja de usuario, por encima de
 //!   [`USER_MIN`], alineado a página, con `filesz <= memsz` y datos dentro
 //!   del archivo.
@@ -23,12 +24,23 @@ pub const USER_MAX: u64 = 0x0000_7fff_ffff_0000;
 pub const MAX_SEGMENTS: usize = 16;
 const PAGE: u64 = 4096;
 
+/// Arquitectura de las cells que acepta este kernel (`e_machine`):
+/// `EM_AARCH64` en ARM64, `EM_X86_64` en el resto (incluidos los tests del
+/// host).
+#[cfg(target_arch = "aarch64")]
+pub const MACHINE: u16 = 183;
+/// Arquitectura de las cells que acepta este kernel (`e_machine`):
+/// `EM_AARCH64` en ARM64, `EM_X86_64` en el resto (incluidos los tests del
+/// host).
+#[cfg(not(target_arch = "aarch64"))]
+pub const MACHINE: u16 = 0x3E;
+
 /// Error de validación.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElfError {
     /// Archivo demasiado chico o tabla fuera del archivo.
     Truncated,
-    /// No es ELF64 LE x86_64 ejecutable.
+    /// No es ELF64 LE ejecutable de [`MACHINE`].
     BadHeader,
     /// Segmento fuera del rango de usuario o desalineado.
     BadSegment,
@@ -104,7 +116,7 @@ pub fn parse(b: &[u8]) -> Result<Image, ElfError> {
     }
     let e_type = u16_at(b, 16)?;
     let e_machine = u16_at(b, 18)?;
-    if e_type != 2 || e_machine != 0x3E {
+    if e_type != 2 || e_machine != MACHINE {
         return Err(ElfError::BadHeader);
     }
     let entry = u64_at(b, 24)?;

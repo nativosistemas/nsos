@@ -4,8 +4,7 @@
 //! buscan en el CSpace de la cell que llama, punteros pasan por
 //! `usercopy`, y los mensajes por `Message::from_bytes` (validación total).
 
-use crate::arch::idt::TrapFrame;
-use crate::arch::{apic, cpu};
+use crate::arch::TrapFrame;
 use crate::cell::{self, Cell, ExitStatus, KObject, QueuedMsg, ENDPOINT_RIGHTS};
 use crate::usercopy::{copy_from_user, copy_to_user};
 use crate::{kprintln, sched};
@@ -21,19 +20,21 @@ use nsos_kcore::cspace::Cap;
 /// Máximo de bytes por `debug_log`.
 const MAX_LOG: usize = 1024;
 
-/// Atiende la syscall cuyo estado está en `f` (número en `rax`).
+/// Atiende la syscall cuyo estado está en `f` (convención en
+/// `nsos_abi::syscall`).
 pub fn handle(f: &mut TrapFrame) {
     let cell = sched::current_cell().expect("syscall desde un hilo sin cell");
-    let r = match Syscall::from_raw(f.rax) {
+    let args = f.syscall_args();
+    let r = match Syscall::from_raw(f.syscall_nr()) {
         None => Err(Error::NoSys),
         Some(Syscall::Exit) => {
-            cell::terminate(&cell, ExitStatus::Exited(f.rdi as u32 as i32));
+            cell::terminate(&cell, ExitStatus::Exited(args[0] as u32 as i32));
             drop(cell);
             sched::exit();
         }
-        Some(s) => dispatch(s, &cell, [f.rdi, f.rsi, f.rdx, f.r10]),
+        Some(s) => dispatch(s, &cell, args),
     };
-    f.rax = encode_ret(r) as u64;
+    f.set_syscall_ret(encode_ret(r) as u64);
 }
 
 fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
@@ -45,10 +46,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
             crate::arch::yield_now();
             Ok(0)
         }
-        Syscall::ClockMonotonic => {
-            let hz = apic::tsc_hz().max(1);
-            Ok(((cpu::rdtsc() as u128 * 1_000_000_000) / hz as u128) as u64)
-        }
+        Syscall::ClockMonotonic => Ok(crate::arch::time::now_ns()),
         Syscall::CapDup => {
             let mask = Rights::from_bits(a1 as u32).ok_or(Error::InvalidArgs)?;
             cell.cspace.lock().dup(h(a0), mask).map(|n| n.0 as u64)
@@ -312,7 +310,6 @@ fn mem_info(cell: &Cell, h: CapHandle, out: u64) -> SysResult<u64> {
 /// `ioport_read(h, off, width)` / `ioport_write(h, off, width, valor)`.
 /// `off` es relativo al inicio del rango; el acceso entero debe caer dentro.
 fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
-    use crate::arch::port::Port;
     let need = if value.is_some() {
         Rights::WRITE
     } else {
@@ -328,7 +325,14 @@ fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -
     if !matches!(width, 1 | 2 | 4) || off.checked_add(width).is_none_or(|e| e > len) {
         return Err(Error::InvalidArgs);
     }
-    let port = (base + off) as u16;
+    port_access(base + off, width, value)
+}
+
+/// Lee o escribe un puerto de E/S ya validado.
+#[cfg(target_arch = "x86_64")]
+fn port_access(port: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
+    use crate::arch::port::Port;
+    let port = port as u16;
     // SAFETY: el kernel entregó este rango de puertos a la cell al crearla
     // (un dispositivo PCI descubierto por el kernel, que no lo usa), y el
     // acceso cae completamente dentro del rango.
@@ -352,6 +356,13 @@ fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -
             _ => unreachable!(),
         })
     }
+}
+
+/// Sin puertos de E/S en esta arquitectura: nunca existe una capacidad
+/// `IoPorts`, así que no se llega aquí.
+#[cfg(not(target_arch = "x86_64"))]
+fn port_access(_port: u64, _width: u64, _value: Option<u64>) -> SysResult<u64> {
+    Err(Error::NoSys)
 }
 
 fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64> {
@@ -423,22 +434,23 @@ fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
     Ok(0)
 }
 
-/// Una cell causó una excepción de CPU: se la termina y el kernel sigue.
-pub fn user_fault(f: &TrapFrame, raw: *mut TrapFrame) -> *mut TrapFrame {
-    let addr = if f.vector == 14 { cpu::read_cr2() } else { 0 };
+/// Una cell causó una excepción de CPU (`vector`: código de la
+/// arquitectura, en `pc`, sobre `addr` si es un fallo de memoria): se la
+/// termina y el kernel sigue.
+pub fn user_fault(vector: u64, pc: u64, addr: u64, raw: *mut TrapFrame) -> *mut TrapFrame {
     if let Some(cell) = sched::current_cell() {
         kprintln!(
-            "cell \"{}\": excepción {} en rip={:#x} (dir {:#x}); el kernel la termina",
+            "cell \"{}\": excepción {:#x} en pc={:#x} (dir {:#x}); el kernel la termina",
             cell.name,
-            f.vector,
-            f.rip,
+            vector,
+            pc,
             addr
         );
         cell::terminate(
             &cell,
             ExitStatus::Faulted {
-                vector: f.vector,
-                rip: f.rip,
+                vector,
+                rip: pc,
                 addr,
             },
         );

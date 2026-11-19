@@ -2,6 +2,7 @@
 # Arranca la imagen en QEMU con la consola serie en la terminal.
 #
 # Uso: tools/run-qemu.sh [--uefi] [args extra de QEMU...]
+#      ARCH=aarch64 tools/run-qemu.sh [args extra de QEMU...]   (siempre UEFI)
 # Salir: Ctrl-A X
 #
 # La consola virtio (que maneja la cell `virtcon`) se vuelca en
@@ -9,6 +10,28 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ "${ARCH:-x86_64}" == "aarch64" ]]; then
+    ISO="${ISO:-$ROOT/build/nsos-aarch64.img}"
+    [[ "${1:-}" == "--uefi" ]] && shift
+    AAVMF="${AAVMF:-}"
+    for c in /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd \
+             /usr/share/edk2/aarch64/QEMU_EFI.fd; do
+        [[ -z "$AAVMF" && -f "$c" ]] && AAVMF="$c"
+    done
+    [[ -z "$AAVMF" ]] && { echo "no se encontró QEMU_EFI.fd; definí AAVMF=/ruta" >&2; exit 1; }
+    # `-cpu max` emula ARMv8.x con PAN; semihosting para salir con un estado.
+    exec qemu-system-aarch64 \
+        -M virt,gic-version=2 -cpu max -m 256M \
+        -bios "$AAVMF" \
+        -drive if=none,format=raw,file="$ISO",id=hd0 \
+        -device virtio-blk-pci,drive=hd0 \
+        -serial mon:stdio -display none \
+        -semihosting-config enable=on,target=native \
+        -no-reboot \
+        "$@"
+fi
+
 ISO="${ISO:-$ROOT/build/nsos.iso}"
 VIRTCON_LOG="${VIRTCON_LOG:-$ROOT/build/virtcon.log}"
 

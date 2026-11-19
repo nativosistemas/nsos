@@ -4,7 +4,7 @@
 //! hardware (paginación, interrupciones, cambio de contexto).
 
 use crate::arch::paging::{flags, PageSize};
-use crate::arch::{apic, cpu};
+use crate::arch::{cpu, time};
 use crate::mm::{self, phys_to_virt, pmm};
 use crate::{kprint, kprintln, sched, trap};
 use alloc::boxed::Box;
@@ -20,8 +20,8 @@ const TESTS: &[Test] = &[
     ("marcos: reservar y liberar", frames),
     ("paginación: mapear, traducir y desmapear", paging),
     ("paginación: W^X en el kernel", kernel_wx),
-    ("excepciones: int3 vuelve", breakpoint),
-    ("timer: llegan ticks del APIC", timer_ticks),
+    ("excepciones: un breakpoint vuelve", breakpoint),
+    ("timer: llegan ticks", timer_ticks),
     ("scheduler: apropiación entre 3 hilos", preemption),
     ("scheduler: yield alterna hilos", yield_alternates),
     ("scheduler: 50 hilos terminan y se liberan", many_threads),
@@ -102,23 +102,32 @@ fn frames() -> Result<(), &'static str> {
 
 const TEST_VADDR: u64 = 0xffff_a000_0000_0000;
 
-/// Para el test negativo de SMAP: mapea una página *de usuario* (bit USER)
-/// en el espacio actual y devuelve su dirección.
+/// Para el test negativo de SMAP/PAN: mapea una página *de usuario* (bit
+/// USER) en la mitad baja activa y devuelve su dirección.
 pub fn map_user_test_page() -> u64 {
     const USER_VADDR: u64 = 0x7000_0000;
     let phys = pmm::alloc_frame().expect("sin marcos");
-    let mut g = mm::KERNEL_SPACE.lock();
-    let space = g.as_mut().expect("mm sin inicializar");
     let mut alloc = pmm::alloc_frame;
-    space
-        .map(
-            USER_VADDR,
-            phys,
-            PageSize::Size4K,
-            flags::USER | flags::NO_EXECUTE,
-            &mut alloc,
-        )
-        .expect("map falló");
+    let f = flags::USER | flags::NO_EXECUTE;
+    let mut g = mm::KERNEL_SPACE.lock();
+    let kernel = g.as_mut().expect("mm sin inicializar");
+    if cfg!(target_arch = "x86_64") {
+        // La mitad baja del espacio del kernel es la activa.
+        kernel
+            .map(USER_VADDR, phys, PageSize::Size4K, f, &mut alloc)
+            .expect("map falló");
+    } else {
+        // La mitad baja tiene su propia raíz: un espacio de cell de prueba
+        // (que se pierde: el test termina en pánico).
+        let mut user =
+            crate::arch::paging::AddressSpace::new_user(kernel, &mut alloc).expect("sin marcos");
+        user.map(USER_VADDR, phys, PageSize::Size4K, f, &mut alloc)
+            .expect("map falló");
+        // SAFETY: el espacio nuevo es una mitad baja válida; el kernel no
+        // depende de la mitad baja.
+        unsafe { crate::arch::paging::switch_to(user.root()) };
+        // `user` no libera sus tablas al salir de alcance: quedan en uso.
+    }
     USER_VADDR
 }
 
@@ -163,22 +172,11 @@ fn paging() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Recorre las tablas a mano para comprobar los bits de una dirección.
+/// Permisos efectivos de una dirección en el espacio del kernel, como los
+/// ve la MMU (en ARM64, a través del codec verificado con Kani).
 fn leaf_flags(virt: u64) -> Option<u64> {
-    let mut table = cpu::read_cr3() & 0x000f_ffff_ffff_f000;
-    for level in (1..=4).rev() {
-        let idx = (virt >> (12 + 9 * (level - 1))) & 0x1ff;
-        // SAFETY: las tablas activas están en marcos del HHDM.
-        let e = unsafe { (phys_to_virt(table) as *const u64).add(idx as usize).read() };
-        if e & flags::PRESENT == 0 {
-            return None;
-        }
-        if level == 1 || e & flags::HUGE != 0 {
-            return Some(e);
-        }
-        table = e & 0x000f_ffff_ffff_f000;
-    }
-    None
+    let g = mm::KERNEL_SPACE.lock();
+    g.as_ref()?.translate_with_flags(virt).map(|(_, f)| f)
 }
 
 fn kernel_wx() -> Result<(), &'static str> {
@@ -199,8 +197,7 @@ fn kernel_wx() -> Result<(), &'static str> {
 
 fn breakpoint() -> Result<(), &'static str> {
     let before = trap::breakpoints();
-    // SAFETY: int3 genera #BP, que el handler atiende y retorna.
-    unsafe { core::arch::asm!("int3") };
+    crate::arch::breakpoint();
     check(
         trap::breakpoints() == before + 1,
         "no se contó el breakpoint",
@@ -208,16 +205,16 @@ fn breakpoint() -> Result<(), &'static str> {
 }
 
 fn wait_ticks(n: u64) {
-    let target = apic::ticks() + n;
-    while apic::ticks() < target {
+    let target = time::ticks() + n;
+    while time::ticks() < target {
         cpu::wait_for_interrupt();
     }
 }
 
 fn timer_ticks() -> Result<(), &'static str> {
-    let t0 = apic::ticks();
+    let t0 = time::ticks();
     wait_ticks(3);
-    check(apic::ticks() >= t0 + 3, "no avanzan los ticks")
+    check(time::ticks() >= t0 + 3, "no avanzan los ticks")
 }
 
 fn preemption() -> Result<(), &'static str> {
@@ -226,11 +223,11 @@ fn preemption() -> Result<(), &'static str> {
     let counters: Arc<[AtomicU64; 3]> = Arc::new(Default::default());
     let last = Arc::new(AtomicU64::new(u64::MAX));
     let alternations = Arc::new(AtomicU64::new(0));
-    let end = apic::ticks() + 15;
+    let end = time::ticks() + 15;
     for i in 0..3u64 {
         let (c, l, a) = (counters.clone(), last.clone(), alternations.clone());
         sched::spawn("busy", move || {
-            while apic::ticks() < end {
+            while time::ticks() < end {
                 c[i as usize].fetch_add(1, Ordering::Relaxed);
                 if l.swap(i, Ordering::Relaxed) != i {
                     a.fetch_add(1, Ordering::Relaxed);
@@ -385,6 +382,7 @@ pub fn run_bench() -> bool {
 
 /// virtio-net (PCI legacy, `1af4:1000`): la red que une las dos máquinas de
 /// la migración.
+#[cfg(target_arch = "x86_64")]
 const VIRTIO_NET: (u16, u16) = (0x1AF4, 0x1000);
 
 /// Una de las dos máquinas de la migración. El kernel descubre la placa de
@@ -392,6 +390,7 @@ const VIRTIO_NET: (u16, u16) = (0x1AF4, 0x1000);
 /// con el driver y, en un `Memory` de solo lectura, la clave compartida (el
 /// módulo `enlace.key`) y el rol de esta máquina. Espera a que todas las
 /// cells terminen y exige que terminen con 0.
+#[cfg(target_arch = "x86_64")]
 pub fn run_migration(origin: bool) -> bool {
     use crate::cell::{self, KObject};
     use nsos_abi::Rights;
@@ -519,7 +518,7 @@ pub fn run_cells() -> bool {
         matches!(
             status("intruso"),
             Some(Faulted {
-                vector: 14,
+                vector: crate::arch::FAULT_PAGE,
                 addr: 0xffff_ffff_8000_0000,
                 ..
             })
@@ -550,7 +549,7 @@ pub fn run_cells() -> bool {
             fragil[..],
             [
                 Faulted {
-                    vector: 14,
+                    vector: crate::arch::FAULT_PAGE,
                     addr: 0,
                     ..
                 },
@@ -567,7 +566,7 @@ pub fn run_cells() -> bool {
             .count()
             == 2,
     );
-    if crate::pci::find(crate::VIRTIO_CONSOLE.0, crate::VIRTIO_CONSOLE.1).is_some() {
+    if crate::virtio_console_present() {
         check(
             "virtcon (driver virtio) terminó con 0",
             status("virtcon") == Some(Exited(0)),

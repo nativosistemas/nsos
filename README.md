@@ -14,7 +14,8 @@ páginas propias (W^X), heap, APIC timer y scheduler apropiativo. Corre
 capacidades, que se comunican por canales IPC y se pasan capacidades. Una
 cell que viola el aislamiento es terminada sin afectar al kernel. Hay
 drivers como cells (virtio), actualización en vivo con rollback y migración
-de un servicio entre dos QEMU. Ver [hoja de ruta](docs/hoja-de-ruta.md),
+de un servicio entre dos QEMU. También corre en **ARM64** (QEMU `virt`,
+ver [docs/arm64.md](docs/arm64.md)). Ver [hoja de ruta](docs/hoja-de-ruta.md),
 [modelo de amenazas](docs/amenazas.md) y [cómo contribuir](CONTRIBUTING.md)
 (incluye la regla de verificación formal).
 
@@ -25,6 +26,8 @@ de un servicio entre dos QEMU. Ver [hoja de ruta](docs/hoja-de-ruta.md),
 * `qemu-system-x86_64`, `xorriso`, `make`, `git`, un compilador C (para la
   herramienta `limine`, que se descarga sola la primera vez).
 * Opcional: OVMF para arrancar por UEFI.
+* Para ARM64: `qemu-system-aarch64`, el firmware UEFI de QEMU
+  (`qemu-efi-aarch64`), `mtools` y `dosfstools`.
 
 En Debian/Ubuntu: `sudo apt install qemu-system-x86 xorriso ovmf build-essential`.
 
@@ -35,6 +38,8 @@ make run         # construye la ISO y arranca en QEMU (salir: Ctrl-A X)
 make run-uefi    # ídem con firmware UEFI
 make test        # tests unitarios en el host
 make smoke       # arranca en QEMU, corre los tests internos y un test de fallo (como la CI)
+make run-arm     # ARM64: QEMU virt con UEFI
+make smoke-arm   # ARM64: tests en QEMU virt (como la CI)
 make lint        # rustfmt + clippy
 make verify      # demostraciones en Lean + tests derivados del modelo (requiere elan)
 make kani        # pruebas de Kani sobre abi y kcore (requiere kani-verifier)

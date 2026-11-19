@@ -9,8 +9,7 @@
 //! espacio de direcciones de la cell, y al cambiar a él se cargan su CR3 y
 //! su pila de kernel (TSS y `syscall`).
 
-use crate::arch::idt::TrapFrame;
-use crate::arch::{cpu, gdt, syscall};
+use crate::arch::TrapFrame;
 use crate::cell::Cell;
 use crate::sync::IrqSpinLock;
 use alloc::boxed::Box;
@@ -104,44 +103,33 @@ extern "C" fn thread_trampoline(closure: *mut Box<dyn FnOnce() + Send>) -> ! {
 /// Crea un hilo de kernel que ejecuta `f`.
 pub fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> ThreadId {
     let closure: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
-    let init = TrapFrame {
-        rip: thread_trampoline as *const () as u64,
-        cs: gdt::KERNEL_CS as u64,
-        rflags: 0x202, // IF=1
-        ss: gdt::KERNEL_DS as u64,
-        rdi: Box::into_raw(closure) as u64,
-        ..TrapFrame::default()
-    };
-    add_thread(name, init, None, true)
+    let init = TrapFrame::kernel_thread(
+        thread_trampoline as *const () as u64,
+        Box::into_raw(closure) as u64,
+    );
+    add_thread(name, init, None)
 }
 
-/// Crea el hilo principal de una cell: empieza en `entry` (anillo 3) con la
-/// pila de usuario en `user_rsp`.
-pub fn spawn_user(name: &'static str, cell: Arc<Cell>, entry: u64, user_rsp: u64) -> ThreadId {
-    let init = TrapFrame {
-        rip: entry,
-        cs: gdt::USER_CS as u64,
-        rflags: 0x202,
-        rsp: user_rsp,
-        ss: gdt::USER_DS as u64,
-        ..TrapFrame::default()
-    };
-    add_thread(name, init, Some(cell), false)
-}
-
-fn add_thread(
+/// Crea el hilo principal de una cell: empieza en `entry` (modo usuario)
+/// con la pila de usuario que termina en `user_stack_top`.
+pub fn spawn_user(
     name: &'static str,
-    mut init: TrapFrame,
-    cell: Option<Arc<Cell>>,
-    kernel: bool,
+    cell: Arc<Cell>,
+    entry: u64,
+    user_stack_top: u64,
 ) -> ThreadId {
+    let init = TrapFrame::user_thread(entry, user_stack_top);
+    add_thread(name, init, Some(cell))
+}
+
+fn add_thread(name: &'static str, mut init: TrapFrame, cell: Option<Arc<Cell>>) -> ThreadId {
     let mut stack = vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_mut_ptr() as u64 + STACK_SIZE as u64) & !0xF;
-    let frame_addr = top - 16 - size_of::<TrapFrame>() as u64;
-    let frame = frame_addr as *mut TrapFrame;
-    if kernel {
-        init.rsp = top - 8; // como si se hubiera hecho un `call`
-    }
+    let frame = crate::arch::initial_frame(top, &mut init);
+    debug_assert!(
+        frame as u64 >= stack.as_ptr() as u64
+            && frame as u64 + size_of::<TrapFrame>() as u64 <= top
+    );
     // SAFETY: `frame` está dentro de `stack`, alineado a 8 y sin alias.
     unsafe { frame.write(init) };
     let mut g = SCHED.lock();
@@ -212,16 +200,14 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
     next.state = State::Running;
     let root = match &next.cell {
         Some(c) => {
-            syscall::set_kernel_stack(next.kstack_top);
+            crate::arch::set_kernel_stack(next.kstack_top);
             c.root()
         }
         None => crate::mm::kernel_root(),
     };
-    if root != 0 && cpu::read_cr3() & !0xFFF != root {
-        // SAFETY: tanto el espacio del kernel como el de cada cell mapean la
-        // mitad alta completa (kernel, HHDM, pilas de kernel).
-        unsafe { cpu::write_cr3(root) };
-    }
+    // SAFETY: `root` es el espacio del kernel o el de una cell viva (una
+    // cell que termina pone su raíz en 0 antes de liberarla).
+    unsafe { crate::arch::paging::switch_to(root) };
     next.frame
 }
 

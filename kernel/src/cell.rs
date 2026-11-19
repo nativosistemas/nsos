@@ -142,8 +142,10 @@ pub const CELL_RIGHTS: Rights =
 pub const MEM_RIGHTS: Rights =
     Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::DUPLICATE.0 | Rights::GRANT.0);
 /// Derechos de una capacidad de memoria DMA para un driver.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const DMA_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::CONTROL.0);
 /// Derechos de un rango de puertos para un driver.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const PORT_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 
 /// Capacidad del kernel.
@@ -617,7 +619,7 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
     );
     let tname: &'static str =
         alloc::boxed::Box::leak(alloc::string::String::from(name).into_boxed_str());
-    let tid = sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP - 8);
+    let tid = sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP);
     cell.thread.store(tid, Ordering::Relaxed);
     Ok(cell)
 }
@@ -642,7 +644,7 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
 
     // Dejar de usar el espacio de la cell antes de liberarlo.
     // SAFETY: el espacio del kernel mapea todo lo que el kernel usa.
-    unsafe { crate::arch::cpu::write_cr3(mm::kernel_root()) };
+    unsafe { crate::arch::paging::switch_to(mm::kernel_root()) };
     cell.root.store(0, Ordering::Relaxed);
     if let Some(space) = cell.space.lock().take() {
         space.destroy_user(&mut |p| pmm::free_frame(p));

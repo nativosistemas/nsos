@@ -20,23 +20,7 @@ use core::fmt::{self, Write};
 /// Syscall cruda con hasta 4 argumentos.
 #[inline(always)]
 fn syscall4(n: Syscall, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: la convención está definida en `nsos_abi::syscall`: el kernel
-    // solo modifica rax, rcx y r11, y valida todos los punteros que recibe.
-    unsafe {
-        asm!(
-            "syscall",
-            inlateout("rax") n as u64 => ret,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            in("r10") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+    raw_syscall(n as u64, a0, a1, a2, a3)
 }
 
 /// Capacidad de arranque número `i` (1-based).
@@ -286,6 +270,7 @@ pub fn clock_ns() -> u64 {
 
 /// 64 bits aleatorios del generador de la CPU (`rdrand`), o `None` si la CPU
 /// no lo tiene o no entregó un valor tras varios intentos.
+#[cfg(target_arch = "x86_64")]
 pub fn random_u64() -> Option<u64> {
     let (_, _, ecx, _) = {
         let r = core::arch::x86_64::__cpuid(1);
@@ -305,7 +290,16 @@ pub fn random_u64() -> Option<u64> {
     None
 }
 
+/// 64 bits aleatorios de la CPU. En ARM64 una cell no puede consultar si la
+/// CPU tiene `RNDR` (leer `ID_AA64ISAR0_EL1` desde EL0 es una excepción),
+/// así que por ahora no hay.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn random_u64() -> Option<u64> {
+    None
+}
+
 /// Solo se puede llamar (con `unsafe`) si la CPU tiene `rdrand`.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "rdrand")]
 fn rdrand64(v: &mut u64) -> i32 {
     core::arch::x86_64::_rdrand64_step(v)
@@ -317,16 +311,40 @@ pub fn fence() {
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Llamada cruda para tests de aislamiento (argumentos arbitrarios).
+/// Llamada cruda (también para tests de aislamiento, con argumentos
+/// arbitrarios).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
 pub fn raw_syscall(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
-    // SAFETY: ídem `syscall4`; el kernel debe rechazar cualquier argumento.
+    // SAFETY: la convención está definida en `nsos_abi::syscall`: el kernel
+    // solo modifica rax, rcx y r11, y valida todos los punteros que recibe.
     unsafe {
         asm!(
             "syscall",
             inlateout("rax") n => ret,
             in("rdi") a0, in("rsi") a1, in("rdx") a2, in("r10") a3,
             lateout("rcx") _, lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Llamada cruda (también para tests de aislamiento, con argumentos
+/// arbitrarios).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn raw_syscall(n: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: la convención está definida en `nsos_abi::syscall`: el kernel
+    // solo modifica x0 y valida todos los punteros que recibe.
+    unsafe {
+        asm!(
+            "svc #0",
+            in("x8") n,
+            inlateout("x0") a0 => ret,
+            in("x1") a1, in("x2") a2, in("x3") a3,
             options(nostack),
         );
     }

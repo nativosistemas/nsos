@@ -171,3 +171,71 @@ impl AddressSpace {
         unsafe { super::cpu::write_cr3(self.pml4) };
     }
 }
+
+/// Cambia al espacio de direcciones con raíz `root` si no es el activo.
+///
+/// # Safety
+/// `root` debe ser la raíz del espacio del kernel o de una cell viva: todos
+/// mapean la mitad alta completa (kernel, HHDM, pilas de kernel).
+pub unsafe fn switch_to(root: PhysAddr) {
+    if root != 0 && super::cpu::read_cr3() & !0xFFF != root {
+        // SAFETY: delegada al llamador.
+        unsafe { super::cpu::write_cr3(root) };
+    }
+}
+
+/// Activa el espacio del kernel por primera vez: NX y protección de
+/// escritura en anillo 0 (CR0.WP).
+///
+/// # Safety
+/// El espacio debe mapear el código, los datos y la pila en uso.
+pub unsafe fn install(space: &AddressSpace) {
+    use super::cpu;
+    // SAFETY: EFER.NXE y CR0.WP solo endurecen permisos; el espacio mapea
+    // lo que está en uso (delegado al llamador).
+    unsafe {
+        cpu::wrmsr(
+            cpu::msr::IA32_EFER,
+            cpu::rdmsr(cpu::msr::IA32_EFER) | (1 << 11),
+        );
+        cpu::write_cr0(cpu::read_cr0() | (1 << 16));
+        space.activate();
+    }
+}
+
+static SMEP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMAP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// SMEP: el kernel no puede ejecutar páginas de usuario. SMAP: no puede
+/// leerlas ni escribirlas (salvo con `RFLAGS.AC`, que el kernel nunca pone).
+/// El kernel ya no las toca por diseño (`usercopy` copia por el HHDM); con
+/// SMAP la CPU lo garantiza. Se activan si la CPU los tiene.
+pub fn harden() {
+    use super::cpu;
+    use core::sync::atomic::Ordering;
+    let (_, ebx, _, _) = cpu::cpuid(7, 0);
+    let smep = ebx & (1 << 7) != 0;
+    let smap = ebx & (1 << 20) != 0;
+    let mut cr4 = cpu::read_cr4();
+    if smep {
+        cr4 |= 1 << 20;
+    }
+    if smap {
+        cr4 |= 1 << 21;
+    }
+    // SAFETY: solo se activan bits que CPUID reporta; ninguno afecta al
+    // kernel, que no ejecuta ni toca páginas de usuario.
+    unsafe { cpu::write_cr4(cr4) };
+    SMEP.store(smep, Ordering::Relaxed);
+    SMAP.store(smap, Ordering::Relaxed);
+}
+
+/// Protecciones de la CPU contra el kernel tocando páginas de cells:
+/// (no ejecutar, no leer ni escribir) = (SMEP, SMAP).
+pub fn protections() -> [(&'static str, bool); 2] {
+    use core::sync::atomic::Ordering;
+    [
+        ("SMEP", SMEP.load(Ordering::Relaxed)),
+        ("SMAP", SMAP.load(Ordering::Relaxed)),
+    ]
+}

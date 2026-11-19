@@ -13,6 +13,7 @@ Leé y seguí [`CONTRIBUTING.md`](CONTRIBUTING.md). Lo esencial:
   `.github/pull_request_template.md`).
 * Si cambia lo que se garantiza o aparece un hueco, actualizá
   `docs/amenazas.md`. Todo `unsafe` nuevo va en `docs/unsafe.md`.
-* Antes de abrir el PR: `make lint`, `make test`, `make smoke` y, si tocaste
-  el modelo, `make verify` (Lean: `cd verification/lean && lake build`).
+* Antes de abrir el PR: `make lint`, `make test`, `make smoke`,
+  `make smoke-arm` y, si tocaste el modelo, `make verify` (Lean:
+  `cd verification/lean && lake build`).
 * Español en documentación y mensajes; identificadores en inglés.

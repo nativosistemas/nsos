@@ -27,8 +27,19 @@ casos borde.
 | `unmap_only_that_page` | `crates/kcore/src/paging.rs` | Con dos páginas mapeadas, `unmap` de cualquier dirección quita solo la página pedida. |
 | `parse_data_any`, `parse_hello_any` | `crates/link/src/lib.rs` | Con cualquier trama de hasta 40 bytes, el parser del enlace no entra en pánico; si acepta, la cabecera, los datos y la etiqueta cubren la trama exactamente (sin bytes de más ni de menos). |
 | `user_range_stays_low` | `crates/kcore/src/paging.rs` | Un rango que acepta `user_range_ok` (lo que exige `mem_map`) no desborda y queda entero en la mitad baja. |
+| `codec_roundtrip` | `crates/kcore/src/paging_arm64.rs` | Toda entrada neutra presente se codifica como descriptor ARM64 y se decodifica igual; una no presente queda inválida. |
+| `hw_agrees_with_view` | `crates/kcore/src/paging_arm64.rs` | Con tablas cualesquiera escritas por el codec (una entrada arbitraria por nivel), un modelo de la MMU de ARM64 escrito desde el manual y la vista del kernel (`translate_with_flags`) coinciden: misma física, y EL0 lee, escribe y ejecuta exactamente cuando la vista lo permite. EL1 nunca ejecuta una página de cell (PXN, como SMEP), no escribe lo que la vista marca de solo lectura y con PAN no toca páginas de cells. |
+| `map_then_hw` | `crates/kcore/src/paging_arm64.rs` | De punta a punta: mapear una página de la mitad baja con `paging::map` sobre el codec deja en la MMU exactamente la física y los permisos pedidos. |
 
 `check_invariants` (en `cspace.rs`) también corre en los tests unitarios.
+
+### Mutaciones de ARM64
+
+Para comprobar que las pruebas de `paging_arm64` no pasan por casualidad,
+cada una de estas mutaciones del codec las hace fallar: quitar PXN de las
+páginas de cells (`hw_agrees_with_view` y `map_then_hw`), no poner
+`APTable[0]` en las tablas del kernel, no poner `APTable[1]` en las de
+solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
 
 ## Límites
 
@@ -47,6 +58,7 @@ simples. Si una prueba se queda sin memoria, ese es el primer lugar a mirar.
 cargo install --locked kani-verifier --version 0.68.0
 cargo kani setup
 make kani                       # todas (unos 20 minutos)
+cd crates/kcore && cargo kani --harness hw_agrees_with_view   # ARM64, segundos
 cd crates/kcore && cargo kani --harness remove_any   # una sola
 ```
 

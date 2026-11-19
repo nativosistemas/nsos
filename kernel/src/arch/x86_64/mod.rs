@@ -8,9 +8,66 @@ pub mod paging;
 pub mod port;
 pub mod serial;
 pub mod syscall;
+pub mod trap;
 
 use core::arch::asm;
 use port::Port;
+
+pub use idt::{initial_frame, TrapFrame};
+pub use syscall::set_kernel_stack;
+
+/// Código de excepción de un fallo de página (`ExitStatus::Faulted`).
+pub const FAULT_PAGE: u64 = 14;
+
+/// Dispositivos que hay que mapear después de `mm::init` (ninguno: COM1 es
+/// un puerto de E/S y el APIC lo mapea `time::init`).
+pub fn init_devices() {}
+
+/// Ajustes que dependen de la línea de comandos (nada en x86_64).
+pub fn configure(_has_flag: &dyn Fn(&str) -> bool) {}
+
+/// Breakpoint de software (`int3`); el kernel lo cuenta y sigue.
+pub fn breakpoint() {
+    // SAFETY: int3 genera #BP, que el handler atiende y retorna.
+    unsafe { asm!("int3") };
+}
+
+/// Interrupciones y reloj.
+pub mod time {
+    use super::{apic, cpu};
+
+    /// Arranca el timer del scheduler a `hz` interrupciones por segundo.
+    pub fn init(hz: u32) {
+        apic::init(hz);
+        crate::kprintln!(
+            "apic: timer a {} Hz, TSC ~{} MHz",
+            hz,
+            apic::tsc_hz() / 1_000_000
+        );
+    }
+
+    /// Interrupciones de timer desde el arranque.
+    pub fn ticks() -> u64 {
+        apic::ticks()
+    }
+
+    /// Contador libre de la CPU (TSC); utilizable antes de `init`.
+    pub fn counter() -> u64 {
+        cpu::rdtsc()
+    }
+
+    /// Convierte una diferencia de [`counter`] a nanosegundos (después de
+    /// `init`, que calibra el TSC).
+    pub fn counter_ns(c: u64) -> u64 {
+        let hz = apic::tsc_hz().max(1);
+        ((c as u128 * 1_000_000_000) / hz as u128) as u64
+    }
+
+    /// Reloj monótono en nanosegundos.
+    pub fn now_ns() -> u64 {
+        counter_ns(counter())
+    }
+}
 
 /// Inicialización temprana de la CPU: GDT/TSS e IDT. Las interrupciones
 /// siguen deshabilitadas.
