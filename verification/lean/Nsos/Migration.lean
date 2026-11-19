@@ -6,7 +6,8 @@ Modelo del protocolo del hito 10, tal como lo implementan `cells/origen`,
 (`Nsos.Upgrade`) con la versión nueva en *otra* máquina:
 
 Participantes en la máquina A: la versión vieja (`old`), el supervisor
-(`sup`) y el `enlace` (`proxy`), que maneja el puerto serie que une A con B.
+(`sup`) y el `enlace` (`proxy`), que maneja la red (el "cable") que une A
+con B.
 La máquina B (su `enlace`, el supervisor `destino` y la versión nueva) se ve
 desde A como un solo participante remoto: lo que cruza el cable son
 *bytes*, nunca capacidades.
@@ -32,9 +33,12 @@ Lo que se verifica:
 * la versión remota arranca desde el último valor que vio el cliente
   (`remote_accept_continues`).
 
-Abstracciones: el cable es confiable y en orden (el enlace verifica una
-suma de control y, si falla, termina: el cliente ve `PEER_CLOSED`, no un
-valor equivocado). El proxy atiende un pedido por vez, igual que el código.
+Abstracciones: el cable entrega lo que mandó la otra punta, una vez y en
+orden. No es un supuesto sobre la red: lo garantiza el enlace autenticado,
+demostrado en `Nsos.Link` (`delivered_prefix`) contra un adversario que
+controla la red. Si una trama se pierde, el enlace se detiene (negación de
+servicio), pero nunca entrega algo falso. El proxy atiende un pedido por
+vez, igual que el código.
 -/
 
 namespace Nsos.Migration

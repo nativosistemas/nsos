@@ -154,17 +154,25 @@ el contador sin saltos y solo atiende quien tiene estado y canal.
 
 ```
 máquina A                                           máquina B
-cliente ==canal== enlace ~~~ COM2 (bytes) ~~~ enlace ==canal== contador-v2
+cliente ==canal== enlace ~~ virtnet ~~ red (HMAC) ~~ virtnet ~~ enlace ==canal== contador-v2
                     ^                            |
    origen: PREPARE  |  UPGRADE_RESTORE           |  UPGRADE_RESTORE
    a contador-v1 ---+  [Memory, extremo]         +-> destino -> contador-v2
 ```
 
 Para `origen` (supervisor de A), el `enlace` es la versión nueva: el mismo
-protocolo de actualización, con rechazo y rollback incluidos. Por el cable
+protocolo de actualización, con rechazo y rollback incluidos. Por la red
 viaja una copia del estado; las capacidades se quedan en su máquina. Cuando
 B acepta, el enlace de A reenvía cada pedido del cliente y el cliente no
 nota la mudanza. Modelo: `verification/lean/Nsos/Migration.lean`.
+
+El enlace va sobre virtio-net (driver `virtnet`, una cell aparte) y está
+autenticado (`crates/link`): las dos máquinas comparten una clave, negocian
+una sesión con un nonce aleatorio de cada lado y cada trama lleva
+dirección, secuencia y un HMAC-SHA256. Un mensaje falso, repetido, reflejado
+o de una sesión vieja se descarta. Modelo: `verification/lean/Nsos/Link.lean`.
+El driver no participa de la autenticación: aunque estuviera comprometido,
+no podría hacer que el enlace acepte una trama falsa.
 
 ## Drivers en user-space
 

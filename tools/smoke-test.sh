@@ -6,7 +6,8 @@
 #   2b. test negativo de SMAP: que el kernel lea una página de usuario
 #      directamente debe terminar en #PF (la CPU hace cumplir que solo se
 #      copie por `usercopy`);
-#   3. migración entre dos QEMU unidas por COM2 (tools/migrate-test.sh);
+#   3. migración entre dos QEMU por un enlace autenticado sobre virtio-net
+#      (tools/migrate-test.sh), y la prueba negativa con otra clave;
 #   4. benchmarks (bandera `bench`, kernel en release): solo la cell `bench`
 #      corriendo; ver tools/bench-summary.sh.
 # En el caso 1 además se exige que el texto de la cell `hola` haya salido
@@ -54,15 +55,14 @@ run_case() {
 VIRTCON_PATTERN="hola desde una cell" run_case boot "test-exit" 33 "ktest: .* 0 fallos" "$@"
 run_case wx-fault "test-wx-fault" 35 "escritura sin permiso" "$@"
 run_case smap-fault "test-smap-fault" 35 "lectura sin permiso" "$@"
-# Solo con BIOS: OVMF usa todos los puertos serie como consola, así que
-# con UEFI los firmwares de las dos máquinas "se escriben" por COM2 (y uno
-# termina en el menú de configuración) antes de que arranque el kernel.
-if [[ "${1:-}" != "--uefi" ]]; then
-    "$ROOT/tools/migrate-test.sh" "$@" >"$ROOT/build/migra.log" 2>&1 || {
-        cat "$ROOT/build/migra.log"
+for variant in "" --clave-distinta; do
+    log="$ROOT/build/migra${variant}.log"
+    # shellcheck disable=SC2086
+    "$ROOT/tools/migrate-test.sh" $variant "$@" >"$log" 2>&1 || {
+        cat "$log"
         exit 1
     }
-    tail -n 1 "$ROOT/build/migra.log"
-fi
+    tail -n 1 "$log"
+done
 PROFILE=release run_case bench "bench" 33 "bench: ipc_ida_y_vuelta_ns" "$@"
 echo "OK: todos los tests en QEMU pasaron"

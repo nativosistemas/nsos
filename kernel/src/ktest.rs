@@ -383,51 +383,99 @@ pub fn run_bench() -> bool {
     ok
 }
 
-/// COM2: el puerto serie que une las dos máquinas de la migración.
-const COM2: (u16, u16) = (0x2F8, 8);
+/// virtio-net (PCI legacy, `1af4:1000`): la red que une las dos máquinas de
+/// la migración.
+const VIRTIO_NET: (u16, u16) = (0x1AF4, 0x1000);
 
-/// Una de las dos máquinas de la migración (hito 10). El kernel arranca el
-/// `enlace` con el puerto COM2 y el supervisor de este lado con las imágenes
-/// que necesita, espera a que todos terminen y exige que terminen con 0.
+/// Una de las dos máquinas de la migración. El kernel descubre la placa de
+/// red y entrega sus recursos al driver `virtnet`; al `enlace` le da un canal
+/// con el driver y, en un `Memory` de solo lectura, la clave compartida (el
+/// módulo `enlace.key`) y el rol de esta máquina. Espera a que todas las
+/// cells terminen y exige que terminen con 0.
 pub fn run_migration(origin: bool) -> bool {
     use crate::cell::{self, KObject};
+    use nsos_abi::Rights;
     use nsos_kcore::cspace::Cap;
-    let (sup, images, cells): (&str, [&str; 2], [&str; 4]) = if origin {
+    let (sup, images, cells): (&str, [&str; 2], [&str; 5]) = if origin {
         (
             "origen",
             ["contador-v1", "cliente"],
-            ["enlace", "origen", "contador-v1", "cliente"],
+            ["virtnet", "enlace", "origen", "contador-v1", "cliente"],
         )
     } else {
         (
             "destino",
             ["contador-roto", "contador-v2"],
-            ["enlace", "destino", "contador-roto", "contador-v2"],
+            [
+                "virtnet",
+                "enlace",
+                "destino",
+                "contador-roto",
+                "contador-v2",
+            ],
         )
     };
     kprintln!("migración: esta máquina es el {}", sup);
     let spawn = || -> Result<(), &'static str> {
-        let (a, b) = cell::channel_create();
         let chan = |e| Cap {
             object: KObject::Channel(e),
             rights: cell::ENDPOINT_RIGHTS,
         };
+        let dev = crate::pci::find(VIRTIO_NET.0, VIRTIO_NET.1).ok_or("no hay virtio-net")?;
+        let (base, len) = dev.io_bar(0).ok_or("virtio-net sin BAR0 de E/S")?;
+        dev.enable_io_and_dma();
+        kprintln!("pci: virtio-net en puertos {:#x}+{:#x}", base, len);
         let ports = Cap {
-            object: KObject::IoPorts(alloc::sync::Arc::new(cell::PortRange {
-                base: COM2.0,
-                len: COM2.1,
-            })),
+            object: KObject::IoPorts(alloc::sync::Arc::new(cell::PortRange { base, len })),
             rights: cell::PORT_RIGHTS,
         };
+        let dma = |pages| {
+            cell::MemObj::new(pages)
+                .map(|m| Cap {
+                    object: KObject::Memory(m),
+                    rights: cell::DMA_RIGHTS,
+                })
+                .ok_or("sin memoria contigua para DMA")
+        };
+        let key = crate::module("enlace.key").ok_or("falta la clave del enlace (enlace.key)")?;
+        if key.len() < 32 {
+            return Err("la clave del enlace tiene menos de 32 bytes");
+        }
+        let mut config = [0u8; 33];
+        config[..32].copy_from_slice(&key[..32]);
+        config[32] = if origin { 0 } else { 1 };
+        let config = Cap {
+            object: KObject::Memory(cell::MemObj::from_bytes(&config).ok_or("sin memoria")?),
+            rights: Rights::READ,
+        };
+        let (net_a, net_b) = cell::channel_create();
+        let (ctl_a, ctl_b) = cell::channel_create();
+        let virtnet = crate::module("virtnet").ok_or("falta el módulo virtnet")?;
         let enlace = crate::module("enlace").ok_or("falta el módulo enlace")?;
         let sup_img = crate::module(sup).ok_or("falta el supervisor")?;
-        let caps = alloc::vec![chan(b), crate::image(images[0])?, crate::image(images[1])?];
-        cell::spawn("enlace", enlace, alloc::vec![ports, chan(a)])
-            .map_err(|_| "enlace no arrancó")?;
+        let caps = alloc::vec![
+            chan(ctl_b),
+            crate::image(images[0])?,
+            crate::image(images[1])?
+        ];
+        cell::spawn(
+            "virtnet",
+            virtnet,
+            alloc::vec![ports, dma(8)?, dma(5)?, chan(net_a)],
+        )
+        .map_err(|_| "virtnet no arrancó")?;
+        cell::spawn(
+            "enlace",
+            enlace,
+            alloc::vec![chan(net_b), config, chan(ctl_a)],
+        )
+        .map_err(|_| "enlace no arrancó")?;
         cell::spawn(sup, sup_img, caps).map_err(|_| "el supervisor no arrancó")?;
         Ok(())
     };
-    if let Err(e) = spawn() {
+    // Todas juntas: `virtnet` y `enlace` sondean cediendo la CPU, y este hilo
+    // (el idle) no vuelve a correr mientras haya otro listo.
+    if let Err(e) = cpu::without_interrupts(spawn) {
         kprintln!("migración: {}", e);
         return false;
     }

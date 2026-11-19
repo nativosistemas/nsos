@@ -155,7 +155,7 @@ extern "C" fn kmain() -> ! {
 
     for (flag, origin) in [("migrar-origen", true), ("migrar-destino", false)] {
         if has_flag(flag) {
-            // Hito 10: una de las dos máquinas de la migración (COM2 las une).
+            // Una de las dos máquinas de la migración (las une virtio-net).
             let ok = ktest::run_migration(origin);
             arch::qemu_exit(if ok {
                 arch::QemuExit::Success

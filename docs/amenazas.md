@@ -31,7 +31,8 @@ físico.
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
 | Una cell colgada se puede terminar | `cell_kill` con `CONTROL`; la cell muere desde su hilo, nunca a mitad de una syscall | `dormilona` (bloqueada y girando) |
 | Un servicio se actualiza sin que el cliente note saltos | Protocolo de supervisor con rollback | Lean: `Upgrade.client_sees_consecutive`; test en QEMU con rechazo y aceptación |
-| Un servicio se muda a otra máquina sin que el cliente note saltos, y un rechazo remoto no daña el estado local | El enlace manda una *copia* del estado; la decisión vuelve por el cable; rollback local | Lean: `Migration.client_sees_consecutive`, `one_server`, `rollback_resumes`; `tools/migrate-test.sh` con dos QEMU |
+| Un servicio se muda a otra máquina sin que el cliente note saltos, y un rechazo remoto no daña el estado local | El enlace manda una *copia* del estado; la decisión vuelve por la red; rollback local | Lean: `Migration.client_sees_consecutive`, `one_server`, `rollback_resumes`; `tools/migrate-test.sh` con dos QEMU |
+| Nadie sin la clave inyecta, altera, repite, reordena ni refleja mensajes entre máquinas | HMAC-SHA256 por trama con clave de sesión (clave compartida + nonce de cada punta), dirección y secuencia exacta (`crates/link`) | Lean: `Link.delivered_prefix`, `no_forgery`, `no_replay`, `in_order` (4 mutaciones las rompen); vectores RFC 4231 y tests de ataques; Kani sobre el parser; `migrate-test.sh --clave-distinta`: un impostor no recibe nada y el servicio no sale de A |
 | No se filtran extremos de canal en ciclos | Recolector `ipc_gc` | Lean: `step_no_leak`; ktest de ciclos |
 | El `unsafe` del kernel está acotado y justificado | Lints `undocumented_unsafe_blocks`, `forbid(unsafe_code)` en `abi`/`kcore`, `deny` en cells, registro | `tools/audit-unsafe.sh` en la CI |
 
@@ -72,14 +73,17 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
 6. **Caída de la versión nueva durante una actualización.** El rollback
    cubre el rechazo explícito; si la nueva falla con las capacidades, los
    clientes ven `PEER_CLOSED`.
-7. **El enlace entre máquinas no está autenticado ni cifrado.** Quien
-   controle el cable (o la otra máquina) lee el estado migrado y puede
-   inventar respuestas para el cliente; la suma de control solo detecta
-   errores, no ataques. La máquina de destino confía en el estado que
-   recibe: lo valida el servicio (número mágico), no el sistema. Además el
-   enlace de origen conserva un mapeo de solo lectura del estado tras un
-   rechazo (punto 3). *Mitigación futura*: canal autenticado (claves por
-   máquina, MAC por trama) y un derecho específico para migrar.
+7. **El enlace entre máquinas autentica pero no cifra ni insiste.** Los
+   datos (el estado migrado, los pedidos) viajan en claro. Los `HELLO` no
+   están autenticados y no hay retransmisión: quien controle la red puede
+   impedir la sesión o cortar el enlace (negación de servicio), pero no
+   hacer aceptar nada. La clave compartida va en la imagen ISO (`enlace.key`):
+   quien lea la imagen la tiene (ver punto 8). La máquina de destino confía
+   en el estado que recibe de una punta autenticada: lo valida el servicio
+   (número mágico), no el sistema. El enlace de origen conserva un mapeo de
+   solo lectura del estado tras un rechazo. *Mitigación futura*: cifrado
+   autenticado (AEAD), claves por máquina con intercambio Diffie-Hellman y
+   un derecho específico para migrar.
 8. **Arranque sin verificación.** Limine carga el kernel y las cells sin
    comprobar firmas; quien pueda cambiar la imagen ISO controla el sistema.
 9. **Un solo núcleo.** Varias invariantes (syscalls con interrupciones

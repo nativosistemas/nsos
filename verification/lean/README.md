@@ -15,6 +15,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Security.lean` | Teoremas de seguridad. |
 | `Nsos/Upgrade.lean` | Protocolo de actualización en vivo con rollback (supervisor, versión vieja y nueva). |
 | `Nsos/Migration.lean` | Migración de un servicio a otra máquina: el mismo protocolo con la versión nueva del otro lado de un cable (hito 10). |
+| `Nsos/Link.lean` | Enlace autenticado entre máquinas: un adversario que controla la red no logra que se acepte nada falso, repetido ni fuera de orden. |
 | `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
 | `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
@@ -65,6 +66,13 @@ Todos sin `sorry` ni axiomas extra.
   último valor que vio el cliente. Tres mutaciones del modelo (copiar mal
   el estado, arrancar la remota corrida en uno, reenviar sin tener el
   extremo) hacen fallar las demostraciones.
+* `Link.delivered_prefix`: contra un adversario que descarta, reordena,
+  repite, refleja e inyecta tramas (sin poder falsificar el MAC), lo que el
+  receptor entrega en cada dirección es un prefijo de lo que mandó la otra
+  punta en la sesión actual. Corolarios: `Link.no_forgery`,
+  `Link.no_replay` y `Link.in_order`. Quitar cualquiera de las cuatro
+  comprobaciones del receptor (etiqueta, sesión, dirección, secuencia
+  exacta) hace fallar la demostración.
 
 ### IPC completo (`Nsos/Ipc.lean`)
 

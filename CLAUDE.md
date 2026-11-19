@@ -4,7 +4,7 @@ Leé y seguí [`CONTRIBUTING.md`](CONTRIBUTING.md). Lo esencial:
 
 * **Verificación formal en cada cambio.** Antes de escribir código, decidí
   si el cambio necesita modelo en Lean (protocolos, capacidades, IPC,
-  memoria), pruebas de Kani (código de `crates/kcore` o `crates/abi`), una
+  memoria), pruebas de Kani (código de `crates/kcore`, `crates/abi` o `crates/link`), una
   prueba negativa en QEMU (propiedades que hace cumplir la CPU) o nada.
   Prioridad: todo lo que pueda romper el aislamiento. Para eso, el modelo
   va **antes** que el código y se prueba al menos una mutación que haga
