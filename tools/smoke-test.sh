@@ -2,7 +2,9 @@
 # Tests en QEMU:
 #   1. arranque + tests internos del kernel (ktest), debe salir con éxito;
 #   2. test negativo: una escritura en .rodata debe terminar en #PF y pánico
-#      controlado (comprueba W^X y la ruta de excepciones).
+#      controlado (comprueba W^X y la ruta de excepciones);
+#   3. benchmarks (bandera `bench`, kernel en release): solo la cell `bench`
+#      corriendo; ver tools/bench-summary.sh.
 # En el caso 1 además se exige que el texto de la cell `hola` haya salido
 # por la consola virtio (driver `virtcon` en user-space).
 #
@@ -19,7 +21,7 @@ run_case() {
     local iso="$ROOT/build/nsos-$name.iso" log="$ROOT/build/$name.log"
     local vlog="$ROOT/build/$name-virtcon.log"
     rm -f "$vlog"
-    CMDLINE="$cmdline" ISO="$iso" "$ROOT/tools/build-image.sh" debug >/dev/null
+    CMDLINE="$cmdline" ISO="$iso" "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
     set +e
     local start end status
     start=$(date +%s%N)
@@ -47,4 +49,5 @@ run_case() {
 # isa-debug-exit: éxito 0x10 -> 33, fallo 0x11 -> 35
 VIRTCON_PATTERN="hola desde una cell" run_case boot "test-exit" 33 "ktest: .* 0 fallos" "$@"
 run_case wx-fault "test-wx-fault" 35 "escritura sin permiso" "$@"
+PROFILE=release run_case bench "bench" 33 "bench: ipc_ida_y_vuelta_ns" "$@"
 echo "OK: todos los tests en QEMU pasaron"

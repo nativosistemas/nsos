@@ -1,21 +1,31 @@
 //! Cell `intruso`: test de aislamiento.
 //!
-//! Arranca sin ninguna capacidad e intenta abusar del kernel. Cada intento
-//! debe fallar con el error esperado. Al final lee memoria del kernel, lo que
-//! debe producir un fallo de página: el kernel termina esta cell y sigue
+//! Arranca sin ninguna capacidad e intenta abusar del kernel: handles que no
+//! tiene, punteros al kernel o a su propio código, tipos de objeto
+//! equivocados, derechos que no tiene, y cada syscall de memoria, puertos y
+//! cells con argumentos inválidos. Cada intento debe fallar con el error
+//! esperado. Para probar derechos se fabrica sus propios objetos (canales y
+//! memoria) y los atenúa. Al final lee memoria del kernel, lo que debe
+//! producir un fallo de página: el kernel termina esta cell y sigue
 //! funcionando.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::syscall::Syscall;
-use nsos_rt::abi::{error::decode_ret, CapHandle, Error, Message};
-use nsos_rt::{cap_dup, cap_info, channel_send, println, raw_syscall};
+use nsos_rt::abi::syscall::{flags::NONBLOCK, Syscall};
+use nsos_rt::abi::{error::decode_ret, CapHandle, Error, Message, Rights};
+use nsos_rt::{
+    cap_dup, cap_info, channel_create, channel_send, mem_create, mem_info, println, raw_syscall,
+};
 
 nsos_rt::entry!(main);
 
 const KERNEL_ADDR: u64 = 0xffff_ffff_8000_0000;
+/// Inicio de mi código (ver `cells/cell.ld`).
+const MY_CODE: u64 = 0x40_0000;
+/// Zona libre de mi espacio para mapear.
+const FREE: u64 = 0x5000_0000;
 
 fn expect(name: &str, got: Result<u64, Error>, want: Error) -> bool {
     let ok = got == Err(want);
@@ -25,6 +35,148 @@ fn expect(name: &str, got: Result<u64, Error>, want: Error) -> bool {
         got,
         if ok { "(bloqueado)" } else { "¡INESPERADO!" }
     );
+    ok
+}
+
+fn s4(n: Syscall, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Error> {
+    decode_ret(raw_syscall(n as u64, a, b, c, d))
+}
+
+/// Abusos con objetos propios: memoria, canales, puertos y cells.
+fn abuse_objects() -> bool {
+    use Syscall::*;
+    let (Ok(mem), Ok((a, b))) = (mem_create(4096), channel_create()) else {
+        println!("intruso: no pude crear mis objetos");
+        return false;
+    };
+    let (m, ch) = (mem.0 as u64, a.0 as u64);
+    let rw = (Rights::READ | Rights::WRITE).bits() as u64;
+    let rwx = (Rights::READ | Rights::WRITE | Rights::EXEC).bits() as u64;
+    let mut ok = true;
+    // Memoria.
+    ok &= expect(
+        "mem_create de 0 bytes",
+        s4(MemCreate, 0, 0, 0, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_create de 2 GiB",
+        s4(MemCreate, 1 << 31, 0, 0, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_create con flags desconocidos",
+        s4(MemCreate, 4096, 1, 0, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_map sobre el kernel",
+        s4(MemMap, m, KERNEL_ADDR, rw, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_map encima de mi código",
+        s4(MemMap, m, MY_CODE, rw, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_map W+X (y sin derecho EXEC)",
+        s4(MemMap, m, FREE, rwx, 0),
+        Error::AccessDenied,
+    );
+    ok &= expect(
+        "mem_map desalineado",
+        s4(MemMap, m, FREE + 8, rw, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_map de un canal",
+        s4(MemMap, ch, FREE, rw, 0),
+        Error::AccessDenied,
+    );
+    ok &= expect(
+        "mem_info de un canal",
+        s4(MemInfo, ch, FREE, 0, 0),
+        Error::WrongType,
+    );
+    match mem_info(mem) {
+        Ok(i) if i.phys == 0 => println!(
+            "intruso: {:<42} -> phys = 0 (bloqueado)",
+            "ver la dirección física sin CONTROL"
+        ),
+        other => {
+            println!("intruso: ¡INESPERADO! mem_info sin CONTROL: {:?}", other);
+            ok = false;
+        }
+    }
+    match cap_dup(mem, Rights::READ | Rights::DUPLICATE) {
+        Ok(ro) => {
+            ok &= expect(
+                "mapear escribible una memoria de solo lectura",
+                s4(MemMap, ro.0 as u64, FREE, rw, 0),
+                Error::AccessDenied,
+            );
+        }
+        Err(e) => {
+            println!("intruso: ¡INESPERADO! cap_dup falló: {:?}", e);
+            ok = false;
+        }
+    }
+    // Puertos de E/S.
+    ok &= expect(
+        "ioport_read con un objeto de memoria",
+        s4(IoPortRead, m, 0, 1, 0),
+        Error::WrongType,
+    );
+    ok &= expect(
+        "ioport_write sin capacidad",
+        s4(IoPortWrite, 0x7_0000, 0x60, 1, 0),
+        Error::BadHandle,
+    );
+    // Cells.
+    let mut buf = [0u8; 24];
+    let out = buf.as_mut_ptr() as u64;
+    ok &= expect(
+        "cell_spawn con un canal como imagen",
+        s4(CellSpawn, ch, 0, 0, 0),
+        Error::AccessDenied,
+    );
+    ok &= expect(
+        "cell_spawn con 17 capacidades",
+        s4(CellSpawn, ch, FREE, 17, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "cell_kill de un canal",
+        s4(CellKill, ch, 0, 0, 0),
+        Error::AccessDenied,
+    );
+    ok &= expect(
+        "cell_status de una memoria",
+        s4(CellStatus, m, out, NONBLOCK, 0),
+        Error::WrongType,
+    );
+    ok &= expect(
+        "cell_status escribiendo en el kernel",
+        s4(CellStatus, m, KERNEL_ADDR, NONBLOCK, 0),
+        Error::InvalidArgs,
+    );
+    // Mover una capacidad sin GRANT.
+    match cap_dup(b, Rights::SEND | Rights::RECV) {
+        Ok(no_grant) => {
+            let mut msg = Message::new(0, b"").unwrap();
+            msg.push_cap(no_grant).unwrap();
+            ok &= expect(
+                "enviar una capacidad sin GRANT",
+                channel_send(a, &msg, 0).map(|_| 0),
+                Error::AccessDenied,
+            );
+        }
+        Err(e) => {
+            println!("intruso: ¡INESPERADO! cap_dup falló: {:?}", e);
+            ok = false;
+        }
+    }
     ok
 }
 
@@ -73,6 +225,8 @@ fn main() -> i32 {
         decode_ret(raw_syscall(9999, 0, 0, 0, 0)),
         Error::NoSys,
     );
+
+    ok &= abuse_objects();
 
     if !ok {
         return 1;

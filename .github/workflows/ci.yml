@@ -22,6 +22,12 @@ jobs:
         run: make test
       - name: Arranque en QEMU (BIOS)
         run: make smoke
+      - name: Benchmarks
+        if: always()
+        run: |
+          if [ -f build/bench.log ]; then
+            tools/bench-summary.sh build/bench.log "Benchmarks (QEMU, BIOS)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Arranque en QEMU (UEFI)
         run: make smoke-uefi
 
