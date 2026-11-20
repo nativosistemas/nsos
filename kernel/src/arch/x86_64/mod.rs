@@ -23,6 +23,16 @@ pub const FAULT_PAGE: u64 = 14;
 /// un puerto de E/S y el APIC lo mapea `time::init`).
 pub fn init_devices() {}
 
+/// Semilla para el nonce del enlace: en x86_64 la cell usa `rdrand`, así
+/// que no hace falta.
+pub fn nonce_seed() -> [u8; 16] {
+    [0; 16]
+}
+
+/// En x86_64 no hay device tree: los dispositivos están en direcciones
+/// fijas o en PCI.
+pub fn discover(_memmap: &crate::boot::limine::Memmap) {}
+
 /// Ajustes que dependen de la línea de comandos (nada en x86_64).
 pub fn configure(_has_flag: &dyn Fn(&str) -> bool) {}
 

@@ -18,17 +18,21 @@
 #    El almacén se niega a usarlo y el archivo queda idéntico.
 #
 # Uso: tools/store-test.sh [rondas de kill -9, por defecto 3]
+#      ARCH=aarch64 tools/store-test.sh [rondas]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ROUNDS="${1:-3}"
 TIMEOUT="${TIMEOUT:-120}"
+# En ARM64 (QEMU `virt`, UEFI) la salida con estado es por semihosting.
+EXTRA=""
+[[ "${ARCH:-x86_64}" == "aarch64" ]] && EXTRA=" semihosting" && TIMEOUT="${TIMEOUT_ARM:-240}"
 DISK="$ROOT/build/almacen-test.img"
 mkdir -p "$ROOT/build"
 
 iso() { echo "$ROOT/build/nsos-almacen-${1%%:*}.iso"; }
 for mode in escribir:3 caer:2 verificar sin-fin ajeno; do
-    CMDLINE="almacen=$mode" ISO="$(iso "$mode")" "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
+    CMDLINE="almacen=$mode$EXTRA" ISO="$(iso "$mode")" "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
 done
 
 drive() {

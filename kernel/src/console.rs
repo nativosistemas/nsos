@@ -30,6 +30,16 @@ pub fn _print_panic(args: fmt::Arguments) {
     }
 }
 
+/// Texto que todavía no salió por el UART (ARM64: antes de mapearlo).
+#[cfg(target_arch = "aarch64")]
+pub fn with_early_text(f: impl FnOnce(&[u8])) {
+    if let Some(s) = SERIAL.try_lock() {
+        if let Some(t) = s.early_text() {
+            f(t);
+        }
+    }
+}
+
 /// `print!` del kernel.
 #[macro_export]
 macro_rules! kprint {

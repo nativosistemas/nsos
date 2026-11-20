@@ -29,7 +29,8 @@ físico.
 | En ARM64, lo que ve el kernel es lo que hace cumplir la MMU | Codec entre entradas neutras y descriptores ARM64 (`kcore::paging_arm64`); `TCR_EL1` con permisos jerárquicos y sin PBHA; `SCTLR_EL1.WXN` | Kani: `codec_roundtrip`, `hw_agrees_with_view`, `map_then_hw` contra un modelo de la MMU escrito desde el manual (4 mutaciones las rompen); `intruso`, `fragil` y `test-wx-fault` en QEMU `virt` |
 | Una cell no frena el scheduler ni toca hardware de la CPU | x86_64: anillo 3 (sin `cli`, sin puertos fuera de `IoPorts`). ARM64: `SCTLR_EL1.UMA` = 0 (no enmascara IRQ), `CNTKCTL_EL1` = 0 (no toca timers), FP/SIMD deshabilitado | `dormilona` girando es terminada; `caos` |
 | Nadie fabrica ni amplía capacidades | Handles con generación; derechos que solo se atenúan; `GRANT` para moverlas | Lean: `no_forging`, `run_no_amplification`, `send_requires_grant`, `stale_handle_never_revives`; Kani sobre `kcore`; `intruso` |
-| Una cell solo toca el hardware que se le dio | `IoPorts` con desplazamientos relativos al rango; sin acceso a puertos fuera de él | `intruso`: puertos sin capacidad, con objetos de otro tipo |
+| Una cell solo toca el hardware que se le dio | `IoPorts` con desplazamientos relativos al rango; sin acceso a puertos fuera de él. En ARM64 el kernel asigna él mismo los BAR de E/S, y el acceso pasa por la ventana de E/S mapeada | `intruso`: puertos sin capacidad, con objetos de otro tipo. Kani: `io_ranges_disjoint` (dos rangos asignados nunca se solapan y caben en la ventana) y `pio_access_in_range` (el acceso cae entero en el rango y en la ventana) |
+| Un device tree roto o malicioso no rompe el kernel ni lo hace mapear memoria propia o de una cell como dispositivo (ARM64) | Lector sin índices sin verificar (`kcore::fdt`); toda región de dispositivo (UART, GIC, ECAM, ventana de E/S) se descarta si, redondeada a páginas, toca alguna región no reservada del mapa de memoria (`platform::mmio_allowed`) | Kani: `token_any`, `new_any`, `read_cells_any`, `reg_entry_any`, `translate_any` (sin pánicos, cada token avanza: todo recorrido termina), `mmio_never_touches_ram`, `ecam_addr_in_region`; tests en el host con cada byte de un árbol alterado, cada truncamiento y miles de árboles al azar (el iterador de nodos no entra en Kani) |
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
 | Una cell colgada se puede terminar | `cell_kill` con `CONTROL`; la cell muere desde su hilo, nunca a mitad de una syscall | `dormilona` (bloqueada y girando) |
 | Un servicio se actualiza sin que el cliente note saltos | Protocolo de supervisor con rollback | Lean: `Upgrade.client_sees_consecutive`; test en QEMU con rechazo y aceptación |
@@ -57,7 +58,7 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
 2. **DMA sin IOMMU.** Un driver con capacidades `Memory` con `CONTROL`
    conoce direcciones físicas y el dispositivo puede escribir en cualquier
    lugar de la RAM. Un driver es, por lo tanto, de confianza respecto a la
-   memoria. *Mitigación futura*: programar el IOMMU (VT-d) para que cada
+   memoria. *Mitigación futura*: programar el IOMMU (VT-d; SMMU en ARM64) para que cada
    dispositivo solo vea los objetos `Memory` de su driver.
 3. **Mapeos que sobreviven a mover una capacidad `Memory`.** *Resuelto*:
    un mapeo vale mientras la cell tenga una capacidad al objeto con los
@@ -102,10 +103,17 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    kernel lea o escriba una página de cell directamente. El diseño no lo
    hace (`usercopy` copia por el HHDM) y PXN sigue impidiendo ejecutarlas.
    El arranque lo informa y `test-smap-fault` falla, como debe, en esa CPU.
-11. **ARM64: dispositivos fijos de QEMU `virt`.** Las direcciones del UART
-   y del GIC están en el código. No es un hueco de aislamiento, pero en
-   otra placa el kernel tocaría direcciones equivocadas: hay que leerlas
-   del device tree antes de arrancar en una Raspberry Pi.
+11. **ARM64: el device tree es de confianza en lo que no se valida.** El
+   kernel comprueba que las regiones de dispositivo no toquen la RAM y que
+   el blob no lo haga entrar en pánico, pero cree en *qué* hay en cada
+   dirección (que el PL011 sea un PL011, que la región ECAM sea PCI). Un
+   firmware malo puede igual describir mal la máquina (negación de
+   servicio) o esconder memoria marcándola como reservada. La semilla del
+   nonce del enlace (`/chosen/rng-seed`) también viene del firmware: sin
+   ella la cell `enlace` se niega a arrancar, y si el firmware la repite
+   entre arranques el nonce de esta punta se puede repetir (la otra punta
+   igual aporta el suyo). *Mitigación futura*: `RNDR` donde exista y un
+   generador del kernel con más fuentes.
 
 12. **Almacenamiento: el disco y el almacén son de confianza.** Los hashes
    detectan daños y escrituras a medias, pero no a alguien que reescribe el
@@ -125,6 +133,8 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
   demostrado. Lo demostrado en Lean es el *modelo*; el puente con el código
   son las trazas derivadas del modelo y las pruebas de Kani sobre `kcore`.
 * Los drivers con DMA son de confianza (ver punto 2).
+* El firmware (UEFI y su device tree) es de confianza en lo que no se
+  valida (ver punto 11).
 * El supervisor `init` recibe las imágenes del kernel y decide qué crear:
   quien controle `init` controla qué corre.
 

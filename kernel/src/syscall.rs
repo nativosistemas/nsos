@@ -325,14 +325,14 @@ fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -
     if !matches!(width, 1 | 2 | 4) || off.checked_add(width).is_none_or(|e| e > len) {
         return Err(Error::InvalidArgs);
     }
-    port_access(base + off, width, value)
+    port_access(base, len, off, width, value)
 }
 
 /// Lee o escribe un puerto de E/S ya validado.
 #[cfg(target_arch = "x86_64")]
-fn port_access(port: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
+fn port_access(base: u64, _len: u64, off: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
     use crate::arch::port::Port;
-    let port = port as u16;
+    let port = (base + off) as u16;
     // SAFETY: el kernel entregó este rango de puertos a la cell al crearla
     // (un dispositivo PCI descubierto por el kernel, que no lo usa), y el
     // acceso cae completamente dentro del rango.
@@ -358,11 +358,11 @@ fn port_access(port: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
     }
 }
 
-/// Sin puertos de E/S en esta arquitectura: nunca existe una capacidad
-/// `IoPorts`, así que no se llega aquí.
-#[cfg(not(target_arch = "x86_64"))]
-fn port_access(_port: u64, _width: u64, _value: Option<u64>) -> SysResult<u64> {
-    Err(Error::NoSys)
+/// En ARM64 los puertos de E/S de PCI están en una ventana de memoria
+/// (ver `pci::pio_access`).
+#[cfg(target_arch = "aarch64")]
+fn port_access(base: u64, len: u64, off: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
+    crate::pci::pio_access(base, len, off, width, value).ok_or(Error::InvalidArgs)
 }
 
 fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64> {

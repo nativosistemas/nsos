@@ -16,10 +16,14 @@
 # migraciones (rollback) y el servicio nunca sale de A.
 #
 # Uso: tools/migrate-test.sh [--clave-distinta] [--uefi]
+#      ARCH=aarch64 tools/migrate-test.sh [--clave-distinta]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-120}"
+# En ARM64 (QEMU `virt`, UEFI) la salida con estado es por semihosting.
+EXTRA=""
+[[ "${ARCH:-x86_64}" == "aarch64" ]] && EXTRA=" semihosting" && TIMEOUT="${TIMEOUT_ARM:-240}"
 NEGATIVE=0
 if [[ "${1:-}" == "--clave-distinta" ]]; then
     NEGATIVE=1
@@ -38,9 +42,9 @@ if [[ $NEGATIVE -eq 1 ]]; then
 else
     cp "$KEY_A" "$KEY_B"
 fi
-CMDLINE="migrar-origen" LINK_KEY="$KEY_A" ISO="$ROOT/build/nsos-$NAME-origen.iso" \
+CMDLINE="migrar-origen$EXTRA" LINK_KEY="$KEY_A" ISO="$ROOT/build/nsos-$NAME-origen.iso" \
     "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
-CMDLINE="migrar-destino" LINK_KEY="$KEY_B" ISO="$ROOT/build/nsos-$NAME-destino.iso" \
+CMDLINE="migrar-destino$EXTRA" LINK_KEY="$KEY_B" ISO="$ROOT/build/nsos-$NAME-destino.iso" \
     "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
 rm -f "$KEY_A" "$KEY_B"
 

@@ -30,6 +30,16 @@ casos borde.
 | `codec_roundtrip` | `crates/kcore/src/paging_arm64.rs` | Toda entrada neutra presente se codifica como descriptor ARM64 y se decodifica igual; una no presente queda inválida. |
 | `hw_agrees_with_view` | `crates/kcore/src/paging_arm64.rs` | Con tablas cualesquiera escritas por el codec (una entrada arbitraria por nivel), un modelo de la MMU de ARM64 escrito desde el manual y la vista del kernel (`translate_with_flags`) coinciden: misma física, y EL0 lee, escribe y ejecuta exactamente cuando la vista lo permite. EL1 nunca ejecuta una página de cell (PXN, como SMEP), no escribe lo que la vista marca de solo lectura y con PAN no toca páginas de cells. |
 | `map_then_hw` | `crates/kcore/src/paging_arm64.rs` | De punta a punta: mapear una página de la mitad baja con `paging::map` sobre el codec deja en la MMU exactamente la física y los permisos pedidos. |
+| `token_any` | `crates/kcore/src/fdt.rs` | Leer un token del device tree en cualquier posición de bloques de contenido cualquiera: sin pánicos, y el próximo token empieza al menos 4 bytes más adelante (todo recorrido termina). |
+| `new_any` | `crates/kcore/src/fdt.rs` | Abrir cualquier blob: sin pánicos; si se acepta, los bloques de estructura y cadenas caen dentro. |
+| `reg_entry_any` | `crates/kcore/src/fdt.rs` | Leer cualquier entrada de un `reg` cualquiera con cualquier cantidad de celdas: sin pánicos ni desbordes. |
+| `translate_any` | `crates/kcore/src/fdt.rs` | Traducir una región por un `ranges` cualquiera con cualquier cantidad de celdas: sin pánicos ni desbordes. |
+| `read_cells_any` | `crates/kcore/src/fdt.rs` | Leer celdas de cualquier buffer: sin pánicos; solo acepta 0 a 2 celdas que estén enteras. |
+| `mmio_never_touches_ram` | `crates/kcore/src/platform.rs` | Si `mmio_allowed` acepta una región de dispositivo, ningún byte de las páginas que mapea el kernel cae en la RAM (dos regiones cualesquiera), y esas páginas cubren el dispositivo. |
+| `io_ranges_disjoint` | `crates/kcore/src/platform.rs` | Un paso del asignador de E/S desde cualquier estado alcanzable y con cualquier tamaño: el rango empieza en o después del primer puerto libre, el nuevo primer libre es su fin, está alineado y cabe en la ventana y en 16 bits. Por inducción, todos los rangos que entrega son disjuntos. |
+| `io_two_ranges_disjoint` | `crates/kcore/src/platform.rs` | Dos rangos seguidos con tamaños cualesquiera no se solapan (el caso concreto de la inducción). |
+| `pio_access_in_range` | `crates/kcore/src/platform.rs` | Un acceso de una cell a sus puertos que acepta `pio_offset` cae entero en su rango y en la ventana de E/S. |
+| `ecam_addr_in_region` | `crates/kcore/src/platform.rs` | La página de configuración de cualquier función PCI cae entera dentro de la región ECAM. |
 
 | `decode_entry_any` | `crates/store/src/layout.rs` | Con cualquier entrada de 128 bytes leída del disco y cualquier tamaño de disco: sin panics ni overflows; si se acepta, el nombre es válido, los datos caen dentro del disco y fuera de las ranuras de superbloque, y codificarla da los mismos bytes. |
 | `find_run_is_free` | `crates/store/src/alloc.rs` | Con cualquier mapa de bloques: el rango que devuelve está entero dentro del límite y libre, y después de marcarlo queda usado. Es la condición `Fresh` del modelo de Lean (`Store.crash_safe`). |
@@ -43,6 +53,23 @@ cada una de estas mutaciones del codec las hace fallar: quitar PXN de las
 páginas de cells (`hw_agrees_with_view` y `map_then_hw`), no poner
 `APTable[0]` en las tablas del kernel, no poner `APTable[1]` en las de
 solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
+
+### Mutaciones del device tree y de la plataforma
+
+Cada una hace fallar la prueba indicada: comparar con la RAM la región sin
+redondear a páginas (`mmio_never_touches_ram`), no avanzar el primer
+puerto libre (`io_ranges_disjoint`, `io_two_ranges_disjoint`), no alinear
+el rango (`io_ranges_disjoint`), validar solo el inicio del acceso y no su
+fin (`pio_access_in_range`), no exigir que entre la página entera de
+configuración (`ecam_addr_in_region`), que `END_NODE` no avance
+(`token_any`) y sumar las celdas en 32 bits (`reg_entry_any`).
+
+El iterador de nodos (`Fdt::nodes`) es demasiado grande para Kani (con 12
+bytes de bloque CBMC no termina en 10 minutos). Lo que lee pasa entero por
+`token`, `reg_entry` y `translate_ranges`, que sí están probados, y los
+tests en el host lo recorren con cada byte de un árbol alterado, cada
+truncamiento y miles de árboles con bytes al azar (también el DTB real de
+QEMU).
 
 ## Límites
 

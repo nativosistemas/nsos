@@ -28,9 +28,7 @@ case "$ARCH" in
     aarch64)
         TARGET=aarch64-unknown-none-softfloat
         ISO="${ISO:-$ROOT/build/nsos-aarch64.img}"
-        # Sin PCI todavía: ni virtio-console (virtcon, hola) ni virtio-net
-        # (enlace, origen, destino, virtnet).
-        CELLS=(ping pong intruso init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench)
+        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet virtblk almacen escritor curioso)
         ;;
     *)
         echo "ARCH desconocida: $ARCH (x86_64 o aarch64)" >&2

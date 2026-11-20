@@ -2,11 +2,7 @@
 //! la Raspberry Pi 4 y la 5 también usan un GIC-400, que es GICv2).
 
 use core::sync::atomic::{AtomicU64, Ordering};
-
-/// Direcciones físicas del distribuidor y de la interfaz de CPU en QEMU
-/// `virt`. En una Raspberry Pi salen del device tree (pendiente).
-const GICD_PHYS: u64 = 0x0800_0000;
-const GICC_PHYS: u64 = 0x0801_0000;
+use nsos_kcore::platform::Region;
 
 const GICD_CTLR: u64 = 0x000;
 const GICD_ISENABLER: u64 = 0x100;
@@ -33,11 +29,20 @@ fn read(base: &AtomicU64, off: u64) -> u32 {
     unsafe { ((base.load(Ordering::Relaxed) + off) as *const u32).read_volatile() }
 }
 
-/// Mapea el GIC y lo habilita. Las interrupciones siguen enmascaradas en la
-/// CPU hasta que el kernel las habilite.
-pub fn init() {
-    GICD.store(crate::mm::map_mmio(GICD_PHYS, 0x1_0000), Ordering::Relaxed);
-    GICC.store(crate::mm::map_mmio(GICC_PHYS, 0x1_0000), Ordering::Relaxed);
+/// Mapea el GIC (distribuidor e interfaz de CPU, del device tree) y lo
+/// habilita. Las interrupciones siguen enmascaradas en la CPU hasta que el
+/// kernel las habilite.
+pub fn init(gicd: Region, gicc: Region) {
+    // Los registros que se usan están en los primeros 4 KiB de cada bloque
+    // (el device tree de la Pi declara 4 KiB para el distribuidor).
+    GICD.store(
+        crate::mm::map_mmio(gicd.base, gicd.len.max(0x1000)),
+        Ordering::Relaxed,
+    );
+    GICC.store(
+        crate::mm::map_mmio(gicc.base, gicc.len.max(0x1000)),
+        Ordering::Relaxed,
+    );
     write(&GICD, GICD_CTLR, 1);
     write(&GICC, GICC_PMR, 0xFF);
     write(&GICC, GICC_CTLR, 1);

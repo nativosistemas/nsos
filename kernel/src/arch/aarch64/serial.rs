@@ -37,6 +37,12 @@ impl Serial {
     /// El firmware ya dejó el UART configurado.
     pub fn init(&self) {}
 
+    /// Texto guardado mientras el UART no estaba mapeado (para mostrarlo
+    /// por semihosting si el kernel muere antes de mapearlo).
+    pub fn early_text(&self) -> Option<&[u8]> {
+        (BASE.load(Ordering::Acquire) == 0).then(|| &self.early[..self.len])
+    }
+
     fn put(base: u64, b: u8) {
         // SAFETY: `base` es el PL011 mapeado como Device-nGnRnE por
         // `set_base`; FR y DR son registros de 32 bits del UART.
