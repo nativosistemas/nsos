@@ -382,15 +382,14 @@ pub fn run_bench() -> bool {
 
 /// virtio-net (PCI legacy, `1af4:1000`): la red que une las dos máquinas de
 /// la migración.
-#[cfg(target_arch = "x86_64")]
 const VIRTIO_NET: (u16, u16) = (0x1AF4, 0x1000);
 
 /// Una de las dos máquinas de la migración. El kernel descubre la placa de
 /// red y entrega sus recursos al driver `virtnet`; al `enlace` le da un canal
 /// con el driver y, en un `Memory` de solo lectura, la clave compartida (el
-/// módulo `enlace.key`) y el rol de esta máquina. Espera a que todas las
+/// módulo `enlace.key`), el rol de esta máquina y una semilla para su nonce
+/// (`arch::nonce_seed`). Espera a que todas las
 /// cells terminen y exige que terminen con 0.
-#[cfg(target_arch = "x86_64")]
 pub fn run_migration(origin: bool) -> bool {
     use crate::cell::{self, KObject};
     use nsos_abi::Rights;
@@ -440,9 +439,10 @@ pub fn run_migration(origin: bool) -> bool {
         if key.len() < 32 {
             return Err("la clave del enlace tiene menos de 32 bytes");
         }
-        let mut config = [0u8; 33];
+        let mut config = [0u8; 49];
         config[..32].copy_from_slice(&key[..32]);
         config[32] = if origin { 0 } else { 1 };
+        config[33..49].copy_from_slice(&crate::arch::nonce_seed());
         let config = Cap {
             object: KObject::Memory(cell::MemObj::from_bytes(&config).ok_or("sin memoria")?),
             rights: Rights::READ,
@@ -496,7 +496,6 @@ pub fn run_migration(origin: bool) -> bool {
 }
 
 /// virtio-blk (PCI legacy, `1af4:1001`): el disco del almacén.
-#[cfg(target_arch = "x86_64")]
 const VIRTIO_BLK: (u16, u16) = (0x1AF4, 0x1001);
 
 /// Almacenamiento: el kernel descubre el disco virtio y entrega sus
@@ -510,7 +509,6 @@ const VIRTIO_BLK: (u16, u16) = (0x1AF4, 0x1001);
 /// escritura N), `sin-fin` (escribe hasta que se mate a QEMU) o `ajeno`
 /// (el disco tiene otra cosa: el almacén no lo toca). Espera a que las
 /// cells terminen y comprueba cómo terminó cada una.
-#[cfg(target_arch = "x86_64")]
 pub fn run_store(mode: &str) -> bool {
     use crate::cell::{self, ExitStatus::Exited, KObject};
     use nsos_abi::Rights;

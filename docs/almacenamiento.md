@@ -112,7 +112,7 @@ libres no devuelve un bloque usado.
 
 ## Cómo probarlo
 
-Todo en QEMU x86_64 (en ARM64 todavía no hay PCI).
+En QEMU x86_64 y en QEMU `virt` aarch64 (`ARCH=aarch64 tools/store-test.sh`; ahí el disco de arranque es NVMe, así el único virtio-blk es el del almacén).
 
 ```sh
 make smoke-almacen   # la prueba completa: escribir, caída simulada,

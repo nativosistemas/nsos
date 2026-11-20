@@ -1,11 +1,13 @@
 //! Código dependiente de ARM64 (AArch64, EL1).
 //!
-//! Plataforma: QEMU `virt` (GICv2, PL011, generic timer), arrancado por
-//! Limine sobre UEFI. Ver `docs/arm64.md`.
+//! Plataforma: la que describe el device tree (GICv2, PL011, generic
+//! timer y, si hay, PCI con ECAM), arrancada por Limine sobre UEFI. Hoy se
+//! prueba en QEMU `virt`. Ver `docs/arm64.md`.
 
 pub mod cpu;
 pub mod gic;
 pub mod paging;
+pub mod platform;
 pub mod serial;
 pub mod trap;
 
@@ -13,9 +15,6 @@ use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use trap::{initial_frame, TrapFrame, FAULT_PAGE};
-
-/// UART PL011 de QEMU `virt`.
-const PL011_PHYS: u64 = 0x0900_0000;
 
 // Punto de entrada (ver `ENTRY` en el linker script): el kernel corre con
 // `SP_EL1` (`SPSel` = 1) sobre la pila que dejó Limine.
@@ -49,11 +48,45 @@ pub fn init_cpu() {
     };
 }
 
-/// Mapea los dispositivos que el HHDM no cubre (UART, GIC). Va después de
-/// `mm::init`; hasta acá la consola guardaba el texto en un búfer.
+/// Lee el device tree (antes de `mm::init`: el blob está en el HHDM de
+/// Limine).
+pub fn discover(memmap: &crate::boot::limine::Memmap) {
+    platform::discover(memmap);
+}
+
+/// Mapea los dispositivos que el HHDM no cubre (UART, GIC), con las
+/// direcciones del device tree. Va después de `mm::init`; hasta acá la
+/// consola guardaba el texto en un búfer.
 pub fn init_devices() {
-    serial::set_base(crate::mm::map_mmio(PL011_PHYS, 0x1000));
-    gic::init();
+    let p = platform::get();
+    if let Some(uart) = p.uart {
+        serial::set_base(crate::mm::map_mmio(uart.base, uart.len));
+    }
+    platform::report();
+    let (Some(d), Some(c)) = (p.gicd, p.gicc) else {
+        panic!("el device tree no describe un GICv2 utilizable");
+    };
+    gic::init(d, c);
+}
+
+/// Semilla para el nonce del enlace entre máquinas. Una cell en EL0 no
+/// puede saber si la CPU tiene `RNDR` (y la Cortex-A76 no lo tiene), así
+/// que el kernel la deriva de la semilla que deja el firmware en el device
+/// tree (`/chosen/rng-seed`, nueva en cada arranque) y del contador:
+/// `HMAC-SHA256(semilla, "nsos-nonce" ‖ contador)`. Sin semilla del
+/// firmware devuelve ceros y la cell se niega a usarla.
+pub fn nonce_seed() -> [u8; 16] {
+    let p = platform::get();
+    let mut out = [0; 16];
+    if p.rng_seed_len == 0 {
+        return out;
+    }
+    let mac = nsos_link::sha256::hmac(
+        &p.rng_seed[..p.rng_seed_len],
+        &[b"nsos-nonce", &cpu::counter().to_le_bytes()],
+    );
+    out.copy_from_slice(&mac[..16]);
+    out
 }
 
 /// Cede la CPU al scheduler con una excepción síncrona (`svc` desde EL1).
@@ -102,6 +135,18 @@ pub enum QemuExit {
 /// `semihosting`; si no, detiene la CPU.
 pub fn qemu_exit(code: QemuExit) -> ! {
     if SEMIHOSTING.load(Ordering::Relaxed) {
+        // Si el kernel termina antes de mapear el UART (por ejemplo, un
+        // device tree inválido), el texto guardado sale por semihosting.
+        crate::console::with_early_text(|t| {
+            for c in t {
+                // SAFETY: con semihosting habilitado, `SYS_WRITEC` (`x0` =
+                // 3) escribe el byte al que apunta `x1` en la consola del
+                // host; no toca otra memoria.
+                unsafe {
+                    asm!("hlt #0xf000", in("x0") 0x03u64, in("x1") c as *const u8, options(nostack))
+                };
+            }
+        });
         // ADP_Stopped_ApplicationExit y el estado.
         let block: [u64; 2] = [0x20026, code as u64];
         // SAFETY: con semihosting habilitado en QEMU, `hlt #0xf000` con

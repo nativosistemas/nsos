@@ -8,8 +8,9 @@
 //! Capacidades de arranque:
 //! 1. Canal con `virtnet` (el driver de red): `SEND`/`RECV` de paquetes.
 //! 2. `Memory` de solo lectura con la configuración que puso el kernel: la
-//!    clave compartida (32 bytes) y el rol de esta máquina (byte 32: 0 =
-//!    origen, 1 = destino).
+//!    clave compartida (32 bytes), el rol de esta máquina (byte 32: 0 =
+//!    origen, 1 = destino) y una semilla para el nonce (bytes 33..49), que
+//!    se usa solo si la CPU no da números aleatorios a la cell (ARM64).
 //! 3. Canal de control con el supervisor de esta máquina.
 //!
 //! Al arrancar, negocia una sesión con la otra punta (`HELLO` con un nonce
@@ -457,10 +458,18 @@ fn run() -> Result<(), Error> {
         1 => Role::Dest,
         _ => return Err(Error::InvalidArgs),
     };
+    // Nonce: de la CPU (`rdrand`) o, si la cell no tiene cómo pedirlo (ARM64),
+    // la semilla que dejó el kernel en la configuración (bytes 33..49).
     let mut nonce = [0u8; NONCE_LEN];
-    for half in nonce.chunks_mut(8) {
-        let r = random_u64().ok_or(Error::Unsupported)?;
-        half.copy_from_slice(&r.to_le_bytes());
+    for (i, half) in nonce.chunks_mut(8).enumerate() {
+        let r = match random_u64() {
+            Some(r) => r.to_le_bytes(),
+            None => core::array::from_fn(|j| config.read_u8(33 + 8 * i + j)),
+        };
+        half.copy_from_slice(&r);
+    }
+    if nonce == [0; NONCE_LEN] {
+        return Err(Error::Unsupported);
     }
     let mut link = Link {
         net,

@@ -261,9 +261,13 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   tablas existente, con Kani contra un modelo de la MMU (lo que ve el
   kernel es lo que hace cumplir la MMU); 4 mutaciones lo rompen.
 * Pruebas negativas en QEMU: W^X del kernel y PAN.
-* Paso 2: Raspberry Pi 4 y 5 (firmware UEFI, dispositivos desde el device
-  tree). Después PCI en ARM64 para los drivers virtio. Ver
-  [`arm64.md`](arm64.md).
+* Paso 2 (hecho): device tree y PCI por ECAM. El kernel lee la máquina del
+  device tree (lector verificado con Kani: sin pánicos con cualquier blob)
+  y descarta toda región de dispositivo que toque la RAM; asigna los BAR de
+  E/S con un asignador verificado (rangos disjuntos). Consola virtio,
+  almacén y migración corren en ARM64 igual que en x86_64.
+* Paso 3: Raspberry Pi 4 y 5 (firmware UEFI, controlador PCIe propio de la
+  Pi, FAT32 para la SD). Ver [`arm64.md`](arm64.md).
 
 ## Riesgos
 

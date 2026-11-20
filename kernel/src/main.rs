@@ -17,7 +17,6 @@ mod cell;
 mod console;
 mod ktest;
 mod mm;
-#[cfg(target_arch = "x86_64")]
 mod pci;
 mod sched;
 mod sync;
@@ -86,9 +85,11 @@ extern "C" fn kmain() -> ! {
     #[cfg(target_arch = "aarch64")]
     kprintln!("cpu: vectores de excepción instalados (EL1)");
 
-    // Memoria.
+    // Dispositivos según el device tree (ARM64), y memoria.
+    arch::discover(memmap);
     mm::init(memmap, exec);
     arch::init_devices();
+    pci::init();
     let st = mm::pmm::stats();
     let reclaimable: u64 = memmap
         .entries()
@@ -155,7 +156,6 @@ extern "C" fn kmain() -> ! {
         });
     }
 
-    #[cfg(target_arch = "x86_64")]
     for (flag, origin) in [("migrar-origen", true), ("migrar-destino", false)] {
         if has_flag(flag) {
             // Una de las dos máquinas de la migración (las une virtio-net).
@@ -168,7 +168,6 @@ extern "C" fn kmain() -> ! {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
     if let Some(mode) = cmdline
         .split_whitespace()
         .find_map(|a| a.strip_prefix("almacen="))
@@ -269,27 +268,13 @@ fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<
 }
 
 /// virtio-console (PCI legacy, `1af4:1003`).
-#[cfg(target_arch = "x86_64")]
 pub const VIRTIO_CONSOLE: (u16, u16) = (0x1AF4, 0x1003);
 
 /// ¿Hay una consola virtio (y por lo tanto arrancó `virtcon`)?
 pub fn virtio_console_present() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    return pci::find(VIRTIO_CONSOLE.0, VIRTIO_CONSOLE.1).is_some();
-    #[cfg(not(target_arch = "x86_64"))]
-    false
+    pci::find(VIRTIO_CONSOLE.0, VIRTIO_CONSOLE.1).is_some()
 }
 
-/// Sin PCI por puertos de E/S (hoy solo x86_64) no hay consola virtio.
-#[cfg(not(target_arch = "x86_64"))]
-fn boot_virtio_console(
-    _report: impl Fn(cell::SpawnError) -> &'static str,
-) -> Result<(), &'static str> {
-    kprintln!("sin PCI en esta arquitectura todavía: no arranco virtcon");
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
 /// Si hay una consola virtio, arranca su driver (`virtcon`) en user-space
 /// y una cell cliente (`hola`) conectada a él por un canal. El kernel solo
 /// descubre el dispositivo y entrega sus recursos como capacidades.

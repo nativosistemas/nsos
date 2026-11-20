@@ -276,6 +276,28 @@ pub static HHDM: Request<Hhdm> = Request::new([0x48dcf1cb8ad2b852, 0x63984e959a9
 #[link_section = ".requests"]
 pub static MEMMAP: Request<Memmap> = Request::new([0x67cf3d9d378a806f, 0xe304acdfc50c3c62]);
 
+/// Respuesta con el device tree (solo la piden las plataformas que lo
+/// usan; en x86_64 con ACPI no hay).
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+pub struct Dtb {
+    revision: u64,
+    dtb: *const u8,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Dtb {
+    /// Dirección virtual (en el HHDM) del blob, o nula.
+    pub fn ptr(&self) -> *const u8 {
+        self.dtb
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[used]
+#[link_section = ".requests"]
+pub static DTB: Request<Dtb> = Request::new([0xb40ddb48fb54bac7, 0x545081493f81ffb7]);
+
 #[used]
 #[link_section = ".requests_end_marker"]
 static END_MARKER: [u64; 2] = [0xadc0e0531bb10d03, 0x9572709f31764c62];
