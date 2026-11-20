@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "cell-almacen"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+ "nsos-store",
+]
+
+[[package]]
 name = "cell-bench"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +53,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-curioso"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+ "nsos-store",
+]
+
+[[package]]
 name = "cell-destino"
 version = "0.1.0"
 dependencies = [
@@ -64,6 +80,14 @@ version = "0.1.0"
 dependencies = [
  "nsos-link",
  "nsos-rt",
+]
+
+[[package]]
+name = "cell-escritor"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+ "nsos-store",
 ]
 
 [[package]]
@@ -110,6 +134,13 @@ dependencies = [
 
 [[package]]
 name = "cell-pong"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
+name = "cell-virtblk"
 version = "0.1.0"
 dependencies = [
  "nsos-rt",
@@ -176,6 +207,13 @@ name = "nsos-rt"
 version = "0.1.0"
 dependencies = [
  "nsos-abi",
+]
+
+[[package]]
+name = "nsos-store"
+version = "0.1.0"
+dependencies = [
+ "nsos-link",
 ]
 
 [[package]]

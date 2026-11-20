@@ -1,0 +1,15 @@
+[package]
+name = "cell-escritor"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "escritor"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+nsos-rt = { path = "../rt" }
+nsos-store = { path = "../../crates/store" }

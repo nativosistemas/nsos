@@ -18,6 +18,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Link.lean` | Enlace autenticado entre máquinas: un adversario que controla la red no logra que se acepte nada falso, repetido ni fuera de orden. |
 | `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
 | `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación. |
+| `Nsos/Store.lean` | Almacén de objetos: consistencia ante caídas (copy-on-write) y aislamiento entre dueños (handles). |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
 
@@ -78,6 +79,29 @@ Todos sin `sorry` ni axiomas extra.
   `Link.no_replay` y `Link.in_order`. Quitar cualquiera de las cuatro
   comprobaciones del receptor (etiqueta, sesión, dirección, secuencia
   exacta) hace fallar la demostración.
+
+### Almacén de objetos (`Nsos/Store.lean`)
+
+El disco es una función de bloques; un superbloque válido promete la tabla
+y los datos exactos (un hash ideal). Una caída deja cada escritura hecha, no
+hecha o rota, en cualquier orden.
+
+* `Store.crash_safe`: después de una caída en cualquier punto de una
+  escritura, se recupera el catálogo viejo o el nuevo, nunca una mezcla.
+* `Store.commit_good`, `Store.mount_good`, `Store.crash_then_mount`,
+  `Store.format_good`: el invariante vale al formatear, al escribir, al
+  montar y después de una caída, así que se puede seguir escribiendo.
+* `Store.rw_handle_from_owner`, `Store.change_needs_owner`,
+  `Store.untouched_without_owner`: un objeto del dueño `o` solo cambia por
+  un handle escribible que abrió la raíz de `o`; las copias de solo lectura
+  nunca escriben.
+* Contraejemplos evaluados con `decide`: `overwrite_breaks` (datos sobre un
+  bloque confirmado), `same_slot_breaks` (superbloque en la ranura actual),
+  `same_seq_loses` (sin subir la secuencia) y `stale_resurrects` (montar sin
+  limpiar la otra ranura resucita un estado nunca confirmado). Este último
+  caso lo encontró el modelo antes de escribir el código.
+* Mutaciones que rompen las demostraciones: además de las cuatro de arriba,
+  que `DUP_RO` conserve la escritura y que `OPEN` tome el dueño del mensaje.
 
 ### IPC completo (`Nsos/Ipc.lean`)
 
@@ -149,6 +173,12 @@ a `kcore`.
    capacidad `Memory` seguía viendo el objeto mapeado. Ahora el kernel revoca
    esos mapeos (`Cell::revoke_mappings`; `Mem.step_iso`,
    `Mem.no_revocation_breaks`).
+5. **Estados resucitados en el almacén.** Una escritura que se cae con la
+   tabla y el superbloque escritos pero sin los datos deja una ranura que no
+   valida. Si una escritura posterior reusaba esos bloques con los mismos
+   datos y se caía antes de su superbloque, la ranura vieja quedaba válida
+   y ganaba: un estado que nunca se confirmó. Ahora montar la borra
+   (`Store.mount_good`, `Store.stale_resurrects`).
 
 ## Uso
 

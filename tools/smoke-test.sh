@@ -8,6 +8,8 @@
 #      copie por `usercopy`);
 #   3. migración entre dos QEMU por un enlace autenticado sobre virtio-net
 #      (tools/migrate-test.sh), y la prueba negativa con otra clave;
+#   3b. almacenamiento propio: escribir, caída simulada, kill -9 a QEMU y un
+#      disco ajeno que no se toca (tools/store-test.sh; solo con BIOS);
 #   4. benchmarks (bandera `bench`, kernel en release): solo la cell `bench`
 #      corriendo; ver tools/bench-summary.sh.
 # En el caso 1 además se exige que el texto de la cell `hola` haya salido
@@ -90,5 +92,14 @@ for variant in "" --clave-distinta; do
     }
     tail -n 1 "$log"
 done
+# Almacenamiento propio (una vez, con BIOS): ver tools/store-test.sh.
+if [[ $# -eq 0 ]]; then
+    log="$ROOT/build/almacen.log"
+    "$ROOT/tools/store-test.sh" >"$log" 2>&1 || {
+        cat "$log"
+        exit 1
+    }
+    grep "^almacen:\|^OK" "$log"
+fi
 PROFILE=release run_case bench "bench" 33 "bench: ipc_ida_y_vuelta_ns" "$@"
 echo "OK: todos los tests en QEMU pasaron"

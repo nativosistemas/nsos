@@ -495,6 +495,141 @@ pub fn run_migration(origin: bool) -> bool {
     ok
 }
 
+/// virtio-blk (PCI legacy, `1af4:1001`): el disco del almacén.
+#[cfg(target_arch = "x86_64")]
+const VIRTIO_BLK: (u16, u16) = (0x1AF4, 0x1001);
+
+/// Almacenamiento: el kernel descubre el disco virtio y entrega sus
+/// recursos al driver `virtblk`. El búfer de datos es un solo objeto
+/// `Memory` con dos capacidades: la del driver (con `CONTROL`, para DMA) y
+/// la del `almacen` (sin `CONTROL`). Al `almacen` le da además un canal con
+/// el driver y las raíces de los dueños 1 (`escritor`) y 2 (`curioso`).
+///
+/// `mode` (de `almacen=...` en la línea de comandos): `escribir:N`,
+/// `verificar`, `caer:N` (caída simulada antes del superbloque de la
+/// escritura N), `sin-fin` (escribe hasta que se mate a QEMU) o `ajeno`
+/// (el disco tiene otra cosa: el almacén no lo toca). Espera a que las
+/// cells terminen y comprueba cómo terminó cada una.
+#[cfg(target_arch = "x86_64")]
+pub fn run_store(mode: &str) -> bool {
+    use crate::cell::{self, ExitStatus::Exited, KObject};
+    use nsos_abi::Rights;
+    use nsos_kcore::cspace::Cap;
+    let (tag, n) = match mode.split_once(':') {
+        Some((m, n)) => (m, n.parse::<u8>().unwrap_or(0)),
+        None => (mode, 0),
+    };
+    let code = match tag {
+        "escribir" => b'e',
+        "verificar" => b'v',
+        "caer" => b'c',
+        "sin-fin" => b's',
+        "ajeno" => b'a',
+        _ => {
+            kprintln!("almacen: modo desconocido \"{}\"", mode);
+            return false;
+        }
+    };
+    // Qué tiene que pasar: (cell, estado de salida).
+    let expect: &[(&str, i32)] = match code {
+        b'e' | b'v' => &[
+            ("virtblk", 0),
+            ("almacen", 0),
+            ("escritor", 0),
+            ("curioso", 0),
+        ],
+        b'c' => &[("virtblk", 0), ("almacen", 7), ("escritor", 4)],
+        b'a' => &[("virtblk", 0), ("almacen", 5), ("escritor", 4)],
+        _ => &[],
+    };
+    let with_curioso = matches!(code, b'e' | b'v');
+    kprintln!("almacen: modo {}", mode);
+    let spawn = || -> Result<(), &'static str> {
+        let chan = |e| Cap {
+            object: KObject::Channel(e),
+            rights: cell::ENDPOINT_RIGHTS,
+        };
+        let dev = crate::pci::find(VIRTIO_BLK.0, VIRTIO_BLK.1).ok_or("no hay virtio-blk")?;
+        let (base, len) = dev.io_bar(0).ok_or("virtio-blk sin BAR0 de E/S")?;
+        dev.enable_io_and_dma();
+        kprintln!("pci: virtio-blk en puertos {:#x}+{:#x}", base, len);
+        let ports = Cap {
+            object: KObject::IoPorts(Arc::new(cell::PortRange { base, len })),
+            rights: cell::PORT_RIGHTS,
+        };
+        let ring = cell::MemObj::new(5).ok_or("sin memoria contigua para DMA")?;
+        let buf = cell::MemObj::new(1).ok_or("sin memoria contigua para DMA")?;
+        let mem = |m: &Arc<cell::MemObj>, rights| Cap {
+            object: KObject::Memory(m.clone()),
+            rights,
+        };
+        let allow_format = (code != b'v') as u8;
+        let config = cell::MemObj::from_bytes(&[code, n, allow_format]).ok_or("sin memoria")?;
+        let (drv_a, drv_b) = cell::channel_create();
+        let (root1_a, root1_b) = cell::channel_create();
+        let (root2_a, root2_b) = cell::channel_create();
+        let (peer_a, peer_b) = cell::channel_create();
+        let module = |n| crate::module(n).ok_or("falta un módulo del almacén");
+        cell::spawn(
+            "virtblk",
+            module("virtblk")?,
+            alloc::vec![
+                ports,
+                mem(&ring, cell::DMA_RIGHTS),
+                mem(&buf, cell::DMA_RIGHTS),
+                chan(drv_a)
+            ],
+        )
+        .map_err(|_| "virtblk no arrancó")?;
+        cell::spawn(
+            "almacen",
+            module("almacen")?,
+            alloc::vec![
+                chan(drv_b),
+                mem(&buf, Rights::READ | Rights::WRITE),
+                mem(&config, Rights::READ),
+                chan(root1_a),
+                chan(root2_a)
+            ],
+        )
+        .map_err(|_| "almacen no arrancó")?;
+        let mut caps = alloc::vec![chan(root1_b), mem(&config, Rights::READ)];
+        if with_curioso {
+            caps.push(chan(peer_a));
+        }
+        cell::spawn("escritor", module("escritor")?, caps).map_err(|_| "escritor no arrancó")?;
+        if with_curioso {
+            cell::spawn(
+                "curioso",
+                module("curioso")?,
+                alloc::vec![chan(root2_b), chan(peer_b)],
+            )
+            .map_err(|_| "curioso no arrancó")?;
+        }
+        Ok(())
+    };
+    if let Err(e) = cpu::without_interrupts(spawn) {
+        kprintln!("almacen: {}", e);
+        return false;
+    }
+    sched::wait_all();
+    let exits = crate::cell::EXITS.lock().clone();
+    let mut ok = true;
+    for (name, want) in expect {
+        let st = exits.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
+        let good = st == Some(Exited(*want));
+        kprintln!(
+            "  {} terminó con {} ... {}",
+            name,
+            want,
+            if good { "ok" } else { "FALLO" }
+        );
+        ok &= good;
+    }
+    kprintln!("almacen: {}", if ok { "OK" } else { "FALLO" });
+    ok
+}
+
 pub fn run_cells() -> bool {
     kprintln!("ktest: cells en anillo 3");
     let free_before = pmm::stats().free_frames;

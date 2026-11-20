@@ -1,0 +1,13 @@
+[package]
+name = "nsos-store"
+description = "Almacén de objetos con copy-on-write y handles por dueño (sin unsafe, testeable en el host)"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+# `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[dependencies]
+nsos-link = { path = "../link" }

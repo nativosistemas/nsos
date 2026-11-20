@@ -17,7 +17,7 @@ falta, porque…". La CI rechaza un PR sin esa sección.
 |---|---|---|
 | define o cambia un **protocolo** entre cells o máquinas (actualización, migración, enlace, supervisión) | **Lean**: modelo de estados y teoremas | `verification/lean/Nsos/` |
 | cambia el **modelo de capacidades, IPC o memoria** (quién puede tener o tocar qué) | **Lean**, extendiendo el modelo existente | `System.lean`, `Ipc.lean`, `Memory.lean` |
-| cambia **código de `crates/kcore`, `crates/abi` o `crates/link`** (lógica sin `unsafe`) | **Kani** sobre el código real | `verification/kani.md` |
+| cambia **código de `crates/kcore`, `crates/abi`, `crates/link` o `crates/store`** (lógica sin `unsafe`) | **Kani** sobre el código real | `verification/kani.md` |
 | agrega **`unsafe`** o toca hardware | Registro en `docs/unsafe.md` (lo exige `tools/audit-unsafe.sh`) y, si hay una propiedad que la CPU hace cumplir, una **prueba negativa** en QEMU | `tools/smoke-test.sh` |
 | es solo documentación, herramientas o una cell de ejemplo sin privilegios | Nada formal; se dice por qué | — |
 

@@ -14,7 +14,9 @@ páginas propias (W^X), heap, APIC timer y scheduler apropiativo. Corre
 capacidades, que se comunican por canales IPC y se pasan capacidades. Una
 cell que viola el aislamiento es terminada sin afectar al kernel. Hay
 drivers como cells (virtio), actualización en vivo con rollback y migración
-de un servicio entre dos QEMU. También corre en **ARM64** (QEMU `virt`,
+de un servicio entre dos QEMU, y un **almacenamiento propio** (objetos con
+versión, copy-on-write, acceso por capacidades; ver
+[docs/almacenamiento.md](docs/almacenamiento.md)). También corre en **ARM64** (QEMU `virt`,
 ver [docs/arm64.md](docs/arm64.md)). Ver [hoja de ruta](docs/hoja-de-ruta.md),
 [modelo de amenazas](docs/amenazas.md) y [cómo contribuir](CONTRIBUTING.md)
 (incluye la regla de verificación formal).
@@ -42,7 +44,10 @@ make run-arm     # ARM64: QEMU virt con UEFI
 make smoke-arm   # ARM64: tests en QEMU virt (como la CI)
 make lint        # rustfmt + clippy
 make verify      # demostraciones en Lean + tests derivados del modelo (requiere elan)
-make kani        # pruebas de Kani sobre abi y kcore (requiere kani-verifier)
+make kani        # pruebas de Kani sobre abi, kcore, link y store (requiere kani-verifier)
+make smoke-almacen  # almacenamiento: caídas simuladas, kill -9 a QEMU y un disco FAT
+make run-almacen    # almacenamiento a mano: escribe sin parar; cortá con Ctrl-A X
+make run-almacen MODO=verificar  # ...y al rearrancar muestra qué versión quedó
 ```
 
 Salida esperada:
@@ -76,6 +81,7 @@ además el mapa de memoria de Limine.
 * [Arquitectura](docs/arquitectura.md)
 * [ABI de IPC y modelo de capacidades](docs/abi-ipc-capacidades.md)
 * [Hoja de ruta](docs/hoja-de-ruta.md)
+* [Almacenamiento propio](docs/almacenamiento.md)
 * [Registro de `unsafe`](docs/unsafe.md)
 * [Verificación formal en Lean](verification/lean/README.md)
 * [Pruebas de Kani sobre el código Rust](verification/kani.md)
