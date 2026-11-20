@@ -17,6 +17,7 @@ mod cell;
 mod console;
 mod ktest;
 mod mm;
+#[cfg(target_arch = "x86_64")]
 mod pci;
 mod sched;
 mod sync;
@@ -24,7 +25,7 @@ mod syscall;
 mod trap;
 mod usercopy;
 
-use arch::{apic, cpu};
+use arch::cpu;
 use boot::limine::{self, MemKind};
 use core::panic::PanicInfo;
 
@@ -36,7 +37,7 @@ const TIMER_HZ: u32 = 100;
 /// Punto de entrada que invoca Limine (ver `ENTRY` en el linker script).
 #[no_mangle]
 extern "C" fn kmain() -> ! {
-    let tsc_start = cpu::rdtsc();
+    let t_start = arch::time::counter();
     console::init();
     kprintln!();
     kprintln!(
@@ -57,6 +58,7 @@ extern "C" fn kmain() -> ! {
     let cmdline = limine::CMDLINE.response().map(|c| c.as_str()).unwrap_or("");
     let has_flag = |f: &str| cmdline.split_whitespace().any(|a| a == f);
     kprintln!("cmdline: \"{}\"", cmdline);
+    arch::configure(&has_flag);
 
     let hhdm = limine::HHDM.response().expect("falta la respuesta HHDM");
     mm::set_hhdm(hhdm.offset);
@@ -79,10 +81,14 @@ extern "C" fn kmain() -> ! {
 
     // CPU: segmentos, TSS e interrupciones (aún deshabilitadas).
     arch::init_cpu();
+    #[cfg(target_arch = "x86_64")]
     kprintln!("cpu: GDT, TSS e IDT cargadas");
+    #[cfg(target_arch = "aarch64")]
+    kprintln!("cpu: vectores de excepción instalados (EL1)");
 
     // Memoria.
     mm::init(memmap, exec);
+    arch::init_devices();
     let st = mm::pmm::stats();
     let reclaimable: u64 = memmap
         .entries()
@@ -97,21 +103,16 @@ extern "C" fn kmain() -> ! {
     );
     let (_, heap_free) = mm::heap::usage();
     kprintln!("mm: heap del kernel de {} KiB", heap_free / 1024);
-    let (smep, smap) = mm::smep_smap();
     let yn = |b| if b { "sí" } else { "no (la CPU no lo tiene)" };
-    kprintln!("mm: SMEP {}, SMAP {}", yn(smep), yn(smap));
+    let [(n1, p1), (n2, p2)] = arch::paging::protections();
+    kprintln!("mm: {} {}, {} {}", n1, yn(p1), n2, yn(p2));
 
     // Interrupciones y scheduler.
-    apic::init(TIMER_HZ);
-    kprintln!(
-        "apic: timer a {} Hz, TSC ~{} MHz",
-        TIMER_HZ,
-        apic::tsc_hz() / 1_000_000
-    );
+    arch::time::init(TIMER_HZ);
     sched::init();
     cpu::enable_interrupts();
 
-    let boot_us = (cpu::rdtsc() - tsc_start) * 1_000_000 / apic::tsc_hz().max(1);
+    let boot_us = arch::time::counter_ns(arch::time::counter() - t_start) / 1000;
     kprintln!(
         "arranque del kernel: {}.{:03} ms (desde kmain)",
         boot_us / 1000,
@@ -130,8 +131,9 @@ extern "C" fn kmain() -> ! {
     }
 
     if has_flag("test-smap-fault") {
-        // Test negativo: con SMAP, que el kernel lea una página de usuario
-        // directamente (sin `usercopy`) debe producir #PF y un pánico.
+        // Test negativo: con SMAP (PAN en ARM64), que el kernel lea una
+        // página de usuario directamente (sin `usercopy`) debe producir un
+        // fallo de página y un pánico.
         let v = ktest::map_user_test_page();
         kprintln!(
             "test-smap-fault: el kernel lee una página de usuario en {:#x}",
@@ -153,6 +155,7 @@ extern "C" fn kmain() -> ! {
         });
     }
 
+    #[cfg(target_arch = "x86_64")]
     for (flag, origin) in [("migrar-origen", true), ("migrar-destino", false)] {
         if has_flag(flag) {
             // Una de las dos máquinas de la migración (las une virtio-net).
@@ -170,7 +173,7 @@ extern "C" fn kmain() -> ! {
         kprintln!(
             "sched: {} cambios de contexto, {} ticks",
             sched::switches(),
-            apic::ticks()
+            arch::time::ticks()
         );
         arch::qemu_exit(if ok {
             arch::QemuExit::Success
@@ -251,8 +254,27 @@ fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<
 }
 
 /// virtio-console (PCI legacy, `1af4:1003`).
+#[cfg(target_arch = "x86_64")]
 pub const VIRTIO_CONSOLE: (u16, u16) = (0x1AF4, 0x1003);
 
+/// ¿Hay una consola virtio (y por lo tanto arrancó `virtcon`)?
+pub fn virtio_console_present() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return pci::find(VIRTIO_CONSOLE.0, VIRTIO_CONSOLE.1).is_some();
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+/// Sin PCI por puertos de E/S (hoy solo x86_64) no hay consola virtio.
+#[cfg(not(target_arch = "x86_64"))]
+fn boot_virtio_console(
+    _report: impl Fn(cell::SpawnError) -> &'static str,
+) -> Result<(), &'static str> {
+    kprintln!("sin PCI en esta arquitectura todavía: no arranco virtcon");
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
 /// Si hay una consola virtio, arranca su driver (`virtcon`) en user-space
 /// y una cell cliente (`hola`) conectada a él por un canal. El kernel solo
 /// descubre el dispositivo y entrega sus recursos como capacidades.

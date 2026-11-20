@@ -233,6 +233,19 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   otra clave, B descarta todo, no arranca ninguna versión y A hace rollback.
 * Ahora también corre con UEFI (OVMF ya no se mete en el enlace).
 
+## ARM64 (en curso)
+
+* Paso 1 (hecho): QEMU `virt` aarch64. Kernel en EL1 y cells en EL0 con la
+  misma lógica genérica (capa `arch` con `TrapFrame`, paginación, timer).
+  Limine sobre UEFI, GICv2, generic timer, PL011, `svc` para syscalls.
+* Verificación primero: codec de descriptores ARM64 sobre el recorrido de
+  tablas existente, con Kani contra un modelo de la MMU (lo que ve el
+  kernel es lo que hace cumplir la MMU); 4 mutaciones lo rompen.
+* Pruebas negativas en QEMU: W^X del kernel y PAN.
+* Paso 2: Raspberry Pi 4 y 5 (firmware UEFI, dispositivos desde el device
+  tree). Después PCI en ARM64 para los drivers virtio. Ver
+  [`arm64.md`](arm64.md).
+
 ## Riesgos
 
 * **Spectre**: no confiar solo en el lenguaje; MMU por cell siempre.

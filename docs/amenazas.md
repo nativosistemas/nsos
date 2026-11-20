@@ -25,7 +25,9 @@ físico.
 |---|---|---|
 | Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells | `intruso` (lectura del kernel → #PF), `fragil`; ktest de W^X; Lean: `Mem.step_iso`, `Mem.never_maps_foreign`; Kani: `map_then_translate`, `user_range_stays_low` |
 | El kernel no puede ser engañado para tocar memoria ajena en nombre de una cell | `usercopy` traduce cada página con las tablas de la cell y exige USER (y WRITABLE); nunca desreferencia punteros de usuario | `intruso`: punteros al kernel y a código propio; `caos`: 50 000 syscalls al azar |
-| …y eso lo hace cumplir la CPU | **SMAP**: el kernel no puede acceder a páginas de usuario; **SMEP**: no puede ejecutarlas. `AC` se limpia en cada entrada (SFMASK y `clac`) | `test-smap-fault`: una lectura directa del kernel a una página de usuario termina en #PF |
+| …y eso lo hace cumplir la CPU | **SMAP**: el kernel no puede acceder a páginas de usuario; **SMEP**: no puede ejecutarlas. `AC` se limpia en cada entrada (SFMASK y `clac`). En ARM64: **PAN** (se repone en cada excepción) y **PXN** en toda página de cell | `test-smap-fault`: una lectura directa del kernel a una página de usuario termina en #PF (en ARM64, en un permission fault) |
+| En ARM64, lo que ve el kernel es lo que hace cumplir la MMU | Codec entre entradas neutras y descriptores ARM64 (`kcore::paging_arm64`); `TCR_EL1` con permisos jerárquicos y sin PBHA; `SCTLR_EL1.WXN` | Kani: `codec_roundtrip`, `hw_agrees_with_view`, `map_then_hw` contra un modelo de la MMU escrito desde el manual (4 mutaciones las rompen); `intruso`, `fragil` y `test-wx-fault` en QEMU `virt` |
+| Una cell no frena el scheduler ni toca hardware de la CPU | x86_64: anillo 3 (sin `cli`, sin puertos fuera de `IoPorts`). ARM64: `SCTLR_EL1.UMA` = 0 (no enmascara IRQ), `CNTKCTL_EL1` = 0 (no toca timers), FP/SIMD deshabilitado | `dormilona` girando es terminada; `caos` |
 | Nadie fabrica ni amplía capacidades | Handles con generación; derechos que solo se atenúan; `GRANT` para moverlas | Lean: `no_forging`, `run_no_amplification`, `send_requires_grant`, `stale_handle_never_revives`; Kani sobre `kcore`; `intruso` |
 | Una cell solo toca el hardware que se le dio | `IoPorts` con desplazamientos relativos al rango; sin acceso a puertos fuera de él | `intruso`: puertos sin capacidad, con objetos de otro tipo |
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
@@ -41,7 +43,8 @@ físico.
 Ordenado por gravedad para el objetivo del proyecto (aislamiento).
 
 1. **Canales laterales de microarquitectura.** El kernel está mapeado (sin
-   bit USER) en el espacio de cada cell y no hay KPTI: en una CPU vulnerable
+   bit USER) en el espacio de cada cell (en ARM64, en `TTBR1_EL1`, siempre
+   activo) y no hay KPTI: en una CPU vulnerable
    a Meltdown, una cell podría leer memoria del kernel por ejecución
    especulativa. Tampoco hay mitigaciones de Spectre (retpolines, IBRS,
    barreras tras validar índices de syscalls). `clock_monotonic` da
@@ -91,6 +94,15 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
 9. **Un solo núcleo.** Varias invariantes (syscalls con interrupciones
    apagadas, la pila de kernel en una variable global) asumen un CPU. Con
    SMP hay que revisarlas antes de prender el segundo núcleo.
+10. **ARM64 sin PAN (Raspberry Pi 4).** El Cortex-A72 es ARMv8.0: no tiene
+   PAN, así que, como en un x86 sin SMAP, la CPU no impide que un bug del
+   kernel lea o escriba una página de cell directamente. El diseño no lo
+   hace (`usercopy` copia por el HHDM) y PXN sigue impidiendo ejecutarlas.
+   El arranque lo informa y `test-smap-fault` falla, como debe, en esa CPU.
+11. **ARM64: dispositivos fijos de QEMU `virt`.** Las direcciones del UART
+   y del GIC están en el código. No es un hueco de aislamiento, pero en
+   otra placa el kernel tocaría direcciones equivocadas: hay que leerlas
+   del device tree antes de arrancar en una Raspberry Pi.
 
 ## Supuestos de confianza
 

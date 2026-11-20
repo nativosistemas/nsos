@@ -13,20 +13,31 @@
 # En el caso 1 además se exige que el texto de la cell `hola` haya salido
 # por la consola virtio (driver `virtcon` en user-space).
 #
+# Con ARCH=aarch64 (QEMU `virt`, UEFI) corren los casos 1, 2 y 2b (con PAN
+# en vez de SMAP) y los benchmarks; no hay migración ni consola virtio
+# todavía (falta PCI en ARM64). La salida de QEMU es por semihosting.
+#
 # Uso: tools/smoke-test.sh [--uefi]
+#      ARCH=aarch64 tools/smoke-test.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-60}"
+ARCH="${ARCH:-x86_64}"
+export ARCH
+EXTRA=""
+[[ "$ARCH" == "aarch64" ]] && EXTRA=" semihosting"
 
 # run_case NOMBRE CMDLINE ESTADO_ESPERADO PATRÓN [args de run-qemu...]
 run_case() {
     local name="$1" cmdline="$2" want="$3" pattern="$4"
     shift 4
-    local iso="$ROOT/build/nsos-$name.iso" log="$ROOT/build/$name.log"
+    local iso="$ROOT/build/nsos-$ARCH-$name.img" log="$ROOT/build/$name.log"
     local vlog="$ROOT/build/$name-virtcon.log"
+    [[ "$ARCH" == "x86_64" ]] && iso="$ROOT/build/nsos-$name.iso"
+    [[ "$ARCH" == "aarch64" ]] && log="$ROOT/build/$ARCH-$name.log"
     rm -f "$vlog"
-    CMDLINE="$cmdline" ISO="$iso" "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
+    CMDLINE="$cmdline$EXTRA" ISO="$iso" "$ROOT/tools/build-image.sh" "${PROFILE:-debug}" >/dev/null
     set +e
     local start end status
     start=$(date +%s%N)
@@ -51,7 +62,22 @@ run_case() {
     echo "OK [$name]"
 }
 
-# isa-debug-exit: éxito 0x10 -> 33, fallo 0x11 -> 35
+# isa-debug-exit (x86_64) o semihosting (aarch64): éxito 33, fallo 35
+if [[ "$ARCH" == "aarch64" ]]; then
+    TIMEOUT="${TIMEOUT_ARM:-180}"
+    run_case boot "test-exit" 33 "la memoria de las cells se liberó ... ok" "$@"
+    grep -q "ktest: .* 0 fallos" "$ROOT/build/$ARCH-boot.log"
+    if grep -q "FALLO" "$ROOT/build/$ARCH-boot.log"; then
+        echo "FALLO [boot]: algún test falló" >&2
+        exit 1
+    fi
+    run_case wx-fault "test-wx-fault" 35 "escritura sin permiso" "$@"
+    run_case pan-fault "test-smap-fault" 35 "lectura sin permiso" "$@"
+    PROFILE=release run_case bench "bench" 33 "bench: ipc_ida_y_vuelta_ns" "$@"
+    echo "OK: todos los tests en QEMU (aarch64) pasaron"
+    exit 0
+fi
+
 VIRTCON_PATTERN="hola desde una cell" run_case boot "test-exit" 33 "ktest: .* 0 fallos" "$@"
 run_case wx-fault "test-wx-fault" 35 "escritura sin permiso" "$@"
 run_case smap-fault "test-smap-fault" 35 "lectura sin permiso" "$@"

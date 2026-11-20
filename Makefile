@@ -1,4 +1,4 @@
-.PHONY: all iso run run-uefi test smoke smoke-uefi lint verify kani clean
+.PHONY: all iso run run-uefi run-arm test smoke smoke-uefi smoke-arm lint verify kani clean
 
 all: iso
 
@@ -11,6 +11,11 @@ run: iso
 run-uefi: iso
 	tools/run-qemu.sh --uefi
 
+# ARM64: QEMU virt con UEFI (ver docs/arm64.md)
+run-arm:
+	ARCH=aarch64 tools/build-image.sh debug
+	ARCH=aarch64 tools/run-qemu.sh
+
 # Tests unitarios en el host (ABI y lógica portable)
 test:
 	cargo test
@@ -22,12 +27,18 @@ smoke:
 smoke-uefi:
 	tools/smoke-test.sh --uefi
 
+smoke-arm:
+	ARCH=aarch64 tools/smoke-test.sh
+
 lint:
 	cargo fmt --check
 	cargo clippy -p nsos-abi -p nsos-kcore -p nsos-link --all-targets -- -D warnings
 	cargo clippy -p nsos-kernel --target x86_64-unknown-none -- -D warnings
+	cargo clippy -p nsos-kernel --target aarch64-unknown-none-softfloat -- -D warnings
 	RUSTFLAGS="-C relocation-model=static" cargo clippy --target x86_64-unknown-none \
 		--target-dir target/cells -p nsos-rt -p cell-ping -p cell-pong -p cell-intruso -p cell-virtcon -p cell-hola -p cell-init -p cell-fragil -p cell-dormilona -p cell-contador-v1 -p cell-contador-v2 -p cell-cliente -p cell-contador-roto -p cell-caos -p cell-bench -p cell-enlace -p cell-origen -p cell-destino -p cell-virtnet -- -D warnings
+	RUSTFLAGS="-C relocation-model=static" cargo clippy --target aarch64-unknown-none-softfloat \
+		--target-dir target/cells -p nsos-rt -p cell-ping -p cell-pong -p cell-intruso -p cell-init -p cell-fragil -p cell-dormilona -p cell-contador-v1 -p cell-contador-v2 -p cell-cliente -p cell-contador-roto -p cell-caos -p cell-bench -- -D warnings
 	tools/audit-unsafe.sh
 
 # Demostraciones en Lean y regeneración de las trazas del modelo

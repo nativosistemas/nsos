@@ -1,38 +1,61 @@
 #!/usr/bin/env bash
-# Construye una imagen ISO booteable (BIOS y UEFI) con Limine + kernel nsos.
+# Construye una imagen booteable con Limine + kernel nsos.
+#
+# x86_64: ISO híbrida (BIOS y UEFI). aarch64: imagen de disco con una
+# partición FAT (ESP) para UEFI (QEMU `virt`, y luego Raspberry Pi con
+# firmware UEFI).
 #
 # Uso: tools/build-image.sh [debug|release]
 # Variables:
+#   ARCH      x86_64 (por defecto) o aarch64
 #   CMDLINE   línea de comandos del kernel (por defecto vacía)
-#   ISO       ruta de salida (por defecto build/nsos.iso)
+#   ISO       ruta de salida (por defecto build/nsos.iso o build/nsos-aarch64.img)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${1:-debug}"
+ARCH="${ARCH:-x86_64}"
 CMDLINE="${CMDLINE:-}"
-ISO="${ISO:-$ROOT/build/nsos.iso}"
 LIMINE_BRANCH="v10.x-binary"
 LIMINE_DIR="$ROOT/build/limine"
+
+case "$ARCH" in
+    x86_64)
+        TARGET=x86_64-unknown-none
+        ISO="${ISO:-$ROOT/build/nsos.iso}"
+        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet)
+        ;;
+    aarch64)
+        TARGET=aarch64-unknown-none-softfloat
+        ISO="${ISO:-$ROOT/build/nsos-aarch64.img}"
+        # Sin PCI todavía: ni virtio-console (virtcon, hola) ni virtio-net
+        # (enlace, origen, destino, virtnet).
+        CELLS=(ping pong intruso init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench)
+        ;;
+    *)
+        echo "ARCH desconocida: $ARCH (x86_64 o aarch64)" >&2
+        exit 1
+        ;;
+esac
 
 cd "$ROOT"
 
 # 1. Kernel
 if [[ "$PROFILE" == "release" ]]; then
-    cargo build -p nsos-kernel --target x86_64-unknown-none --release
+    cargo build -p nsos-kernel --target "$TARGET" --release
 else
-    cargo build -p nsos-kernel --target x86_64-unknown-none
+    cargo build -p nsos-kernel --target "$TARGET"
 fi
-KERNEL="$ROOT/target/x86_64-unknown-none/$PROFILE/nsos-kernel"
+KERNEL="$ROOT/target/$TARGET/$PROFILE/nsos-kernel"
 
 # 1b. Cells: siempre en release (son chicas y así el benchmark es realista).
 # Se compilan aparte, con sus propios RUSTFLAGS (sin el modelo de código del
 # kernel) y su propio directorio de salida.
-CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet)
 CELL_PKGS=()
 for c in "${CELLS[@]}"; do CELL_PKGS+=(-p "cell-$c"); done
 RUSTFLAGS="-C relocation-model=static" cargo build --release \
-    --target x86_64-unknown-none --target-dir "$ROOT/target/cells" "${CELL_PKGS[@]}"
-CELL_DIR="$ROOT/target/cells/x86_64-unknown-none/release"
+    --target "$TARGET" --target-dir "$ROOT/target/cells" "${CELL_PKGS[@]}"
+CELL_DIR="$ROOT/target/cells/$TARGET/release"
 
 # 2. Limine (binarios precompilados + herramienta del host)
 if [[ ! -d "$LIMINE_DIR" ]]; then
@@ -43,8 +66,8 @@ if [[ ! -x "$LIMINE_DIR/limine" ]]; then
     make -s -C "$LIMINE_DIR" >/dev/null
 fi
 
-# 3. Árbol de la ISO
-ISO_ROOT="$ROOT/build/iso_root"
+# 3. Árbol de la imagen
+ISO_ROOT="$ROOT/build/iso_root-$ARCH"
 rm -rf "$ISO_ROOT"
 mkdir -p "$ISO_ROOT/boot/limine" "$ISO_ROOT/EFI/BOOT"
 cp "$KERNEL" "$ISO_ROOT/boot/nsos-kernel"
@@ -70,6 +93,18 @@ serial: yes
     cmdline: $CMDLINE
 $MODULES
 EOF
+if [[ "$ARCH" == "aarch64" ]]; then
+    # 4. Imagen FAT de 64 MiB (ESP) con el árbol entero.
+    cp "$LIMINE_DIR"/BOOTAA64.EFI "$ISO_ROOT/EFI/BOOT/"
+    mkdir -p "$(dirname "$ISO")"
+    rm -f "$ISO"
+    truncate -s 64M "$ISO"
+    mkfs.fat -F 32 -n NSOS "$ISO" >/dev/null
+    mcopy -s -i "$ISO" "$ISO_ROOT"/* ::/
+    echo "imagen: $ISO"
+    exit 0
+fi
+
 cp "$LIMINE_DIR"/limine-bios.sys "$LIMINE_DIR"/limine-bios-cd.bin \
    "$LIMINE_DIR"/limine-uefi-cd.bin "$ISO_ROOT/boot/limine/"
 cp "$LIMINE_DIR"/BOOTX64.EFI "$ISO_ROOT/EFI/BOOT/"

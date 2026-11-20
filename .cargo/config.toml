@@ -1,7 +1,13 @@
 [target.x86_64-unknown-none]
 rustflags = ["-C", "relocation-model=static", "-C", "code-model=kernel"]
 
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "relocation-model=static"]
+
 [alias]
 # cargo kbuild  -> compila el kernel para bare metal
 kbuild = "build -p nsos-kernel --target x86_64-unknown-none"
 kclippy = "clippy -p nsos-kernel --target x86_64-unknown-none"
+# cargo kbuild-arm -> ídem para ARM64
+kbuild-arm = "build -p nsos-kernel --target aarch64-unknown-none-softfloat"
+kclippy-arm = "clippy -p nsos-kernel --target aarch64-unknown-none-softfloat"

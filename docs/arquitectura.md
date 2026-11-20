@@ -17,7 +17,7 @@ Es un prototipo de investigación para QEMU, no un reemplazo de Linux.
 |  microkernel: scheduler · memoria · IPC · capacidades     |   anillo 0
 |  (+ consola serie de depuración)                          |
 +-----------------------------------------------------------+
-|  Limine (BIOS/UEFI)  ·  QEMU x86_64 (luego ARM64)         |
+|  Limine (BIOS/UEFI)  ·  QEMU x86_64 y QEMU virt (ARM64)   |
 +-----------------------------------------------------------+
 ```
 
@@ -56,6 +56,9 @@ como barrera obligatoria y usa el lenguaje como defensa adicional y como
 herramienta de productividad.
 
 ## Arranque
+
+(En x86_64. ARM64 sigue los mismos pasos con sus equivalentes: ver
+[`arm64.md`](arm64.md).)
 
 1. El firmware (BIOS o UEFI) carga **Limine** desde la ISO.
 2. Limine carga el ELF del kernel en la mitad alta

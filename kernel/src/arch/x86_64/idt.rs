@@ -222,9 +222,81 @@ extern "C" fn trap_entry(frame: *mut TrapFrame) -> *mut TrapFrame {
     let f = unsafe { &mut *frame };
     // Una interrupción no limpia RFLAGS.AC: si la cell lo había puesto, SMAP
     // quedaría desactivado dentro del kernel.
-    if crate::mm::smep_smap().1 {
+    if super::paging::protections()[1].1 {
         // SAFETY: SMAP está soportado (se activó tras verificarlo con CPUID).
         unsafe { crate::arch::cpu::clac() };
     }
-    crate::trap::dispatch(f, frame)
+    super::trap::dispatch(f, frame)
+}
+
+/// Interfaz común con la de otras arquitecturas (ver `crate::arch`).
+impl TrapFrame {
+    /// Frame inicial de un hilo de kernel: `entry(arg)` con interrupciones.
+    pub fn kernel_thread(entry: u64, arg: u64) -> Self {
+        TrapFrame {
+            rip: entry,
+            cs: gdt::KERNEL_CS as u64,
+            rflags: 0x202, // IF=1
+            ss: gdt::KERNEL_DS as u64,
+            rdi: arg,
+            ..TrapFrame::default()
+        }
+    }
+
+    /// Frame inicial del hilo de una cell: anillo 3 en `entry`, con la pila
+    /// de usuario que termina en `stack_top`.
+    pub fn user_thread(entry: u64, stack_top: u64) -> Self {
+        TrapFrame {
+            rip: entry,
+            cs: gdt::USER_CS as u64,
+            rflags: 0x202,
+            rsp: stack_top - 8, // como si se hubiera hecho un `call`
+            ss: gdt::USER_DS as u64,
+            ..TrapFrame::default()
+        }
+    }
+
+    /// ¿Se interrumpió (o vuelve) a una cell?
+    pub fn is_user_mode(&self) -> bool {
+        self.cs & 3 == 3
+    }
+
+    /// Número de syscall (`rax`).
+    pub fn syscall_nr(&self) -> u64 {
+        self.rax
+    }
+
+    /// Argumentos de la syscall (`rdi`, `rsi`, `rdx`, `r10`).
+    pub fn syscall_args(&self) -> [u64; 4] {
+        [self.rdi, self.rsi, self.rdx, self.r10]
+    }
+
+    /// Valor de retorno de la syscall (`rax`).
+    pub fn set_syscall_ret(&mut self, v: u64) {
+        self.rax = v;
+    }
+
+    /// Reescribe un frame de anillo 3 (guardado en `frame_addr`) para que
+    /// continúe en anillo 0 en `pc`, sin interrupciones, en la misma pila de
+    /// kernel.
+    pub fn redirect_to_kernel(&mut self, pc: u64, frame_addr: u64) {
+        let below = (frame_addr & !0xF) - 8; // como si se hubiera hecho un `call`
+        *self = TrapFrame {
+            rip: pc,
+            cs: gdt::KERNEL_CS as u64,
+            rflags: 0x2, // sin interrupciones, como una syscall
+            rsp: below,
+            ss: gdt::KERNEL_DS as u64,
+            ..TrapFrame::default()
+        };
+    }
+}
+
+/// Dónde va el frame inicial de un hilo nuevo cuya pila de kernel termina
+/// en `top` (alineado a 16). Para un hilo de kernel también fija su `rsp`.
+pub fn initial_frame(top: u64, init: &mut TrapFrame) -> *mut TrapFrame {
+    if !init.is_user_mode() {
+        init.rsp = top - 8; // como si se hubiera hecho un `call`
+    }
+    (top - 16 - size_of::<TrapFrame>() as u64) as *mut TrapFrame
 }

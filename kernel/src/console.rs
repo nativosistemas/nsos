@@ -4,7 +4,7 @@ use crate::arch::serial::Serial;
 use crate::sync::IrqSpinLock;
 use core::fmt::{self, Write};
 
-static SERIAL: IrqSpinLock<Serial> = IrqSpinLock::new(Serial::com1());
+static SERIAL: IrqSpinLock<Serial> = IrqSpinLock::new(Serial::console());
 
 /// Inicializa el UART.
 pub fn init() {
@@ -25,7 +25,7 @@ pub fn _print_panic(args: fmt::Arguments) {
             let _ = s.write_fmt(args);
         }
         None => {
-            let _ = Serial::com1().write_fmt(args);
+            let _ = Serial::console().write_fmt(args);
         }
     }
 }

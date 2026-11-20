@@ -20,6 +20,11 @@ pub struct Serial {
 }
 
 impl Serial {
+    /// La consola del sistema (COM1).
+    pub const fn console() -> Self {
+        Self::com1()
+    }
+
     /// COM1 estándar.
     pub const fn com1() -> Self {
         // SAFETY: 0x3F8..=0x3FD son los registros de COM1 en todo PC/QEMU y

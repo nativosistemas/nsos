@@ -3,6 +3,10 @@
 //! Convención (x86_64): instrucción `syscall`; número en `rax`; argumentos en
 //! `rdi, rsi, rdx, r10, r8, r9`; resultado en `rax` (ver [`crate::error`]).
 //! El kernel preserva todos los registros salvo `rax`, `rcx` y `r11`.
+//!
+//! Convención (ARM64): instrucción `svc #0`; número en `x8`; argumentos en
+//! `x0..x5`; resultado en `x0`. El kernel preserva todos los registros salvo
+//! `x0`.
 
 /// Identificadores de syscall. Agrupados por decenas según el subsistema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
