@@ -6,6 +6,7 @@ import Nsos.System
 import Nsos.Security
 import Nsos.Examples
 import Nsos.Upgrade
+import Nsos.Store
 import Nsos.Ipc
 import Nsos.Migration
 import Nsos.Link

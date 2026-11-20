@@ -4,6 +4,7 @@ members = [
     "crates/abi",
     "crates/kcore",
     "crates/link",
+    "crates/store",
     "kernel",
     "cells/rt",
     "cells/ping",
@@ -24,10 +25,14 @@ members = [
     "cells/origen",
     "cells/destino",
     "cells/virtnet",
+    "cells/virtblk",
+    "cells/almacen",
+    "cells/escritor",
+    "cells/curioso",
 ]
 # El kernel solo compila para `x86_64-unknown-none`; `cargo test` en el host
 # se limita a las crates portables.
-default-members = ["crates/abi", "crates/kcore", "crates/link"]
+default-members = ["crates/abi", "crates/kcore", "crates/link", "crates/store"]
 
 [workspace.package]
 version = "0.1.0"

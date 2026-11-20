@@ -23,7 +23,7 @@ case "$ARCH" in
     x86_64)
         TARGET=x86_64-unknown-none
         ISO="${ISO:-$ROOT/build/nsos.iso}"
-        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet)
+        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet virtblk almacen escritor curioso)
         ;;
     aarch64)
         TARGET=aarch64-unknown-none-softfloat

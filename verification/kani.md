@@ -31,6 +31,9 @@ casos borde.
 | `hw_agrees_with_view` | `crates/kcore/src/paging_arm64.rs` | Con tablas cualesquiera escritas por el codec (una entrada arbitraria por nivel), un modelo de la MMU de ARM64 escrito desde el manual y la vista del kernel (`translate_with_flags`) coinciden: misma física, y EL0 lee, escribe y ejecuta exactamente cuando la vista lo permite. EL1 nunca ejecuta una página de cell (PXN, como SMEP), no escribe lo que la vista marca de solo lectura y con PAN no toca páginas de cells. |
 | `map_then_hw` | `crates/kcore/src/paging_arm64.rs` | De punta a punta: mapear una página de la mitad baja con `paging::map` sobre el codec deja en la MMU exactamente la física y los permisos pedidos. |
 
+| `decode_entry_any` | `crates/store/src/layout.rs` | Con cualquier entrada de 128 bytes leída del disco y cualquier tamaño de disco: sin panics ni overflows; si se acepta, el nombre es válido, los datos caen dentro del disco y fuera de las ranuras de superbloque, y codificarla da los mismos bytes. |
+| `find_run_is_free` | `crates/store/src/alloc.rs` | Con cualquier mapa de bloques: el rango que devuelve está entero dentro del límite y libre, y después de marcarlo queda usado. Es la condición `Fresh` del modelo de Lean (`Store.crash_safe`). |
+
 `check_invariants` (en `cspace.rs`) también corre en los tests unitarios.
 
 ### Mutaciones de ARM64

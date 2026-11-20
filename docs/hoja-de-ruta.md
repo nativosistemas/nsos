@@ -14,6 +14,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 8 | Tests de aislamiento y benchmark de IPC | ✅ `intruso` (27 abusos), fuzzer `caos`, `bench` con resumen en la CI |
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ✅ `docs/amenazas.md`, auditoría `tools/audit-unsafe.sh`, SMEP/SMAP |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B sin cortar al `cliente`, con rollback (ahora por un enlace autenticado sobre virtio-net) |
+| 11 | Almacenamiento propio: driver virtio-blk y almacén de objetos con copy-on-write y capacidades | ✅ `virtblk`, `almacen`, `crates/store`; ver [almacenamiento.md](almacenamiento.md) |
 
 ## Criterios de aceptación del MVP
 
@@ -232,6 +233,24 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
 * Prueba negativa en QEMU (`tools/migrate-test.sh --clave-distinta`): con
   otra clave, B descarta todo, no arranca ninguna versión y A hace rollback.
 * Ahora también corre con UEFI (OVMF ya no se mete en el enlace).
+
+## Hito 11: almacenamiento propio (hecho)
+
+* Cell `virtblk`: driver virtio-blk legacy en user-space con un protocolo
+  genérico de bloques (`INFO`, `READ`, `WRITE`, `FLUSH`) y un búfer
+  compartido para DMA. Sirve igual para el almacén y para una futura cell
+  lectora de FAT32.
+* `crates/store`: objetos con dueño, nombre y versión; escritura
+  copy-on-write con dos ranuras de superbloque y SHA-256 de todo el árbol;
+  versión esperada (compare-and-swap); nunca formatea un disco ajeno.
+* Cell `almacen`: monta el disco y da acceso por capacidades (una raíz por
+  dueño, un extremo de canal por objeto abierto, copias de solo lectura).
+* Verificación primero: `verification/lean/Nsos/Store.lean` (consistencia
+  ante caídas y aislamiento entre dueños), tests en el host con cada
+  combinación de escrituras rotas, Kani sobre el decodificador y el mapa de
+  bloques libres.
+* Prueba en QEMU (`make smoke-almacen`): caída simulada, `kill -9` a QEMU
+  en momentos al azar y un disco FAT que no se toca.
 
 ## ARM64 (en curso)
 

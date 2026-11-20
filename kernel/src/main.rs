@@ -168,6 +168,21 @@ extern "C" fn kmain() -> ! {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if let Some(mode) = cmdline
+        .split_whitespace()
+        .find_map(|a| a.strip_prefix("almacen="))
+    {
+        // Almacenamiento propio: driver virtio-blk, almacén y clientes
+        // (ver docs/almacenamiento.md y tools/store-test.sh).
+        let ok = ktest::run_store(mode);
+        arch::qemu_exit(if ok {
+            arch::QemuExit::Success
+        } else {
+            arch::QemuExit::Failure
+        });
+    }
+
     if has_flag("test-exit") {
         let ok = ktest::run() & ktest::run_cells();
         kprintln!(

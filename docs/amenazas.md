@@ -35,6 +35,9 @@ físico.
 | Un servicio se actualiza sin que el cliente note saltos | Protocolo de supervisor con rollback | Lean: `Upgrade.client_sees_consecutive`; test en QEMU con rechazo y aceptación |
 | Un servicio se muda a otra máquina sin que el cliente note saltos, y un rechazo remoto no daña el estado local | El enlace manda una *copia* del estado; la decisión vuelve por la red; rollback local | Lean: `Migration.client_sees_consecutive`, `one_server`, `rollback_resumes`; `tools/migrate-test.sh` con dos QEMU |
 | Nadie sin la clave inyecta, altera, repite, reordena ni refleja mensajes entre máquinas | HMAC-SHA256 por trama con clave de sesión (clave compartida + nonce de cada punta), dirección y secuencia exacta (`crates/link`) | Lean: `Link.delivered_prefix`, `no_forgery`, `no_replay`, `in_order` (4 mutaciones las rompen); vectores RFC 4231 y tests de ataques; Kani sobre el parser; `migrate-test.sh --clave-distinta`: un impostor no recibe nada y el servicio no sale de A |
+| Una caída (corte de luz, `kill -9` a QEMU) en cualquier momento de una escritura al almacén deja el objeto viejo o el nuevo, nunca una mezcla | Copy-on-write: datos y tabla nuevos en bloques libres, superbloque con secuencia + 1 en la otra ranura, SHA-256 de todo el árbol; al montar se borra una ranura de una escritura sin terminar (`crates/store`) | Lean: `Store.crash_safe`, `commit_good`, `mount_good`, `crash_then_mount` (4 contraejemplos con `decide` muestran por qué hace falta cada regla); tests en el host con todas las combinaciones de escrituras hechas, no hechas o rotas; `tools/store-test.sh`: caída simulada y `kill -9` en momentos al azar |
+| Un dueño no toca los objetos de otro; una copia de solo lectura no escribe | El dueño sale de la raíz por la que llega el pedido; cada objeto abierto es un extremo de canal propio (capacidad); `DUP_RO` siempre quita la escritura | Lean: `Store.rw_handle_from_owner`, `change_needs_owner`, `untouched_without_owner` (2 mutaciones las rompen); `curioso` en `tools/store-test.sh` |
+| El almacén no pisa un disco que no es suyo | Solo formatea si las dos ranuras están a cero o son superbloques suyos a medias | Test en el host con un sector de arranque FAT; `tools/store-test.sh`: el disco ajeno queda idéntico byte a byte |
 | No se filtran extremos de canal en ciclos | Recolector `ipc_gc` | Lean: `step_no_leak`; ktest de ciclos |
 | El `unsafe` del kernel está acotado y justificado | Lints `undocumented_unsafe_blocks`, `forbid(unsafe_code)` en `abi`/`kcore`, `deny` en cells, registro | `tools/audit-unsafe.sh` en la CI |
 
@@ -103,6 +106,18 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    y del GIC están en el código. No es un hueco de aislamiento, pero en
    otra placa el kernel tocaría direcciones equivocadas: hay que leerlas
    del device tree antes de arrancar en una Raspberry Pi.
+
+12. **Almacenamiento: el disco y el almacén son de confianza.** Los hashes
+   detectan daños y escrituras a medias, pero no a alguien que reescribe el
+   disco a propósito (puede armar un árbol válido con otros datos), y los
+   datos van en claro. La cell `almacen` ve todos los objetos de todos los
+   dueños, y el driver con DMA puede tocar cualquier memoria (punto 2). No
+   hay cuotas: un dueño puede llenar el disco o los 30 objetos (negación de
+   servicio para los demás). Una copia de solo lectura que se entregó no se
+   puede revocar (dura hasta que quien la tiene la cierra). Las raíces las
+   reparte el kernel al arrancar, por orden. *Mitigación futura*: MAC con
+   una clave del almacén (o cifrado autenticado por objeto), cuotas por
+   dueño, revocación de handles y un supervisor que cree las raíces.
 
 ## Supuestos de confianza
 

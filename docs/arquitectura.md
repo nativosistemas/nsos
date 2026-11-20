@@ -198,6 +198,12 @@ Sin IOMMU, un driver con DMA puede escribir cualquier memoria física: el
 driver sigue siendo de confianza respecto al DMA (documentado en el modelo
 de amenazas). Lo que sí garantiza el kernel es que solo toca *sus* puertos.
 
+El disco sigue el mismo esquema: `virtblk` (virtio-blk) habla un protocolo
+genérico de bloques con la cell `almacen`, que guarda objetos con dueño,
+nombre y versión con copy-on-write. El búfer de datos es un objeto `Memory`
+compartido: el driver tiene la capacidad con `CONTROL` y el almacén una sin
+él. Ver [almacenamiento.md](almacenamiento.md).
+
 ## Organización del repositorio
 
 ```
@@ -215,6 +221,10 @@ cells/caos/        fuzzer de syscalls (50 000 llamadas al azar)
 cells/bench/       benchmarks (bandera de arranque `bench`)
 cells/virtcon/     driver virtio-console en user-space
 cells/hola/        cliente del driver: escribe por la consola virtio
+cells/virtblk/     driver virtio-blk en user-space (protocolo de bloques)
+cells/almacen/     almacén de objetos (copy-on-write) sobre virtblk
+cells/escritor|curioso/  clientes del almacén (dueños 1 y 2)
+crates/store/      lógica del almacén: formato, copy-on-write, handles (testeable en host)
 kernel/            microkernel (x86_64-unknown-none)
   src/arch/        código dependiente de arquitectura
   src/boot/        protocolo Limine
