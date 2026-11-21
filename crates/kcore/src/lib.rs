@@ -19,6 +19,7 @@ pub mod ipc_gc;
 pub mod paging;
 pub mod paging_arm64;
 pub mod platform;
+pub mod wait;
 
 pub use cspace::CSpace;
 pub use frame_bitmap::FrameBitmap;

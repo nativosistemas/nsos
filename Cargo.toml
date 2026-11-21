@@ -20,6 +20,7 @@ members = [
     "cells/cliente",
     "cells/contador-roto",
     "cells/caos",
+    "cells/espera",
     "cells/bench",
     "cells/enlace",
     "cells/origen",

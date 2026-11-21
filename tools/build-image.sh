@@ -23,12 +23,12 @@ case "$ARCH" in
     x86_64)
         TARGET=x86_64-unknown-none
         ISO="${ISO:-$ROOT/build/nsos.iso}"
-        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet virtblk almacen escritor curioso)
+        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos espera bench enlace origen destino virtnet virtblk almacen escritor curioso)
         ;;
     aarch64)
         TARGET=aarch64-unknown-none-softfloat
         ISO="${ISO:-$ROOT/build/nsos-aarch64.img}"
-        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos bench enlace origen destino virtnet virtblk almacen escritor curioso)
+        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos espera bench enlace origen destino virtnet virtblk almacen escritor curioso)
         ;;
     *)
         echo "ARCH desconocida: $ARCH (x86_64 o aarch64)" >&2

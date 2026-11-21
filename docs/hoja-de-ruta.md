@@ -15,6 +15,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ✅ `docs/amenazas.md`, auditoría `tools/audit-unsafe.sh`, SMEP/SMAP |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B sin cortar al `cliente`, con rollback (ahora por un enlace autenticado sobre virtio-net) |
 | 11 | Almacenamiento propio: driver virtio-blk y almacén de objetos con copy-on-write y capacidades | ✅ `virtblk`, `almacen`, `crates/store`; ver [almacenamiento.md](almacenamiento.md) |
+| 12 | `wait` multi-handle e interrupciones para drivers | 🟡 `wait` hecho (modelo `Wait.lean`, `espera`); falta `Irq`/`irq_ack` |
 
 ## Criterios de aceptación del MVP
 
@@ -251,6 +252,37 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
   bloques libres.
 * Prueba en QEMU (`make smoke-almacen`): caída simulada, `kill -9` a QEMU
   en momentos al azar y un disco FAT que no se toca.
+
+## Hito 12: `wait` multi-handle (en curso)
+
+Primera parte (hecha): la syscall `wait`.
+
+* Modelo primero: `verification/lean/Nsos/Wait.lean`. Modela el recorrido
+  del kernel paso a paso (marcar bloqueado, registrar y mirar cada ítem bajo
+  su lock, ceder la CPU), intercalado con cualquier activación y apagado de
+  señales y con despertares arbitrarios (`cell_kill`, plazos). Demuestra
+  `no_lost_wakeup`: un hilo dormido con un ítem listo ya está despierto.
+  Cuatro mutaciones rompen la demostración: marcar bloqueado al final del
+  recorrido en vez de al principio, que activar una señal despierte solo al
+  primero de la lista, que el recorrido no se despierte a sí mismo si un
+  ítem ya está listo y que registre solo la primera señal pedida.
+* `nsos_kcore::wait` (sin `unsafe`): qué señales emite cada tipo, validación
+  de ítems, señales de un canal y de una cell, y el plazo. Kani:
+  `check_item_any`, `channel_signals_any`, `deadline_any`.
+* Kernel: `Endpoint::watch` y `Cell::watch_exit` (paso `scan` del modelo),
+  plazos en el scheduler (`sched::wake_at`), y `unrecv` ahora despierta a
+  quienes esperan `READABLE` (el modelo exige que toda activación despierte).
+* Cells: `espera` prueba la semántica (plazo 0, plazo que vence a tiempo,
+  `READABLE`, `WRITABLE` con la cola del peer llena y vaciándose,
+  `PEER_CLOSED`, varios ítems); `contador-v1` duerme en `wait` sobre sus dos
+  canales en lugar de sondearlos; `init` espera `CELL_EXITED` con `wait` y
+  mata a una `dormilona` dormida en `wait`; `intruso` suma 11 abusos (38 en
+  total); `caos` ahora llama a `wait` con plazo 0.
+
+Segunda parte (pendiente): capacidad `Irq` e `irq_ack` (IOAPIC en x86_64,
+GIC en ARM64), para que `virtcon`, `virtblk` y `virtnet` duerman en
+`IRQ_PENDING` en lugar de sondear el anillo virtio. Después: `channel_call`
+y `mem_unmap`.
 
 ## ARM64 (en curso)
 

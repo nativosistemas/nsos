@@ -20,17 +20,19 @@
 //! después de atender `MIN_BEFORE_UPGRADE` pedidos desde que arrancó o
 //! retomó.
 //!
-//! Sin `wait` multi-handle todavía: sondea ambos canales cediendo la CPU.
+//! Cuando no hay nada que hacer duerme en `wait` sobre los dos canales (el
+//! de control solo cuando ya lo puede mirar), en lugar de sondearlos.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
+use nsos_rt::abi::cap::signals::{PEER_CLOSED, READABLE};
 use nsos_rt::abi::msg::labels::{UPGRADE_COMMIT, UPGRADE_PREPARE, UPGRADE_ROLLBACK, UPGRADE_STATE};
-use nsos_rt::abi::syscall::flags::NONBLOCK;
+use nsos_rt::abi::syscall::{flags::NONBLOCK, WAIT_FOREVER};
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    bootstrap, channel_recv, channel_send, mem_create, mem_map, println, yield_now, Mapped,
+    bootstrap, channel_recv, channel_send, mem_create, mem_map, println, wait, wait_item, Mapped,
 };
 
 const INC: u64 = 1;
@@ -129,7 +131,22 @@ fn main() -> i32 {
                 }
             }
             Ok(()) => println!("contador-v1: pedido desconocido {}", m.header.label),
-            Err(Error::WouldBlock) => yield_now(),
+            Err(Error::WouldBlock) => {
+                // Dormir hasta que haya un pedido o, si ya se puede, algo
+                // del supervisor.
+                let mut items = [
+                    wait_item(client, READABLE | PEER_CLOSED),
+                    wait_item(ctrl, READABLE | PEER_CLOSED),
+                ];
+                let n = if since_start >= MIN_BEFORE_UPGRADE {
+                    2
+                } else {
+                    1
+                };
+                if wait(&mut items[..n], WAIT_FOREVER).is_err() {
+                    return 7;
+                }
+            }
             Err(Error::PeerClosed) => return 0,
             Err(_) => return 4,
         }

@@ -91,6 +91,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-espera"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-fragil"
 version = "0.1.0"
 dependencies = [

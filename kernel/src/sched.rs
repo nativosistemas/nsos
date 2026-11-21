@@ -60,6 +60,10 @@ struct Scheduler {
     zombie: Option<Thread>,
     next_id: ThreadId,
     switches: u64,
+    /// Plazos de `wait`: `(instante en ns, hilo)`. Se despierta al hilo al
+    /// vencer (ver [`wake_at`]). Puede quedar alguno de un hilo que ya volvió:
+    /// un despertar de más es inofensivo porque toda espera vuelve a mirar.
+    timers: Vec<(u64, ThreadId)>,
 }
 
 impl Scheduler {
@@ -89,6 +93,7 @@ pub fn init() {
         zombie: None,
         next_id: 1,
         switches: 0,
+        timers: Vec::new(),
     });
 }
 
@@ -174,14 +179,35 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
 
     let cur_id = s.current;
     let idle = s.idle;
-    let cur_state = {
+    {
         let cur = s.find(cur_id).expect("hilo actual inexistente");
         cur.frame = frame;
         if cur.state == State::Running {
             cur.state = State::Ready;
         }
-        cur.state
-    };
+    }
+    // Plazos vencidos: esos hilos vuelven a la cola.
+    if !s.timers.is_empty() {
+        let now = crate::arch::time::now_ns();
+        let mut i = 0;
+        while i < s.timers.len() {
+            if s.timers[i].0 <= now {
+                let (_, id) = s.timers.swap_remove(i);
+                if let Some(t) = s.threads.iter_mut().find(|t| t.id == id) {
+                    if t.state == State::Blocked {
+                        t.state = State::Ready;
+                        // El actual vuelve a la cola más abajo.
+                        if id != cur_id {
+                            s.ready.push_back(id);
+                        }
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+    let cur_state = s.find(cur_id).expect("hilo actual inexistente").state;
     // Bloqueado o muerto: no vuelve a la cola.
     if cur_state == State::Ready && cur_id != idle {
         s.ready.push_back(cur_id);
@@ -236,6 +262,24 @@ pub fn wake(id: ThreadId) {
             }
         }
     }
+}
+
+/// Despierta al hilo actual cuando el reloj llegue a `deadline_ns` (si
+/// para entonces sigue bloqueado). Reemplaza un plazo anterior del mismo hilo.
+pub fn wake_at(deadline_ns: u64) {
+    let mut g = SCHED.lock();
+    let s = g.as_mut().expect("scheduler sin inicializar");
+    let cur = s.current;
+    s.timers.retain(|&(_, t)| t != cur);
+    s.timers.push((deadline_ns, cur));
+}
+
+/// Quita el plazo del hilo actual, si tenía.
+pub fn cancel_wake_at() {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    let cur = s.current;
+    s.timers.retain(|&(_, t)| t != cur);
 }
 
 /// Cell del hilo actual.

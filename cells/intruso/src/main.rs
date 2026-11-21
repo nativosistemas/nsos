@@ -2,8 +2,8 @@
 //!
 //! Arranca sin ninguna capacidad e intenta abusar del kernel: handles que no
 //! tiene, punteros al kernel o a su propio código, tipos de objeto
-//! equivocados, derechos que no tiene, y cada syscall de memoria, puertos y
-//! cells con argumentos inválidos. Cada intento debe fallar con el error
+//! equivocados, derechos que no tiene, y cada syscall de memoria, puertos,
+//! cells y espera con argumentos inválidos. Cada intento debe fallar con el error
 //! esperado. Para probar derechos se fabrica sus propios objetos (canales y
 //! memoria) y los atenúa. Al final lee memoria del kernel, lo que debe
 //! producir un fallo de página: el kernel termina esta cell y sigue
@@ -161,6 +161,8 @@ fn abuse_objects() -> bool {
         s4(CellStatus, m, KERNEL_ADDR, NONBLOCK, 0),
         Error::InvalidArgs,
     );
+    // Espera.
+    ok &= abuse_wait(m, a, b);
     // Mover una capacidad sin GRANT.
     match cap_dup(b, Rights::SEND | Rights::RECV) {
         Ok(no_grant) => {
@@ -177,6 +179,88 @@ fn abuse_objects() -> bool {
             ok = false;
         }
     }
+    ok
+}
+
+/// Abusos de `wait`: con `m` (memoria) y `a`/`b` (extremos propios, vacíos).
+fn abuse_wait(m: u64, a: CapHandle, b: CapHandle) -> bool {
+    use nsos_rt::abi::cap::signals::{CELL_EXITED, READABLE};
+    use nsos_rt::abi::syscall::WaitItem;
+    use Syscall::Wait;
+    let item = |h: u64, wanted: u32, reserved: u32| WaitItem {
+        handle: h as u32,
+        wanted,
+        observed: 0,
+        reserved,
+    };
+    let mut items = [item(a.0 as u64, READABLE, 0); 17];
+    // El kernel lee los ítems desde este arreglo (y escribe `observed`).
+    let w = |items: &mut [WaitItem; 17], n: u64| s4(Wait, items.as_mut_ptr() as u64, n, 0, 0);
+    let mut ok = true;
+    ok &= expect("wait con 0 ítems", w(&mut items, 0), Error::InvalidArgs);
+    ok &= expect("wait con 17 ítems", w(&mut items, 17), Error::InvalidArgs);
+    ok &= expect(
+        "wait con los ítems en el kernel",
+        s4(Wait, KERNEL_ADDR, 1, 0, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "wait con los ítems en mi código",
+        s4(Wait, MY_CODE, 1, 0, 0),
+        Error::InvalidArgs,
+    );
+    items[0] = item(0x7_0000, READABLE, 0);
+    ok &= expect(
+        "wait sobre un handle que no tengo",
+        w(&mut items, 1),
+        Error::BadHandle,
+    );
+    items[0] = item(m, READABLE, 0);
+    ok &= expect(
+        "wait sobre una memoria (sin WAIT)",
+        w(&mut items, 1),
+        Error::AccessDenied,
+    );
+    match cap_dup(b, Rights::SEND | Rights::RECV) {
+        Ok(no_wait) => {
+            items[0] = item(no_wait.0 as u64, READABLE, 0);
+            ok &= expect(
+                "wait sobre un canal sin derecho WAIT",
+                w(&mut items, 1),
+                Error::AccessDenied,
+            );
+        }
+        Err(e) => {
+            println!("intruso: ¡INESPERADO! cap_dup falló: {:?}", e);
+            ok = false;
+        }
+    }
+    items[0] = item(a.0 as u64, CELL_EXITED, 0);
+    ok &= expect(
+        "wait de CELL_EXITED sobre un canal",
+        w(&mut items, 1),
+        Error::InvalidArgs,
+    );
+    items[0] = item(a.0 as u64, 0, 0);
+    ok &= expect(
+        "wait sin señales pedidas",
+        w(&mut items, 1),
+        Error::InvalidArgs,
+    );
+    items[0] = item(a.0 as u64, READABLE, 1);
+    ok &= expect(
+        "wait con reserved distinto de 0",
+        w(&mut items, 1),
+        Error::InvalidArgs,
+    );
+    // Un ítem malo invalida la llamada entera, aunque otro esté bien.
+    items[0] = item(a.0 as u64, READABLE, 0);
+    items[1] = item(m, READABLE, 0);
+    ok &= expect(
+        "wait con un ítem bueno y uno malo",
+        w(&mut items, 2),
+        Error::AccessDenied,
+    );
     ok
 }
 

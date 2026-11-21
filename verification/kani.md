@@ -39,6 +39,9 @@ casos borde.
 | `io_ranges_disjoint` | `crates/kcore/src/platform.rs` | Un paso del asignador de E/S desde cualquier estado alcanzable y con cualquier tamaño: el rango empieza en o después del primer puerto libre, el nuevo primer libre es su fin, está alineado y cabe en la ventana y en 16 bits. Por inducción, todos los rangos que entrega son disjuntos. |
 | `io_two_ranges_disjoint` | `crates/kcore/src/platform.rs` | Dos rangos seguidos con tamaños cualesquiera no se solapan (el caso concreto de la inducción). |
 | `pio_access_in_range` | `crates/kcore/src/platform.rs` | Un acceso de una cell a sus puertos que acepta `pio_offset` cae entero en su rango y en la ventana de E/S. |
+| `check_item_any` | `crates/kcore/src/wait.rs` | Un ítem de `wait` aceptado pide al menos una señal, todas emitibles por el tipo de su objeto, con `reserved` en 0; memoria, puertos e imágenes nunca se aceptan. |
+| `channel_signals_any` | `crates/kcore/src/wait.rs` | Con cualquier estado de canal, las señales son las del tipo y dicen exactamente lo que harían `recv` y `send`: `READABLE` sii hay mensaje, `PEER_CLOSED` sii el peer cerró, `WRITABLE` sii está abierto y su cola tiene lugar. |
+| `deadline_any` | `crates/kcore/src/wait.rs` | El plazo de `wait` nunca desborda: con `At(d)`, `d = now + timeout` exacto y no vence antes; si no entra en 64 bits es "sin plazo". |
 | `ecam_addr_in_region` | `crates/kcore/src/platform.rs` | La página de configuración de cualquier función PCI cae entera dentro de la región ECAM. |
 
 | `decode_entry_any` | `crates/store/src/layout.rs` | Con cualquier entrada de 128 bytes leída del disco y cualquier tamaño de disco: sin panics ni overflows; si se acepta, el nombre es válido, los datos caen dentro del disco y fuera de las ranuras de superbloque, y codificarla da los mismos bytes. |
@@ -53,6 +56,11 @@ cada una de estas mutaciones del codec las hace fallar: quitar PXN de las
 páginas de cells (`hw_agrees_with_view` y `map_then_hw`), no poner
 `APTable[0]` en las tablas del kernel, no poner `APTable[1]` en las de
 solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
+
+### Mutación de `wait`
+
+Activar `WRITABLE` aunque el peer esté cerrado (cambiar el `else if` de
+`channel_signals` por un `if`) hace fallar `channel_signals_any`.
 
 ### Mutaciones del device tree y de la plataforma
 

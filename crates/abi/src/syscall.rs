@@ -42,8 +42,10 @@ pub enum Syscall {
     ChannelCall = 23,
 
     // ---- Espera (3x) ----
-    /// `wait(items: *mut WaitItem, n, timeout_ns) -> n_ready`. Base del
-    /// executor async de las cells.
+    /// `wait(items: *mut WaitItem, n, timeout_ns) -> n_ready`: espera a que
+    /// algún ítem tenga activa una señal pedida y escribe en `observed` las
+    /// señales activas de cada uno. `timeout_ns` es relativo: `0` solo mira,
+    /// [`WAIT_FOREVER`] no vence. Base del executor async de las cells.
     Wait = 30,
 
     // ---- Memoria (4x) ----
@@ -195,6 +197,37 @@ pub struct WaitItem {
     pub reserved: u32,
 }
 
+/// `timeout_ns` de `wait` que significa "sin plazo". Con `0`, `wait` solo
+/// mira y vuelve (`TimedOut` si no hay nada listo).
+pub const WAIT_FOREVER: u64 = u64::MAX;
+
+impl WaitItem {
+    /// Tamaño serializado.
+    pub const SIZE: usize = 16;
+
+    /// Serializa en little-endian.
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut b = [0u8; Self::SIZE];
+        b[0..4].copy_from_slice(&self.handle.to_le_bytes());
+        b[4..8].copy_from_slice(&self.wanted.to_le_bytes());
+        b[8..12].copy_from_slice(&self.observed.to_le_bytes());
+        b[12..16].copy_from_slice(&self.reserved.to_le_bytes());
+        b
+    }
+
+    /// Deserializa (sin validar: eso depende del objeto, ver
+    /// `nsos_kcore::wait::check_item`).
+    pub fn from_bytes(b: &[u8; Self::SIZE]) -> WaitItem {
+        let at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        WaitItem {
+            handle: at(0),
+            wanted: at(4),
+            observed: at(8),
+            reserved: at(12),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +283,13 @@ mod tests {
 
     #[test]
     fn wait_item_layout() {
-        assert_eq!(core::mem::size_of::<WaitItem>(), 16);
+        assert_eq!(core::mem::size_of::<WaitItem>(), WaitItem::SIZE);
+        let it = WaitItem {
+            handle: 0x0102_0304,
+            wanted: 5,
+            observed: 6,
+            reserved: 7,
+        };
+        assert_eq!(WaitItem::from_bytes(&it.to_bytes()), it);
     }
 }

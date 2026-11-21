@@ -100,7 +100,8 @@ Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
 implementación (hito 7): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
 `channel_recv`, `mem_create`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
-`cell_spawn`, `cell_kill` y `cell_status`. El resto devuelve `Unsupported`. Resumen:
+`cell_spawn`, `cell_kill`, `cell_status` y (hito 12) `wait`. El resto devuelve
+`Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|
@@ -188,10 +189,36 @@ logra con `cap_dup` sin `WRITE`.
 
 ## 6. Espera y async
 
-`wait(items, n, timeout)` recibe un arreglo de `WaitItem { handle, wanted }`
-y vuelve cuando alguna señal pedida está activa, rellenando `observed`.
+`wait(items, n, timeout_ns) -> n_listos` recibe un arreglo de `n` (1 a 16)
+`WaitItem { handle, wanted, observed, reserved }` (16 bytes cada uno) y vuelve
+cuando algún ítem tiene activa una señal pedida. Devuelve cuántos ítems están
+listos y escribe en `observed` de **cada** ítem todas las señales activas de su
+objeto (pedidas o no).
 
-Señales: `READABLE`, `WRITABLE`, `PEER_CLOSED`, `CELL_EXITED`, `IRQ_PENDING`.
+| Tipo | Señales | Cuándo está activa |
+|---|---|---|
+| `Channel` | `READABLE` | hay un mensaje en la cola de este extremo |
+| | `WRITABLE` | el peer está abierto y su cola tiene lugar (`send` no bloquearía) |
+| | `PEER_CLOSED` | el otro extremo se cerró |
+| `Cell` | `CELL_EXITED` | la cell terminó (`cell_status` ya no bloquearía) |
+| `Irq` | `IRQ_PENDING` | hay una interrupción sin atender (todavía no implementado) |
+
+* Cada handle necesita `WAIT`; `wanted` no puede ser 0 ni pedir señales que
+  su tipo no emite (`Memory`, `IoPorts` e `Image` no emiten ninguna);
+  `reserved` va en 0. Un ítem malo invalida la llamada entera, antes de
+  esperar (`BadHandle`, `AccessDenied` o `InvalidArgs`).
+* `timeout_ns` es relativo: `0` solo mira (`TimedOut` si nada está listo) y
+  `WAIT_FOREVER` (`u64::MAX`) no vence. Si vence: `TimedOut`, con `observed`
+  igual escrito. La granularidad es la del timer (10 ms).
+* Si se pide matar a la cell (`cell_kill`), la espera se abandona.
+* **Sin despertares perdidos.** El kernel marca al hilo bloqueado, después
+  recorre los ítems registrándolo y mirando cada uno bajo el lock de su
+  objeto (si alguno ya está listo se despierta a sí mismo) y recién entonces
+  cede la CPU; quien activa una señal despierta a todos los registrados.
+  Demostrado en [`Nsos/Wait.lean`](../verification/lean/Nsos/Wait.lean)
+  (`no_lost_wakeup`): un hilo dormido con un ítem listo ya está despierto.
+  Pueden quedar registros viejos (un despertar de más), inofensivos porque
+  toda espera del kernel vuelve a mirar.
 
 El runtime de la cell construye encima un executor: cada `Future` que espera
 un canal registra su handle; el executor llama a `wait` con todos y despierta
