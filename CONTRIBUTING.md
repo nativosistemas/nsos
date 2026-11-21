@@ -52,11 +52,11 @@ La sección "Verificación formal" responde:
 
 * Un PR por hito o por cambio coherente, con tests y documentación.
 * `make lint` (formato, clippy, auditoría de `unsafe`), `make test`,
-  `make smoke`, `make smoke-arm` y `make verify` tienen que pasar. Los que tocan `kcore` o
-  `abi` corren también `make kani`.
+  `make smoke`, `make smoke-arm` y `make verify` tienen que pasar. Los que tocan `kcore`,
+  `abi`, `link` o `store` corren también `make kani`.
 * `unsafe` solo en el kernel y en `cells/rt`, siempre con un comentario
-  `SAFETY:` y registrado en `docs/unsafe.md`. `abi` y `kcore` tienen
-  `forbid(unsafe_code)`; las cells, `deny(unsafe_code)`.
+  `SAFETY:` y registrado en `docs/unsafe.md`. `abi`, `kcore`, `link` y
+  `store` tienen `forbid(unsafe_code)`; las cells, `deny(unsafe_code)`.
 * Documentación y mensajes en español; identificadores en inglés.
 * Después de mergear, `main` tiene que compilar: si dos PRs se cruzan, se
   arregla enseguida.
