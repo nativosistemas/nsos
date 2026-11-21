@@ -253,6 +253,27 @@ fn abuse_wait(m: u64, a: CapHandle, b: CapHandle) -> bool {
         w(&mut items, 1),
         Error::InvalidArgs,
     );
+    items[0] = item(a.0 as u64, nsos_rt::abi::cap::signals::IRQ_PENDING, 0);
+    ok &= expect(
+        "wait de IRQ_PENDING sobre un canal",
+        w(&mut items, 1),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "irq_ack sin capacidad",
+        s4(Syscall::IrqAck, 0x7_0000, 0, 0, 0),
+        Error::BadHandle,
+    );
+    ok &= expect(
+        "irq_ack de un canal (sin CONTROL)",
+        s4(Syscall::IrqAck, a.0 as u64, 0, 0, 0),
+        Error::AccessDenied,
+    );
+    ok &= expect(
+        "irq_ack de una memoria",
+        s4(Syscall::IrqAck, m, 0, 0, 0),
+        Error::AccessDenied,
+    );
     // Un ítem malo invalida la llamada entera, aunque otro esté bien.
     items[0] = item(a.0 as u64, READABLE, 0);
     items[1] = item(m, READABLE, 0);

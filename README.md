@@ -14,7 +14,7 @@ páginas propias (W^X), heap, APIC timer y scheduler apropiativo. Corre
 capacidades, que se comunican por canales IPC y se pasan capacidades. Una
 cell que viola el aislamiento es terminada sin afectar al kernel. Una cell
 puede dormir sobre varios canales y cells a la vez con `wait`. Hay
-drivers como cells (virtio), actualización en vivo con rollback y migración
+drivers como cells (virtio) que duermen hasta su interrupción, actualización en vivo con rollback y migración
 de un servicio entre dos QEMU, y un **almacenamiento propio** (objetos con
 versión, copy-on-write, acceso por capacidades; ver
 [docs/almacenamiento.md](docs/almacenamiento.md)). También corre en **ARM64** (QEMU `virt`, con device tree y PCI:

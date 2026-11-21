@@ -99,6 +99,9 @@ if [[ $NEGATIVE -eq 0 ]]; then
     check origen "origen: contador-roto rechazó; rollback"
     check destino "migración: OK"
     check destino "contador-v2: estado restaurado"
+    # El driver de red durmió en IRQ_PENDING (hito 12) en las dos máquinas.
+    check origen "virtnet: termino ([1-9][0-9]* interrupciones)"
+    check destino "virtnet: termino ([1-9][0-9]* interrupciones)"
 else
     [[ $status_a -eq 35 ]] || { echo "FALLO [$NAME]: la máquina A salió con $status_a (se esperaba 35)" >&2; fail=1; }
     [[ $status_b -eq 35 ]] || { echo "FALLO [$NAME]: la máquina B salió con $status_b (se esperaba 35)" >&2; fail=1; }

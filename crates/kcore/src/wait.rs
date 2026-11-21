@@ -77,6 +77,15 @@ pub fn cell_signals(exited: bool) -> u32 {
     }
 }
 
+/// Señales activas de una línea de interrupción.
+pub fn irq_signals(pending: bool) -> u32 {
+    if pending {
+        signals::IRQ_PENDING
+    } else {
+        0
+    }
+}
+
 /// Plazo de una espera.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Deadline {

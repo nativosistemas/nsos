@@ -265,6 +265,53 @@ impl Device {
         backend::io_bar(self, i)
     }
 
+    /// Línea de interrupción INTx del dispositivo, si tiene: en x86_64, el
+    /// pin del IOAPIC que anotó el firmware en `Interrupt Line`.
+    #[cfg(target_arch = "x86_64")]
+    pub fn irq_line(&self) -> Option<u32> {
+        let v = config_read(self.bus, self.dev, self.func, 0x3C);
+        let (line, pin) = (v & 0xFF, (v >> 8) & 0xFF);
+        (pin != 0 && line != 0 && line != 0xFF).then_some(line)
+    }
+
+    /// Línea de interrupción INTx del dispositivo, si tiene: en ARM64, el
+    /// INTID del GIC según el `interrupt-map` del device tree. Solo para el
+    /// bus raíz (detrás de un puente habría que aplicar el swizzle).
+    #[cfg(target_arch = "aarch64")]
+    pub fn irq_line(&self) -> Option<u32> {
+        let pin = (config_read(self.bus, self.dev, self.func, 0x3C) >> 8) & 0xFF;
+        let p = crate::arch::platform::get();
+        if self.bus != p.pci?.bus_start {
+            return None;
+        }
+        p.intx?.lookup(self.bus, self.dev, self.func, pin as u8)
+    }
+
+    /// Capacidad a la línea de interrupción para su driver, si el
+    /// dispositivo tiene una y nadie más la reclamó.
+    pub fn irq_cap(&self) -> Option<crate::cell::KCap> {
+        let line = self.irq_line()?;
+        match crate::irq::claim(line) {
+            Some(obj) => {
+                crate::kprintln!(
+                    "pci: {:02x}:{:02x}.{} interrumpe por la línea {}",
+                    self.bus,
+                    self.dev,
+                    self.func,
+                    line
+                );
+                Some(crate::cell::KCap {
+                    object: crate::cell::KObject::Irq(obj),
+                    rights: crate::cell::IRQ_RIGHTS,
+                })
+            }
+            None => {
+                crate::kprintln!("pci: {:02x}:{:02x}.{}: la línea {} no se puede entregar (compartida o inválida); su driver sondea", self.bus, self.dev, self.func, line);
+                None
+            }
+        }
+    }
+
     /// Habilita decodificación de E/S y bus master (DMA).
     pub fn enable_io_and_dma(&self) {
         let cmd = config_read(self.bus, self.dev, self.func, 0x04);

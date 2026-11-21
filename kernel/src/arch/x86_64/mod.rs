@@ -4,6 +4,7 @@ pub mod apic;
 pub mod cpu;
 pub mod gdt;
 pub mod idt;
+pub mod ioapic;
 pub mod paging;
 pub mod port;
 pub mod serial;
@@ -19,9 +20,16 @@ pub use syscall::set_kernel_stack;
 /// Código de excepción de un fallo de página (`ExitStatus::Faulted`).
 pub const FAULT_PAGE: u64 = 14;
 
-/// Dispositivos que hay que mapear después de `mm::init` (ninguno: COM1 es
-/// un puerto de E/S y el APIC lo mapea `time::init`).
-pub fn init_devices() {}
+/// Dispositivos que hay que mapear después de `mm::init`: el IOAPIC (COM1
+/// es un puerto de E/S y el APIC local lo mapea `time::init`).
+pub fn init_devices() {
+    ioapic::init();
+}
+
+/// Líneas de interrupción para drivers: pines del IOAPIC.
+pub mod irq {
+    pub use super::ioapic::{mask, route, unmask, valid};
+}
 
 /// Semilla para el nonce del enlace: en x86_64 la cell usa `rdrand`, así
 /// que no hace falta.

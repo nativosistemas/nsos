@@ -46,6 +46,8 @@ pub enum KObject {
     Cell(Arc<Cell>),
     /// Imagen ELF desde la que se pueden crear cells.
     Image(Arc<Image>),
+    /// Línea de interrupción de un dispositivo (para su driver).
+    Irq(Arc<crate::irq::IrqLine>),
 }
 
 impl KObject {
@@ -57,6 +59,7 @@ impl KObject {
             KObject::IoPorts(_) => ObjectType::IoPorts,
             KObject::Cell(_) => ObjectType::Cell,
             KObject::Image(_) => ObjectType::Image,
+            KObject::Irq(_) => ObjectType::Irq,
         }
     }
     /// Identificador para depuración.
@@ -67,6 +70,7 @@ impl KObject {
             KObject::IoPorts(p) => Arc::as_ptr(p) as u64,
             KObject::Cell(c) => Arc::as_ptr(c) as u64,
             KObject::Image(i) => Arc::as_ptr(i) as u64,
+            KObject::Irq(i) => Arc::as_ptr(i) as u64,
         }
     }
 }
@@ -144,6 +148,9 @@ pub const MEM_RIGHTS: Rights =
 /// Derechos de una capacidad de memoria DMA para un driver.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const DMA_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::CONTROL.0);
+/// Derechos de una línea de interrupción para un driver: `irq_ack` y
+/// `wait`. Sin `GRANT` ni `DUPLICATE`: no se puede pasar a otra cell.
+pub const IRQ_RIGHTS: Rights = Rights(Rights::CONTROL.0 | Rights::WAIT.0);
 /// Derechos de un rango de puertos para un driver.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const PORT_RIGHTS: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);

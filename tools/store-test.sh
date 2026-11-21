@@ -77,6 +77,8 @@ need "$LOG" "escritor: escribí la versión 3"
 need "$LOG" "curioso: mi \"contador\" es mío"
 need "$LOG" "curioso: escribir con la copia de solo lectura: rechazado ... ok"
 need "$LOG" "escritor: el curioso leyó mi objeto pero no pudo cambiarlo"
+# El driver de disco durmió en IRQ_PENDING (hito 12).
+need "$LOG" "virtblk: termino ([1-9][0-9]* interrupciones)"
 echo "almacen: disco nuevo, 3 versiones escritas; el curioso no pudo tocarlas"
 
 # 2. Caída simulada antes del superbloque.

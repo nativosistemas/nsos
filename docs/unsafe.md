@@ -25,6 +25,7 @@ Política:
 | `kernel/src/arch/x86_64/idt.rs` | stubs en ensamblador, `lidt`, puntero al `TrapFrame`, `clac` al entrar | layout del frame fijo y verificado en compilación; el frame devuelto siempre fue guardado por un stub o fabricado por el scheduler; `clac` solo si SMAP está activo |
 | `kernel/src/arch/x86_64/paging.rs` | acceso a tablas vía HHDM; activar NX/WP, SMEP/SMAP y cambiar CR3 | toda tabla proviene del allocador de marcos o de una entrada presente; el espacio nuevo mapea kernel, HHDM y la pila de arranque; SMEP/SMAP solo si CPUID los reporta |
 | `kernel/src/arch/x86_64/apic.rs` | MMIO del APIC, puertos del PIC y del PIT | página MMIO mapeada sin caché; puertos exclusivos del módulo |
+| `kernel/src/arch/x86_64/ioapic.rs` | MMIO del IOAPIC (selección de registro + ventana) | página MMIO en `0xFEC00000` mapeada sin caché por `mm::map_mmio`; selección y acceso siempre bajo el mismo lock |
 | `kernel/src/mm/mod.rs` | direcciones de los símbolos del linker y activar el espacio del kernel (`arch::paging::install`) | el espacio nuevo mapea kernel, HHDM y la pila de arranque; el kernel nunca toca páginas de usuario (copia por el HHDM) |
 | `kernel/src/mm/pmm.rs` | bitmap y puesta a cero vía HHDM | memoria `Usable` reservada en el propio bitmap; marcos recién reservados |
 | `kernel/src/mm/heap.rs` | `GlobalAlloc`, región del heap | delega en `linked_list_allocator` con interrupciones deshabilitadas |

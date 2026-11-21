@@ -193,6 +193,8 @@ pub struct Platform {
     pub gicc: Option<Region>,
     /// Controlador PCI.
     pub pci: Option<PciHost>,
+    /// Líneas INTx de PCI hacia el GIC (`interrupt-map` del controlador).
+    pub intx: Option<crate::irq::IntxMap>,
     /// Semilla aleatoria del firmware (`/chosen/rng-seed`), hasta 64 bytes.
     pub rng_seed: [u8; 64],
     /// Cuántos bytes de `rng_seed` vinieron del firmware.
@@ -212,6 +214,7 @@ impl Platform {
             gicd: None,
             gicc: None,
             pci: None,
+            intx: None,
             rng_seed: [0; 64],
             rng_seed_len: 0,
         };
@@ -230,13 +233,17 @@ impl Platform {
             .or_else(|| fdt.find_compatible("arm,pl011"))
             .and_then(|n| n.reg(0))
             .map(region);
-        if let Some(gic) = GIC_COMPATIBLE.iter().find_map(|c| fdt.find_compatible(c)) {
+        let gic = GIC_COMPATIBLE.iter().find_map(|c| fdt.find_compatible(c));
+        if let Some(gic) = &gic {
             p.gicd = gic.reg(0).map(region);
             p.gicc = gic.reg(1).map(region);
         }
-        p.pci = fdt
-            .find_compatible("pci-host-ecam-generic")
-            .and_then(|n| pci_host(&n));
+        let pci = fdt.find_compatible("pci-host-ecam-generic");
+        p.pci = pci.as_ref().and_then(pci_host);
+        p.intx = match (&pci, &gic) {
+            (Some(pci), Some(gic)) => intx_map(pci, gic),
+            _ => None,
+        };
         if let Some(seed) = chosen.and_then(|c| c.prop(b"rng-seed")) {
             let n = seed.len().min(p.rng_seed.len());
             p.rng_seed[..n].copy_from_slice(&seed[..n]);
@@ -244,6 +251,27 @@ impl Platform {
         }
         p
     }
+}
+
+/// Una propiedad de una celda.
+fn prop_u32(n: &crate::fdt::Node<'_>, name: &[u8]) -> Option<u32> {
+    read_cells(n.prop(name)?, 1).map(|v| v as u32)
+}
+
+/// `interrupt-map` del controlador PCI, si apunta al GIC.
+fn intx_map(pci: &crate::fdt::Node<'_>, gic: &crate::fdt::Node<'_>) -> Option<crate::irq::IntxMap> {
+    let layout = crate::irq::IntxLayout {
+        child_addr: pci.own_cells().0,
+        child_int: prop_u32(pci, b"#interrupt-cells")?,
+        parent_addr: prop_u32(gic, b"#address-cells").unwrap_or(0),
+        parent_int: prop_u32(gic, b"#interrupt-cells")?,
+    };
+    crate::irq::parse_intx_map(
+        pci.prop(b"interrupt-map")?,
+        pci.prop(b"interrupt-map-mask")?,
+        layout,
+        prop_u32(gic, b"phandle")?,
+    )
 }
 
 /// Espacio de un rango PCI (bits 24..=25 de la primera celda).
@@ -319,6 +347,11 @@ mod tests {
         );
         assert_eq!(pci.config_addr(0, 1, 0), Some(0x40_1000_8000));
         assert_eq!(pci.config_addr(0, 32, 0), None);
+        // INTx: el swizzle de QEMU (SPI 3 + (ranura + pin - 1) % 4).
+        let intx = p.intx.unwrap();
+        assert_eq!(intx.len, 16);
+        assert_eq!(intx.lookup(0, 1, 0, 1), Some(32 + 4));
+        assert_eq!(intx.lookup(0, 3, 0, 2), Some(35)); // 32 + 3 + (3 + 2 - 1) % 4
         assert_eq!(p.rng_seed_len, 32);
         // Ninguna región se solapa con la RAM de QEMU (256 MiB en 1 GiB).
         let ram = [Region {

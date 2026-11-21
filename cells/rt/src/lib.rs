@@ -108,6 +108,81 @@ pub fn wait_item(h: CapHandle, wanted: u32) -> abi::syscall::WaitItem {
     }
 }
 
+/// `irq_ack`: el driver ya atendió el dispositivo; borra `IRQ_PENDING` y
+/// desenmascara la línea (requiere `CONTROL`).
+pub fn irq_ack(h: CapHandle) -> SysResult<()> {
+    decode_ret(syscall4(Syscall::IrqAck, h.0 as u64, 0, 0, 0)).map(|_| ())
+}
+
+/// Interrupción del dispositivo de un driver: la capacidad `Irq` que el
+/// kernel entrega en un slot de arranque, o nada si no pudo entregar la
+/// línea (compartida con otro dispositivo); entonces el driver sondea.
+///
+/// Uso: después de mirar el anillo "used" sin encontrar lo que espera, el
+/// driver llama a [`DevIrq::wait`]; si devuelve `true`, lee el registro ISR
+/// del dispositivo (eso apaga la línea) y llama a [`DevIrq::ack`]. Si el
+/// dispositivo terminó entre la mirada y la espera, `IRQ_PENDING` ya está
+/// activa y `wait` vuelve enseguida.
+pub struct DevIrq {
+    h: Option<CapHandle>,
+    /// Interrupciones atendidas.
+    pub count: u64,
+}
+
+impl DevIrq {
+    /// La capacidad del slot de arranque `i`, si es una línea de interrupción.
+    pub fn from_bootstrap(i: u32) -> DevIrq {
+        let h = bootstrap(i);
+        let is_irq = cap_info(h).is_ok_and(|c| c.object_type == abi::ObjectType::Irq as u32);
+        DevIrq {
+            h: is_irq.then_some(h),
+            count: 0,
+        }
+    }
+
+    /// ¿El kernel entregó la línea?
+    pub fn present(&self) -> bool {
+        self.h.is_some()
+    }
+
+    /// La capacidad, si la hay.
+    pub fn handle(&self) -> Option<CapHandle> {
+        self.h
+    }
+
+    /// Duerme hasta la próxima interrupción, como mucho `timeout_ns` (una red
+    /// de seguridad: el driver vuelve a mirar igual). Sin línea, cede la CPU.
+    /// Devuelve `true` si hay una interrupción para atender.
+    pub fn wait(&mut self, timeout_ns: u64) -> bool {
+        let Some(h) = self.h else {
+            yield_now();
+            return false;
+        };
+        let mut it = [wait_item(h, abi::cap::signals::IRQ_PENDING)];
+        if wait(&mut it, timeout_ns) == Ok(1) {
+            self.count += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Ítem de [`wait`] para esperar `IRQ_PENDING` junto con otros handles
+    /// (solo tiene sentido si [`DevIrq::present`]).
+    pub fn item(&self) -> abi::syscall::WaitItem {
+        wait_item(
+            self.h.unwrap_or(CapHandle::INVALID),
+            abi::cap::signals::IRQ_PENDING,
+        )
+    }
+
+    /// Fin de la atención: desenmascara la línea.
+    pub fn ack(&self) {
+        if let Some(h) = self.h {
+            let _ = irq_ack(h);
+        }
+    }
+}
+
 /// Duplica una capacidad con derechos atenuados.
 pub fn cap_dup(h: CapHandle, mask: Rights) -> SysResult<CapHandle> {
     decode_ret(syscall4(

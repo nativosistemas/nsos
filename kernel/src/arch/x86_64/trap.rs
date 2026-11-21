@@ -68,6 +68,13 @@ fn handle(f: &mut TrapFrame, raw: *mut TrapFrame) -> *mut TrapFrame {
             sched::schedule(raw)
         }
         v if v == YIELD_VECTOR as u64 => sched::schedule(raw),
+        v if (super::ioapic::VECTOR_BASE as u64..super::ioapic::VECTOR_BASE as u64 + 24)
+            .contains(&v) =>
+        {
+            crate::irq::on_irq((v - super::ioapic::VECTOR_BASE as u64) as u32);
+            apic::eoi();
+            sched::schedule(raw)
+        }
         v if v == apic::SPURIOUS_VECTOR as u64 => raw,
         v => {
             crate::kprintln!("interrupción inesperada: vector {}", v);

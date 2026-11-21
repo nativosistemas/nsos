@@ -15,7 +15,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 9 | Documentar límites de `unsafe` y modelo de amenazas | ✅ `docs/amenazas.md`, auditoría `tools/audit-unsafe.sh`, SMEP/SMAP |
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B sin cortar al `cliente`, con rollback (ahora por un enlace autenticado sobre virtio-net) |
 | 11 | Almacenamiento propio: driver virtio-blk y almacén de objetos con copy-on-write y capacidades | ✅ `virtblk`, `almacen`, `crates/store`; ver [almacenamiento.md](almacenamiento.md) |
-| 12 | `wait` multi-handle e interrupciones para drivers | 🟡 `wait` hecho (modelo `Wait.lean`, `espera`); falta `Irq`/`irq_ack` |
+| 12 | `wait` multi-handle e interrupciones para drivers | ✅ `wait` (modelo `Wait.lean`, `espera`), `Irq`/`irq_ack` (modelo `Irq.lean`); `virtcon`, `virtblk` y `virtnet` duermen en `IRQ_PENDING` |
 
 ## Criterios de aceptación del MVP
 
@@ -253,7 +253,7 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
 * Prueba en QEMU (`make smoke-almacen`): caída simulada, `kill -9` a QEMU
   en momentos al azar y un disco FAT que no se toca.
 
-## Hito 12: `wait` multi-handle (en curso)
+## Hito 12: `wait` multi-handle e interrupciones (hecho)
 
 Primera parte (hecha): la syscall `wait`.
 
@@ -279,10 +279,33 @@ Primera parte (hecha): la syscall `wait`.
   mata a una `dormilona` dormida en `wait`; `intruso` suma 11 abusos (38 en
   total); `caos` ahora llama a `wait` con plazo 0.
 
-Segunda parte (pendiente): capacidad `Irq` e `irq_ack` (IOAPIC en x86_64,
-GIC en ARM64), para que `virtcon`, `virtblk` y `virtnet` duerman en
-`IRQ_PENDING` en lugar de sondear el anillo virtio. Después: `channel_call`
-y `mem_unmap`.
+Segunda parte (hecha): capacidad `Irq` e `irq_ack`.
+
+* Modelo primero: `verification/lean/Nsos/Irq.lean`. Una línea por nivel con
+  un dispositivo arbitrario, el kernel (enmascarar al entregar, `irq_ack` del
+  dueño, reclamar y soltar). Demuestra `no_storm` (sin `irq_ack` no vuelve a
+  llegar), `no_lost_irq` (con la línea activa, o hay `IRQ_PENDING` o puede
+  llegar), `ack_needs_owner`, `unowned_silent` y `claim_exclusive`. Cuatro
+  mutaciones rompen la demostración: entregar sin enmascarar, que `irq_ack`
+  desenmascare sin borrar `IRQ_PENDING`, que lo borre sin desenmascarar y
+  soltar la línea sin enmascararla.
+* `nsos_kcore::irq` (sin `unsafe`): registro de líneas reclamadas, entrada
+  del IOAPIC y lectura del `interrupt-map` de PCI. Kani: `claims_exclusive`
+  e `intx_any`; dos mutaciones las rompen (reclamar sin mirar si ya tiene
+  dueño, aceptar SPI fuera de rango).
+* Kernel: `irq.rs` (objeto `Irq`, `on_irq`, `irq_ack`), IOAPIC en x86_64
+  (`arch/x86_64/ioapic.rs`, vectores 48 en adelante), SPI por nivel en el
+  GIC; `Device::irq_cap` entrega la línea al driver en el slot 5.
+* Drivers: `virtcon`, `virtblk` y `virtnet` duermen en `IRQ_PENDING` (el de
+  red, en `wait` sobre su canal y la línea a la vez); sin línea, sondean como
+  antes y le piden al dispositivo que no interrumpa. `virtcon` comprueba
+  que su `Irq` no se copia ni se manda a otra cell.
+* Pruebas: ktest exige que `virtcon` reciba interrupciones;
+  `migrate-test.sh` y `store-test.sh`, que `virtnet` y `virtblk` también
+  (en x86_64 y en ARM64); `intruso` suma 4 abusos de `irq_ack` y `wait`
+  (42 en total).
+
+Después: `channel_call` y `mem_unmap`.
 
 ## ARM64 (en curso)
 

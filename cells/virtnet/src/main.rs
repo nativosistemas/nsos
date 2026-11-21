@@ -8,6 +8,7 @@
 //! 3. `Memory` con `CONTROL`: búferes de datos (`RX_BUFS` de recepción y uno
 //!    de transmisión).
 //! 4. Canal con el cliente (la cell `enlace`).
+//! 5. `Irq` de su línea de interrupción, si el kernel la pudo entregar.
 //!
 //! Protocolo con el cliente: `SEND` con un paquete → el driver lo manda en
 //! una trama Ethernet de difusión con EtherType `nsos_link::ETHERTYPE`
@@ -17,19 +18,23 @@
 //! enlace, y el driver podría estar comprometido sin que el enlace acepte
 //! una trama falsa.
 //!
-//! Sin interrupciones: sondea el anillo "used" de recepción y el canal,
-//! cediendo la CPU entre vueltas. Termina con 0 cuando el cliente cierra.
+//! Cuando no hay nada que hacer duerme en `wait` sobre el canal del cliente
+//! y `IRQ_PENDING` a la vez; al llegar la interrupción lee el ISR (eso apaga
+//! la línea), atiende los anillos y hace `irq_ack`. Sin línea (compartida con
+//! otro dispositivo) sondea cediendo la CPU. Termina con 0 cuando el cliente
+//! cierra.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
+use nsos_rt::abi::cap::signals;
 use nsos_rt::abi::msg::MAX_DATA;
 use nsos_rt::abi::syscall::flags::NONBLOCK;
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
     bootstrap, channel_recv, channel_send, fence, ioport_read, ioport_write, mem_info, mem_map,
-    println, yield_now, Mapped,
+    println, wait, wait_item, yield_now, DevIrq, Mapped,
 };
 
 const SEND: u64 = 1;
@@ -44,6 +49,12 @@ const REG_QUEUE_SIZE: u16 = 0x0C;
 const REG_QUEUE_SELECT: u16 = 0x0E;
 const REG_QUEUE_NOTIFY: u16 = 0x10;
 const REG_STATUS: u16 = 0x12;
+/// Registro ISR: leerlo apaga la línea de interrupción.
+const REG_ISR: u16 = 0x13;
+/// `VRING_AVAIL_F_NO_INTERRUPT`.
+const AVAIL_NO_INTERRUPT: u16 = 1;
+/// Red de seguridad de cada espera (el driver vuelve a mirar los anillos).
+const IRQ_TIMEOUT_NS: u64 = 50_000_000;
 /// Configuración del dispositivo (sin MSI-X): la MAC.
 const REG_MAC: u16 = 0x14;
 
@@ -85,6 +96,7 @@ struct Device {
     mac: [u8; 6],
     rx: Queue,
     tx: Queue,
+    irq: DevIrq,
 }
 
 fn align_up(v: usize, a: usize) -> usize {
@@ -114,6 +126,9 @@ impl Device {
             4,
             ((self.ring_phys + base as u64) / PAGE as u64) as u32,
         )?;
+        if !self.irq.present() {
+            self.ring.write_u16(base + avail_off, AVAIL_NO_INTERRUPT);
+        }
         Ok(Queue {
             base,
             size: n,
@@ -124,7 +139,19 @@ impl Device {
         })
     }
 
-    fn init(ports: CapHandle, ring_cap: CapHandle, buf_cap: CapHandle) -> Result<Device, Error> {
+    /// Llegó una interrupción: apagar la línea (leer el ISR) y rearmarla.
+    fn irq_done(&self) -> Result<(), Error> {
+        self.reg_r(REG_ISR, 1)?;
+        self.irq.ack();
+        Ok(())
+    }
+
+    fn init(
+        ports: CapHandle,
+        ring_cap: CapHandle,
+        buf_cap: CapHandle,
+        irq: DevIrq,
+    ) -> Result<Device, Error> {
         let ring = mem_map(ring_cap, RING_VADDR, Rights::READ | Rights::WRITE)?;
         let buf = mem_map(buf_cap, BUF_VADDR, Rights::READ | Rights::WRITE)?;
         let ring_phys = mem_info(ring_cap)?.phys;
@@ -144,6 +171,7 @@ impl Device {
             mac: [0; 6],
             rx: empty_queue(),
             tx: empty_queue(),
+            irq,
         };
         // Secuencia legacy: reset, ACK, DRIVER, colas, DRIVER_OK.
         d.reg_w(REG_STATUS, 1, 0)?;
@@ -178,8 +206,9 @@ impl Device {
         d.reg_w(REG_QUEUE_NOTIFY, 2, RX_QUEUE as u32)?;
         let m = d.mac;
         println!(
-            "virtnet: listo (features {:#x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, colas de {} y {})",
-            features, m[0], m[1], m[2], m[3], m[4], m[5], d.rx.size, d.tx.size
+            "virtnet: listo (features {:#x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, colas de {} y {}, {})",
+            features, m[0], m[1], m[2], m[3], m[4], m[5], d.rx.size, d.tx.size,
+            if d.irq.present() { "con interrupciones" } else { "sondeando" }
         );
         Ok(d)
     }
@@ -239,7 +268,9 @@ impl Device {
             if self.ring.read_u16(used) == want {
                 return Ok(());
             }
-            yield_now();
+            if self.irq.wait(IRQ_TIMEOUT_NS) {
+                self.irq_done()?;
+            }
         }
         Err(Error::TimedOut)
     }
@@ -312,7 +343,19 @@ fn run(dev: &mut Device, client: CapHandle) -> Result<(), Error> {
         while dev.poll_rx(|p| channel_send(client, &Message::new(RECV, p)?, 0))? {
             idle = false;
         }
-        if idle {
+        if idle && dev.irq.present() {
+            // Dormir hasta un pedido del cliente o una interrupción.
+            let mut items = [
+                wait_item(client, signals::READABLE | signals::PEER_CLOSED),
+                dev.irq.item(),
+            ];
+            if wait(&mut items, IRQ_TIMEOUT_NS).is_ok()
+                && items[1].observed & signals::IRQ_PENDING != 0
+            {
+                dev.irq.count += 1;
+                dev.irq_done()?;
+            }
+        } else if idle {
             yield_now();
         }
     }
@@ -322,7 +365,8 @@ nsos_rt::entry!(main);
 
 fn main() -> i32 {
     let client = bootstrap(4);
-    let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3)) {
+    let irq = DevIrq::from_bootstrap(5);
+    let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3), irq) {
         Ok(d) => d,
         Err(e) => {
             println!("virtnet: inicialización falló: {:?}", e);
@@ -330,7 +374,10 @@ fn main() -> i32 {
         }
     };
     match run(&mut dev, client) {
-        Ok(()) => 0,
+        Ok(()) => {
+            println!("virtnet: termino ({} interrupciones)", dev.irq.count);
+            0
+        }
         Err(e) => {
             println!("virtnet: {:?}", e);
             3
