@@ -2,7 +2,7 @@
 
 Política:
 
-* `crates/abi` y `crates/kcore`: `#![forbid(unsafe_code)]`.
+* `crates/abi`, `crates/kcore`, `crates/link`, `crates/store` y `crates/contract`: `#![forbid(unsafe_code)]`.
 * Cells de usuario: `#![deny(unsafe_code)]`; la única excepción es el `_start` que
   genera `nsos_rt::entry!`. El `unsafe` de usuario vive en `cells/rt` (instrucción
   `syscall`, o `svc #0` en ARM64). Las cells `intruso` y `fragil` lo usan a propósito para provocar fallos de página.

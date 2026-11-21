@@ -15,9 +15,9 @@ falta, porque…". La CI rechaza un PR sin esa sección.
 
 | Si el cambio… | Herramienta | Dónde |
 |---|---|---|
-| define o cambia un **protocolo** entre cells o máquinas (actualización, migración, enlace, supervisión) | **Lean**: modelo de estados y teoremas | `verification/lean/Nsos/` |
+| define o cambia un **protocolo** entre cells o máquinas (actualización, migración, enlace, supervisión) | **Lean**: modelo de estados y teoremas; si es un contrato de `contract!`, su tabla en `Nsos/Contract.lean` (con `check` demostrado y exportada por `tracegen`) | `verification/lean/Nsos/` |
 | cambia el **modelo de capacidades, IPC o memoria** (quién puede tener o tocar qué) | **Lean**, extendiendo el modelo existente | `System.lean`, `Ipc.lean`, `Memory.lean` |
-| cambia **código de `crates/kcore`, `crates/abi`, `crates/link` o `crates/store`** (lógica sin `unsafe`) | **Kani** sobre el código real | `verification/kani.md` |
+| cambia **código de `crates/kcore`, `crates/abi`, `crates/link`, `crates/store` o `crates/contract`** (lógica sin `unsafe`) | **Kani** sobre el código real | `verification/kani.md` |
 | agrega **`unsafe`** o toca hardware | Registro en `docs/unsafe.md` (lo exige `tools/audit-unsafe.sh`) y, si hay una propiedad que la CPU hace cumplir, una **prueba negativa** en QEMU | `tools/smoke-test.sh` |
 | es solo documentación, herramientas o una cell de ejemplo sin privilegios | Nada formal; se dice por qué | — |
 
@@ -53,10 +53,10 @@ La sección "Verificación formal" responde:
 * Un PR por hito o por cambio coherente, con tests y documentación.
 * `make lint` (formato, clippy, auditoría de `unsafe`), `make test`,
   `make smoke`, `make smoke-arm` y `make verify` tienen que pasar. Los que tocan `kcore`,
-  `abi`, `link` o `store` corren también `make kani`.
+  `abi`, `link`, `store` o `contract` corren también `make kani`.
 * `unsafe` solo en el kernel y en `cells/rt`, siempre con un comentario
-  `SAFETY:` y registrado en `docs/unsafe.md`. `abi`, `kcore`, `link` y
-  `store` tienen `forbid(unsafe_code)`; las cells, `deny(unsafe_code)`.
+  `SAFETY:` y registrado en `docs/unsafe.md`. `abi`, `kcore`, `link`,
+  `store` y `contract` tienen `forbid(unsafe_code)`; las cells, `deny(unsafe_code)`.
 * Documentación y mensajes en español; identificadores en inglés.
 * Después de mergear, `main` tiene que compilar: si dos PRs se cruzan, se
   arregla enseguida.

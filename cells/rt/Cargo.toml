@@ -7,3 +7,4 @@ repository.workspace = true
 
 [dependencies]
 nsos-abi = { path = "../../crates/abi" }
+nsos-contract = { path = "../../crates/contract" }

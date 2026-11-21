@@ -8,7 +8,13 @@ de operaciones y escribe, para cada una, el resultado que predice el modelo.
 `crates/kcore/tests/model_traces.rs` repite las mismas operaciones sobre la
 `CSpace` real y exige resultados idénticos (handles, errores, derechos, len).
 
-Uso: `lake exe tracegen <archivo>`
+También genera `crates/contract/tests/data/contract_model.trace`: el
+veredicto de `Contract.check` sobre contratos al azar y las tablas de los
+contratos de `nsos_contract::protocols`. `crates/contract/tests/contract_model.rs`
+exige que la `const fn` `check` de Rust dé lo mismo y que las tablas que
+genera la macro sean estas.
+
+Uso: `lake exe tracegen <cspace.trace> [<contract.trace>]`
 -/
 
 open Nsos
@@ -148,6 +154,55 @@ def wrapTrace : GenM Unit := do
   emit s!"insert 3 1 => {errOr res (toString ·.2)} len={cs.live}"
   emit s!"get 1 => {errOr (cs.get 1) capStr} len={cs.live}"
 
+/-! ## Contratos -/
+
+def dirStr : Contract.Dir → String
+  | .ab => "ab"
+  | .ba => "ba"
+
+def transStr (c : Contract.Contract) : String :=
+  " ".intercalate (c.trans.map fun t => s!"{t.src},{dirStr t.dir},{t.label},{t.dst}")
+
+def checkStr (c : Contract.Contract) : String :=
+  match Contract.check c with
+  | some k => s!"some {k}"
+  | none => "none"
+
+/-- Un contrato al azar. Casi siempre respeta la dirección de cada estado y
+no repite etiquetas, para que salgan tanto aceptados como rechazados. -/
+def randContract : GenM Contract.Contract := do
+  let ns := 1 + (← rand 5)
+  let nt ← rand 7
+  let mut dirs : Array Contract.Dir := #[]
+  for _ in [0:ns] do
+    dirs := dirs.push (if (← rand 2) = 0 then .ab else .ba)
+  let mut ts : List Contract.Trans := []
+  for _ in [0:nt] do
+    let src ← rand ns
+    let dir ← if (← rand 10) < 8 then pure dirs[src]! else
+      pure (if (← rand 2) = 0 then .ab else .ba)
+    let label ← rand 3
+    let dst ← rand ns
+    ts := ts ++ [⟨src, dir, label, dst⟩]
+  return ⟨← rand ns, ts⟩
+
+def contractTraces : GenM Unit := do
+  emit "# Generado por `lake exe tracegen` (verification/lean). No editar a mano."
+  emit "# C <inicio> <origen,dir,etiqueta,destino>... => some <cota> | none   (Contract.check)"
+  emit "# P <nombre> <inicio> <transiciones>...   (tablas de nsos_contract::protocols)"
+  for c in [Contract.mixed, Contract.nondet, Contract.flood, Contract.echoOld,
+            Contract.echo, Contract.note] do
+    emit s!"C {c.start} {transStr c} => {checkStr c}"
+  for _ in [0:400] do
+    let c ← randContract
+    emit s!"C {c.start} {transStr c} => {checkStr c}"
+  emit s!"P echo {Contract.echo.start} {transStr Contract.echo}"
+  emit s!"P note {Contract.note.start} {transStr Contract.note}"
+
+def writeLines (path : String) (gen : GenM Unit) : IO Unit := do
+  let (((), _), lines) ← (gen.run ⟨20261119⟩).run #[]
+  IO.FS.writeFile path ("\n".intercalate lines.toList ++ "\n")
+
 def main (args : List String) : IO UInt32 := do
   let path := args.headD "/dev/stdout"
   let gen : GenM Unit := do
@@ -157,6 +212,6 @@ def main (args : List String) : IO UInt32 := do
       let limit := [2, 3, 5, 8, 16, 1024][i % 6]!
       trace limit (20 + i % 40)
     wrapTrace
-  let (((), _), lines) ← (gen.run ⟨20261119⟩).run #[]
-  IO.FS.writeFile path ("\n".intercalate lines.toList ++ "\n")
+  writeLines path gen
+  if let some p := args[1]? then writeLines p contractTraces
   return 0

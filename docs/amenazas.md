@@ -41,8 +41,9 @@ físico.
 | Una caída (corte de luz, `kill -9` a QEMU) en cualquier momento de una escritura al almacén deja el objeto viejo o el nuevo, nunca una mezcla | Copy-on-write: datos y tabla nuevos en bloques libres, superbloque con secuencia + 1 en la otra ranura, SHA-256 de todo el árbol; al montar se borra una ranura de una escritura sin terminar (`crates/store`) | Lean: `Store.crash_safe`, `commit_good`, `mount_good`, `crash_then_mount` (4 contraejemplos con `decide` muestran por qué hace falta cada regla); tests en el host con todas las combinaciones de escrituras hechas, no hechas o rotas; `tools/store-test.sh`: caída simulada y `kill -9` en momentos al azar |
 | Un dueño no toca los objetos de otro; una copia de solo lectura no escribe | El dueño sale de la raíz por la que llega el pedido; cada objeto abierto es un extremo de canal propio (capacidad); `DUP_RO` siempre quita la escritura | Lean: `Store.rw_handle_from_owner`, `change_needs_owner`, `untouched_without_owner` (2 mutaciones las rompen); `curioso` en `tools/store-test.sh` |
 | El almacén no pisa un disco que no es suyo | Solo formatea si las dos ranuras están a cero o son superbloques suyos a medias | Test en el host con un sector de arranque FAT; `tools/store-test.sh`: el disco ajeno queda idéntico byte a byte |
+| Una cell con contratos tipados no manda fuera de protocolo, y lo que recibe fuera de protocolo no la saca de su estado ni le deja capacidades ocupando slots | `contract!`: un tipo por estado (`send` consume el canal), decodificación según el estado; lo que no corresponde se descarta, se sueltan sus capacidades y el canal vuelve en el mismo estado. Al compilar, `check` exige estados de una sola dirección, determinismo y una cota de mensajes en vuelo que entre en la cola del kernel | Lean: `Contract.contract_safe` (sin mensajes inesperados, sin bloqueo de protocolo, nada pendiente al terminar, colas acotadas) para dos puntas que cumplen; contraejemplos `mixed_breaks`, `nondet_breaks`, `loop_unbounded`; 6 mutaciones lo rompen; `contract_model`: la `const fn` de Rust da lo mismo que el modelo en 406 contratos y las tablas son las del modelo; Kani: `decode_any`, `roundtrip_echo`, `roundtrip_endpoint`, `check_any`; `ping` le manda 4 mensajes fuera de protocolo a `pong` en QEMU |
 | No se filtran extremos de canal en ciclos | Recolector `ipc_gc` | Lean: `step_no_leak`; ktest de ciclos |
-| El `unsafe` del kernel está acotado y justificado | Lints `undocumented_unsafe_blocks`, `forbid(unsafe_code)` en `abi`/`kcore`, `deny` en cells, registro | `tools/audit-unsafe.sh` en la CI |
+| El `unsafe` del kernel está acotado y justificado | Lints `undocumented_unsafe_blocks`, `forbid(unsafe_code)` en `abi`/`kcore`/`link`/`store`/`contract`, `deny` en cells, registro | `tools/audit-unsafe.sh` en la CI |
 
 ## Qué **no** se garantiza
 
@@ -142,6 +143,21 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    puede cruzar líneas (otra vez negación de servicio). *Mitigación futura*:
    MSI/MSI-X (una interrupción por dispositivo, sin compartir) y leer el
    enrutamiento de ACPI.
+
+14. **Los contratos de canal no los hace cumplir el kernel.** El kernel solo
+   conoce mensajes con etiqueta: una cell sin contrato (cualquier ELF) puede
+   mandar cualquier cosa por un canal. La cell tipada lo descarta y sigue,
+   pero los teoremas de `Contract.lean` suponen que las dos puntas cumplen:
+   una punta que no lee puede llenar la cola de la otra y bloquear su
+   `send` (negación de servicio para ese canal, nunca acceso). Un extremo
+   recibido en un mensaje se comprueba que sea un canal con `SEND` y
+   `RECV`, no que su otra punta siga el contrato esperado: un emisor
+   malicioso puede pasar un canal de otro protocolo, y del otro lado todo
+   llega como violación. Lo mismo para la capacidad de arranque
+   (`Chan::open`): el contrato lo garantiza quien reparte el canal.
+   *Mitigación futura*: un `contract_id` fijo por canal que el kernel
+   informe en `cap_info` (etapa 5 de [`contratos.md`](contratos.md)), y
+   `send` con plazo.
 
 ## Supuestos de confianza
 

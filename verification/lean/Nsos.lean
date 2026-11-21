@@ -12,3 +12,4 @@ import Nsos.Migration
 import Nsos.Link
 import Nsos.Wait
 import Nsos.Irq
+import Nsos.Contract

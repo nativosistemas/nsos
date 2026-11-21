@@ -190,6 +190,13 @@ name = "nsos-abi"
 version = "0.1.0"
 
 [[package]]
+name = "nsos-contract"
+version = "0.1.0"
+dependencies = [
+ "nsos-abi",
+]
+
+[[package]]
 name = "nsos-kcore"
 version = "0.1.0"
 dependencies = [
@@ -215,6 +222,7 @@ name = "nsos-rt"
 version = "0.1.0"
 dependencies = [
  "nsos-abi",
+ "nsos-contract",
 ]
 
 [[package]]

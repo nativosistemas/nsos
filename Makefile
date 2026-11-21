@@ -50,7 +50,7 @@ smoke-arm:
 
 lint:
 	cargo fmt --check
-	cargo clippy -p nsos-abi -p nsos-kcore -p nsos-link -p nsos-store --all-targets -- -D warnings
+	cargo clippy -p nsos-abi -p nsos-kcore -p nsos-link -p nsos-store -p nsos-contract --all-targets -- -D warnings
 	cargo clippy -p nsos-kernel --target x86_64-unknown-none -- -D warnings
 	cargo clippy -p nsos-kernel --target aarch64-unknown-none-softfloat -- -D warnings
 	RUSTFLAGS="-C relocation-model=static" cargo clippy --target x86_64-unknown-none \
@@ -62,8 +62,10 @@ lint:
 # Demostraciones en Lean y regeneración de las trazas del modelo
 verify:
 	cd verification/lean && lake build && \
-		lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace
+		lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace \
+			../../crates/contract/tests/data/contract_model.trace
 	cargo test -p nsos-kcore --test model_traces
+	cargo test -p nsos-contract --test contract_model
 
 # Pruebas de Kani sobre el código Rust (ver verification/kani.md)
 kani:
@@ -71,6 +73,7 @@ kani:
 	cargo kani -p nsos-kcore
 	cargo kani -p nsos-link
 	cargo kani -p nsos-store
+	cargo kani -p nsos-contract
 
 clean:
 	cargo clean

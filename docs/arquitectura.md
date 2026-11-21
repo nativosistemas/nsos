@@ -2,7 +2,7 @@
 
 nsos es un sistema operativo experimental en Rust que combina ideas de
 **Singularity** (aislamiento por lenguaje, microkernel, IPC por canales con
-contratos) y **Midori** (pragmatismo, concurrencia async, compilación AOT).
+contratos tipados, ver [`contratos.md`](contratos.md)) y **Midori** (pragmatismo, concurrencia async, compilación AOT).
 Es un prototipo de investigación para QEMU, no un reemplazo de Linux.
 
 ## Capas
@@ -47,7 +47,7 @@ async sobre la syscall `wait`.
 
 | Capa | Mecanismo | Qué protege |
 |---|---|---|
-| Lenguaje | Rust seguro, `#![forbid(unsafe_code)]` en cells de usuario | errores de memoria dentro de la cell |
+| Lenguaje | Rust seguro, `#![deny(unsafe_code)]` en cells de usuario (el `unsafe` vive en `cells/rt`); contratos de canal tipados | errores de memoria dentro de la cell; mensajes fuera de protocolo |
 | Hardware | espacio de direcciones propio por cell (MMU), anillo 3 | cells maliciosas, `unsafe` mal usado, Spectre entre cells |
 
 Singularity confiaba solo en el lenguaje (SIPs en un único espacio de
@@ -209,8 +209,9 @@ compartido: el driver tiene la capacidad con `CONTROL` y el almacén una sin
 ```
 crates/abi/        ABI kernel↔cells (no_std, sin unsafe, testeable en host)
 crates/kcore/      lógica del kernel sin hardware (marcos, CSpace, validador ELF)
+crates/contract/   contratos de canal tipados (macro contract!, typestate)
 cells/rt/          runtime de las cells (entrada, syscalls, println!)
-cells/ping|pong/   cells de ejemplo que hablan por IPC
+cells/ping|pong/   cells de ejemplo que hablan por IPC con el contrato `echo`
 cells/intruso/     test de aislamiento
 cells/init/        supervisor: reinicia cells que fallan, mata cells
 cells/fragil|dormilona/  cells que fallan o no terminan, para el supervisor

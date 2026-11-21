@@ -67,6 +67,7 @@ nsos: arranque OK
 Después arrancan las cells de ejemplo:
 
 ```
+[ping] ping: 4 mensajes fuera de protocolo: pong los descartó, soltó la capacidad y sigue en Ready
 [ping] ping: 10 ecos verificados
 [ping] ping: transferí un extremo; mi handle viejo ya es inválido
 [pong] pong: recibí por el canal transferido: "hola por el canal nuevo"
@@ -81,6 +82,7 @@ además el mapa de memoria de Limine.
 
 * [Arquitectura](docs/arquitectura.md)
 * [ABI de IPC y modelo de capacidades](docs/abi-ipc-capacidades.md)
+* [Contratos de canal tipados](docs/contratos.md)
 * [Hoja de ruta](docs/hoja-de-ruta.md)
 * [Almacenamiento propio](docs/almacenamiento.md)
 * [Registro de `unsafe`](docs/unsafe.md)

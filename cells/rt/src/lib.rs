@@ -10,6 +10,7 @@
 #![no_std]
 
 pub use nsos_abi as abi;
+pub use nsos_contract as contract;
 
 use abi::cap::CapInfo;
 use abi::syscall::Syscall;
@@ -21,6 +22,38 @@ use core::fmt::{self, Write};
 #[inline(always)]
 fn syscall4(n: Syscall, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     raw_syscall(n as u64, a0, a1, a2, a3)
+}
+
+/// Las syscalls de canal para los contratos tipados ([`contract`]): un
+/// [`contract::Chan`] de una cell es `Chan<Sys, Estado>`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sys;
+
+impl contract::Transport for Sys {
+    fn send(self, h: CapHandle, m: &Message) -> SysResult<()> {
+        channel_send(h, m, 0)
+    }
+
+    fn recv(self, h: CapHandle, m: &mut Message, nonblock: bool) -> SysResult<()> {
+        let flags = if nonblock {
+            abi::syscall::flags::NONBLOCK
+        } else {
+            0
+        };
+        channel_recv(h, m, flags)
+    }
+
+    fn cap_info(self, h: CapHandle) -> SysResult<CapInfo> {
+        cap_info(h)
+    }
+
+    fn cap_drop(self, h: CapHandle) {
+        let _ = cap_drop(h);
+    }
+
+    fn channel_create(self) -> SysResult<(CapHandle, CapHandle)> {
+        channel_create()
+    }
 }
 
 /// Capacidad de arranque número `i` (1-based).

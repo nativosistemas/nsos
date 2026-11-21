@@ -70,8 +70,10 @@ jobs:
       - name: Trazas del modelo al día
         run: |
           cd verification/lean
-          lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace
-          git diff --exit-code -- ../../crates/kcore/tests/data/cspace_model.trace
+          lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace \
+            ../../crates/contract/tests/data/contract_model.trace
+          git diff --exit-code -- ../../crates/kcore/tests/data/cspace_model.trace \
+            ../../crates/contract/tests/data/contract_model.trace
 
   kani:
     runs-on: ubuntu-latest
