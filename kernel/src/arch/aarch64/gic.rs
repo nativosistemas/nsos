@@ -5,8 +5,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use nsos_kcore::platform::Region;
 
 const GICD_CTLR: u64 = 0x000;
+const GICD_TYPER: u64 = 0x004;
 const GICD_ISENABLER: u64 = 0x100;
+const GICD_ICENABLER: u64 = 0x180;
 const GICD_IPRIORITYR: u64 = 0x400;
+const GICD_ITARGETSR: u64 = 0x800;
+const GICD_ICFGR: u64 = 0xC00;
 const GICC_CTLR: u64 = 0x000;
 const GICC_PMR: u64 = 0x004;
 const GICC_IAR: u64 = 0x00C;
@@ -55,6 +59,34 @@ pub fn enable(id: u32) {
     let v = read(&GICD, prio) & !(0xFF << shift);
     write(&GICD, prio, v | (0x80 << shift));
     write(&GICD, GICD_ISENABLER + 4 * (id as u64 / 32), 1 << (id % 32));
+}
+
+/// ¿Es una SPI que este GIC implementa? (Las SGI y PPI, 0 a 31, son del
+/// kernel: timer y avisos entre núcleos.)
+pub fn valid_spi(id: u32) -> bool {
+    let lines = 32 * ((read(&GICD, GICD_TYPER) & 0x1F) + 1);
+    (32..lines.min(1020)).contains(&id)
+}
+
+/// Prepara una SPI de un dispositivo PCI: por nivel, hacia el núcleo 0, y
+/// la habilita.
+pub fn route_spi(id: u32) {
+    let cfg = GICD_ICFGR + 4 * (id as u64 / 16);
+    let shift = (id % 16) * 2;
+    write(&GICD, cfg, read(&GICD, cfg) & !(0b11 << shift)); // por nivel
+    let tgt = GICD_ITARGETSR + (id as u64 & !3);
+    let tshift = (id % 4) * 8;
+    write(
+        &GICD,
+        tgt,
+        (read(&GICD, tgt) & !(0xFF << tshift)) | (1 << tshift),
+    );
+    enable(id);
+}
+
+/// Deshabilita (enmascara) la interrupción `id`.
+pub fn disable(id: u32) {
+    write(&GICD, GICD_ICENABLER + 4 * (id as u64 / 32), 1 << (id % 32));
 }
 
 /// Reconoce la interrupción pendiente de mayor prioridad.

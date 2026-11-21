@@ -10,6 +10,7 @@
 //!    cliente (el kernel le da al cliente otra capacidad al mismo objeto, sin
 //!    `CONTROL`). El dispositivo lee y escribe ahí por DMA.
 //! 4. Canal con el cliente.
+//! 5. `Irq` de su línea de interrupción, si el kernel la pudo entregar.
 //!
 //! Protocolo (genérico: un bloque de 512 bytes = un sector, como el
 //! dispositivo). Sirve igual para el almacén propio (`almacen`) y para una
@@ -23,7 +24,8 @@
 //!
 //! Estado 0 = bien, 1 = error del dispositivo, 2 = pedido inválido.
 //!
-//! Sin interrupciones: sondea el anillo "used" cediendo la CPU. Un pedido a
+//! Espera cada pedido durmiendo en `IRQ_PENDING` (al llegar, lee el ISR y
+//! hace `irq_ack`); sin línea, sondea el anillo "used" cediendo la CPU. Un pedido a
 //! la vez. Termina con 0 cuando el cliente cierra el canal.
 
 #![no_std]
@@ -33,7 +35,7 @@
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
     bootstrap, channel_recv, channel_send, fence, ioport_read, ioport_write, mem_info, mem_map,
-    println, yield_now, Mapped,
+    println, DevIrq, Mapped,
 };
 
 const INFO: u64 = 1;
@@ -54,6 +56,12 @@ const REG_QUEUE_SIZE: u16 = 0x0C;
 const REG_QUEUE_SELECT: u16 = 0x0E;
 const REG_QUEUE_NOTIFY: u16 = 0x10;
 const REG_STATUS: u16 = 0x12;
+/// Registro ISR: leerlo apaga la línea de interrupción.
+const REG_ISR: u16 = 0x13;
+/// `VRING_AVAIL_F_NO_INTERRUPT`.
+const AVAIL_NO_INTERRUPT: u16 = 1;
+/// Red de seguridad de cada espera (el driver vuelve a mirar el anillo).
+const IRQ_TIMEOUT_NS: u64 = 50_000_000;
 /// Configuración del dispositivo (sin MSI-X): capacidad en sectores.
 const REG_CAPACITY: u16 = 0x14;
 
@@ -95,6 +103,7 @@ struct Device {
     next_avail: u16,
     sectors: u64,
     flush: bool,
+    irq: DevIrq,
 }
 
 fn align_up(v: usize, a: usize) -> usize {
@@ -109,7 +118,12 @@ impl Device {
         ioport_read(self.ports, off, width)
     }
 
-    fn init(ports: CapHandle, ring_cap: CapHandle, buf_cap: CapHandle) -> Result<Device, Error> {
+    fn init(
+        ports: CapHandle,
+        ring_cap: CapHandle,
+        buf_cap: CapHandle,
+        irq: DevIrq,
+    ) -> Result<Device, Error> {
         let ring = mem_map(ring_cap, RING_VADDR, Rights::READ | Rights::WRITE)?;
         let buf = mem_map(buf_cap, BUF_VADDR, Rights::READ | Rights::WRITE)?;
         let ring_phys = mem_info(ring_cap)?.phys;
@@ -132,6 +146,7 @@ impl Device {
             next_avail: 0,
             sectors: 0,
             flush: false,
+            irq,
         };
         // Secuencia legacy: reset, ACK, DRIVER, features, cola, DRIVER_OK.
         d.reg_w(REG_STATUS, 1, 0)?;
@@ -156,14 +171,22 @@ impl Device {
         d.size = n;
         d.avail_off = avail_off;
         d.used_off = used_off;
+        if !d.irq.present() {
+            d.ring.write_u16(avail_off, AVAIL_NO_INTERRUPT);
+        }
         d.reg_w(REG_QUEUE_PFN, 4, (d.ring_phys / PAGE as u64) as u32)?;
         d.reg_w(REG_STATUS, 1, STATUS_ACK | STATUS_DRIVER | STATUS_DRIVER_OK)?;
         println!(
-            "virtblk: listo ({} sectores = {} KiB, flush {}, cola de {})",
+            "virtblk: listo ({} sectores = {} KiB, flush {}, cola de {}, {})",
             d.sectors,
             d.sectors / 2,
             if d.flush { "sí" } else { "no" },
-            n
+            n,
+            if d.irq.present() {
+                "con interrupciones"
+            } else {
+                "sondeando"
+            }
         );
         Ok(d)
     }
@@ -212,7 +235,10 @@ impl Device {
             if self.ring.read_u16(self.used_off + 2) == self.next_avail {
                 return Ok(self.ring.read_u8(STATUS_OFF));
             }
-            yield_now();
+            if self.irq.wait(IRQ_TIMEOUT_NS) {
+                self.reg_r(REG_ISR, 1)?;
+                self.irq.ack();
+            }
         }
         Err(Error::TimedOut)
     }
@@ -285,7 +311,8 @@ nsos_rt::entry!(main);
 
 fn main() -> i32 {
     let client = bootstrap(4);
-    let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3)) {
+    let irq = DevIrq::from_bootstrap(5);
+    let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3), irq) {
         Ok(d) => d,
         Err(e) => {
             println!("virtblk: inicialización falló: {:?}", e);
@@ -293,7 +320,10 @@ fn main() -> i32 {
         }
     };
     match run(&mut dev, client) {
-        Ok(()) => 0,
+        Ok(()) => {
+            println!("virtblk: termino ({} interrupciones)", dev.irq.count);
+            0
+        }
         Err(e) => {
             println!("virtblk: {:?}", e);
             3

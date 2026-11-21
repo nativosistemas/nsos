@@ -288,6 +288,11 @@ fn irq(raw: *mut TrapFrame) -> *mut TrapFrame {
             gic::eoi(id);
             sched::schedule(raw)
         }
+        id if gic::valid_spi(id) => {
+            crate::irq::on_irq(id);
+            gic::eoi(id);
+            sched::schedule(raw)
+        }
         _ => {
             crate::kprintln!("interrupción inesperada: INTID {}", id);
             gic::eoi(id);

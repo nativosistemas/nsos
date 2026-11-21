@@ -100,8 +100,8 @@ Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
 implementación (hito 7): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
 `channel_recv`, `mem_create`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
-`cell_spawn`, `cell_kill`, `cell_status` y (hito 12) `wait`. El resto devuelve
-`Unsupported`. Resumen:
+`cell_spawn`, `cell_kill`, `cell_status` y (hito 12) `wait` e `irq_ack`. El
+resto devuelve `Unsupported`. Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|
@@ -201,7 +201,7 @@ objeto (pedidas o no).
 | | `WRITABLE` | el peer está abierto y su cola tiene lugar (`send` no bloquearía) |
 | | `PEER_CLOSED` | el otro extremo se cerró |
 | `Cell` | `CELL_EXITED` | la cell terminó (`cell_status` ya no bloquearía) |
-| `Irq` | `IRQ_PENDING` | hay una interrupción sin atender (todavía no implementado) |
+| `Irq` | `IRQ_PENDING` | llegó una interrupción y todavía no hubo `irq_ack` |
 
 * Cada handle necesita `WAIT`; `wanted` no puede ser 0 ni pedir señales que
   su tipo no emite (`Memory`, `IoPorts` e `Image` no emiten ninguna);
@@ -320,6 +320,36 @@ Un driver es una cell que recibe en su vector de arranque:
 * un canal hacia sus clientes.
 
 El kernel solo enmascara la IRQ, activa `IRQ_PENDING` y espera `irq_ack`.
+
+### 9.1 Interrupciones (hito 12)
+
+* La línea es **por nivel**: el dispositivo la mantiene activa hasta que el
+  driver lo atiende (en virtio legacy, leyendo el registro ISR). Cuando llega,
+  el kernel la enmascara en el controlador, activa `IRQ_PENDING` en el objeto
+  `Irq` (despierta a quien espera en `wait`) y no toca el dispositivo.
+* `irq_ack(h)` (requiere `CONTROL`) borra `IRQ_PENDING` y desenmascara, en un
+  solo paso. Si el dispositivo todavía tiene algo, la interrupción vuelve a
+  llegar. Mientras no haya `irq_ack`, no vuelve (sin tormentas). Un
+  `irq_ack` sin nada pendiente no hace nada.
+* El driver: mira su anillo; si no está lo que espera, `wait` sobre
+  `IRQ_PENDING` (y, si quiere, sus canales); al despertar lee el ISR y hace
+  `irq_ack`. Si el dispositivo termina entre la mirada y la espera,
+  `IRQ_PENDING` ya está activa y `wait` vuelve enseguida.
+* **Una línea, un dueño.** El kernel reclama la línea al crear el objeto y la
+  suelta (enmascarada) cuando muere la última capacidad. La capacidad tiene
+  solo `CONTROL | WAIT`: sin `GRANT` ni `DUPLICATE`, no sale del driver.
+  Si dos dispositivos comparten línea, solo el primer driver la recibe; el
+  otro no recibe `Irq`, sondea y le pide a su dispositivo que no interrumpa
+  (`VRING_AVAIL_F_NO_INTERRUPT`).
+* De dónde sale la línea: en x86_64, el pin del IOAPIC (en `0xFEC00000`) que
+  anotó el firmware en `Interrupt Line`; vector `48 + pin`. En ARM64, la SPI
+  del GIC que da el `interrupt-map` del controlador PCI en el device tree
+  (solo para el bus raíz).
+* Los drivers virtio reciben la `Irq` en el slot 5, si se pudo entregar.
+
+Modelo y demostraciones: [`Nsos/Irq.lean`](../verification/lean/Nsos/Irq.lean)
+(`no_storm`, `no_lost_irq`, `ack_needs_owner`, `unowned_silent`,
+`claim_exclusive`); la espera en sí, `Nsos/Wait.lean`.
 
 * `mem_map(h, vaddr, rights)`: mapea el objeto entero en `vaddr` (alineada a
   página, en el rango de usuario, sin pisar otro mapeo). Exige `READ` en la

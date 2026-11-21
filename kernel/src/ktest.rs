@@ -457,12 +457,9 @@ pub fn run_migration(origin: bool) -> bool {
             crate::image(images[0])?,
             crate::image(images[1])?
         ];
-        cell::spawn(
-            "virtnet",
-            virtnet,
-            alloc::vec![ports, dma(8)?, dma(5)?, chan(net_a)],
-        )
-        .map_err(|_| "virtnet no arrancó")?;
+        let mut net_caps = alloc::vec![ports, dma(8)?, dma(5)?, chan(net_a)];
+        net_caps.extend(dev.irq_cap()); // slot 5, si la línea se pudo entregar
+        cell::spawn("virtnet", virtnet, net_caps).map_err(|_| "virtnet no arrancó")?;
         cell::spawn(
             "enlace",
             enlace,
@@ -568,17 +565,14 @@ pub fn run_store(mode: &str) -> bool {
         let (root2_a, root2_b) = cell::channel_create();
         let (peer_a, peer_b) = cell::channel_create();
         let module = |n| crate::module(n).ok_or("falta un módulo del almacén");
-        cell::spawn(
-            "virtblk",
-            module("virtblk")?,
-            alloc::vec![
-                ports,
-                mem(&ring, cell::DMA_RIGHTS),
-                mem(&buf, cell::DMA_RIGHTS),
-                chan(drv_a)
-            ],
-        )
-        .map_err(|_| "virtblk no arrancó")?;
+        let mut blk_caps = alloc::vec![
+            ports,
+            mem(&ring, cell::DMA_RIGHTS),
+            mem(&buf, cell::DMA_RIGHTS),
+            chan(drv_a)
+        ];
+        blk_caps.extend(dev.irq_cap()); // slot 5, si la línea se pudo entregar
+        cell::spawn("virtblk", module("virtblk")?, blk_caps).map_err(|_| "virtblk no arrancó")?;
         cell::spawn(
             "almacen",
             module("almacen")?,
@@ -704,6 +698,10 @@ pub fn run_cells() -> bool {
             == 3,
     );
     if crate::virtio_console_present() {
+        check(
+            "virtcon recibió interrupciones (Irq + wait + irq_ack)",
+            crate::irq::delivered() > 0,
+        );
         check(
             "virtcon (driver virtio) terminó con 0",
             status("virtcon") == Some(Exited(0)),

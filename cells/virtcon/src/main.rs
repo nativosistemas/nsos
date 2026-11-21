@@ -7,13 +7,17 @@
 //! 2. `Memory` con `CONTROL`: memoria contigua para la virtqueue (DMA).
 //! 3. `Memory` con `CONTROL`: búfer de datos (DMA).
 //! 4. Canal hacia el cliente.
+//! 5. `Irq` de su línea de interrupción, si el kernel la pudo entregar.
 //!
 //! Protocolo con el cliente: `WRITE` con texto → el driver lo transmite por
 //! la cola 1 (transmitq del puerto 0) y responde `WRITTEN` con la cantidad
 //! de bytes. Cuando el cliente cierra el canal, el driver termina con 0.
 //!
-//! Sin interrupciones por ahora: espera la finalización sondeando el anillo
-//! "used" y cediendo la CPU entre intentos.
+//! Espera la finalización durmiendo en `IRQ_PENDING` (`wait`): al llegar la
+//! interrupción lee el registro ISR (eso apaga la línea), mira el anillo
+//! "used" y hace `irq_ack`. Sin línea (compartida con otro dispositivo),
+//! sondea el anillo cediendo la CPU y le pide al dispositivo que no
+//! interrumpa.
 
 #![no_std]
 #![no_main]
@@ -21,8 +25,8 @@
 
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    bootstrap, channel_recv, channel_send, fence, ioport_read, ioport_write, mem_info, mem_map,
-    println, yield_now, Mapped,
+    bootstrap, cap_dup, cap_info, channel_recv, channel_send, fence, ioport_read, ioport_write,
+    mem_info, mem_map, println, DevIrq, Mapped,
 };
 
 const WRITE: u64 = 1;
@@ -36,6 +40,12 @@ const REG_QUEUE_SIZE: u16 = 0x0C;
 const REG_QUEUE_SELECT: u16 = 0x0E;
 const REG_QUEUE_NOTIFY: u16 = 0x10;
 const REG_STATUS: u16 = 0x12;
+/// Registro ISR: leerlo apaga la línea de interrupción.
+const REG_ISR: u16 = 0x13;
+/// `VRING_AVAIL_F_NO_INTERRUPT`.
+const AVAIL_NO_INTERRUPT: u16 = 1;
+/// Red de seguridad de cada espera (el driver vuelve a mirar el anillo).
+const IRQ_TIMEOUT_NS: u64 = 50_000_000;
 
 const STATUS_ACK: u32 = 1;
 const STATUS_DRIVER: u32 = 2;
@@ -57,6 +67,7 @@ struct Device {
     avail_off: usize,
     used_off: usize,
     next_avail: u16,
+    irq: DevIrq,
 }
 
 fn align_up(v: usize, a: usize) -> usize {
@@ -71,7 +82,12 @@ impl Device {
         ioport_read(self.ports, off, width)
     }
 
-    fn init(ports: CapHandle, ring_cap: CapHandle, buf_cap: CapHandle) -> Result<Device, Error> {
+    fn init(
+        ports: CapHandle,
+        ring_cap: CapHandle,
+        buf_cap: CapHandle,
+        irq: DevIrq,
+    ) -> Result<Device, Error> {
         let ring = mem_map(ring_cap, RING_VADDR, Rights::READ | Rights::WRITE)?;
         let buf = mem_map(buf_cap, BUF_VADDR, Rights::READ | Rights::WRITE)?;
         let ring_phys = mem_info(ring_cap)?.phys;
@@ -88,6 +104,7 @@ impl Device {
             avail_off: 0,
             used_off: 0,
             next_avail: 0,
+            irq,
         };
         // Secuencia de inicialización legacy: reset, ACK, DRIVER.
         d.reg_w(REG_STATUS, 1, 0)?;
@@ -113,11 +130,20 @@ impl Device {
         d.size = n;
         d.avail_off = avail_off;
         d.used_off = used_off;
+        if !d.irq.present() {
+            d.ring.write_u16(avail_off, AVAIL_NO_INTERRUPT);
+        }
         d.reg_w(REG_QUEUE_PFN, 4, (ring_phys / PAGE as u64) as u32)?;
         d.reg_w(REG_STATUS, 1, STATUS_ACK | STATUS_DRIVER | STATUS_DRIVER_OK)?;
         println!(
-            "virtcon: dispositivo listo (features {:#x}, cola tx de {} entradas)",
-            features, n
+            "virtcon: dispositivo listo (features {:#x}, cola tx de {} entradas, {})",
+            features,
+            n,
+            if d.irq.present() {
+                "con interrupciones"
+            } else {
+                "sondeando"
+            }
         );
         Ok(d)
     }
@@ -146,10 +172,29 @@ impl Device {
             if self.ring.read_u16(self.used_off + 2) == self.next_avail {
                 return Ok(());
             }
-            yield_now();
+            if self.irq.wait(IRQ_TIMEOUT_NS) {
+                self.reg_r(REG_ISR, 1)?;
+                self.irq.ack();
+            }
         }
         Err(Error::TimedOut)
     }
+}
+
+/// La línea de interrupción no sale de este driver: la capacidad no tiene
+/// `DUPLICATE` ni `GRANT`, así que ni se copia ni viaja en un mensaje (y
+/// sigue siendo nuestra después del intento).
+fn irq_stays_here(h: CapHandle, client: CapHandle) -> bool {
+    let dup = cap_dup(h, Rights::WAIT);
+    let mut msg = Message::new(0, b"").unwrap();
+    let sent = msg.push_cap(h).and_then(|_| channel_send(client, &msg, 0));
+    let still = cap_info(h).is_ok();
+    let ok = dup == Err(Error::AccessDenied) && sent == Err(Error::AccessDenied) && still;
+    println!(
+        "virtcon: la línea de interrupción no se copia ni se pasa a otra cell: {}",
+        if ok { "ok" } else { "¡FALLÓ!" }
+    );
+    ok
 }
 
 nsos_rt::entry!(main);
@@ -157,13 +202,19 @@ nsos_rt::entry!(main);
 fn main() -> i32 {
     let client = bootstrap(4);
     let mut m = Message::default();
-    let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3)) {
+    let irq = DevIrq::from_bootstrap(5);
+    let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3), irq) {
         Ok(d) => d,
         Err(e) => {
             println!("virtcon: inicialización falló: {:?}", e);
             return 2;
         }
     };
+    if let Some(h) = dev.irq.handle() {
+        if !irq_stays_here(h, client) {
+            return 5;
+        }
+    }
     loop {
         match channel_recv(client, &mut m, 0) {
             Ok(()) if m.header.label == WRITE => {
@@ -179,7 +230,10 @@ fn main() -> i32 {
                 println!("virtcon: etiqueta desconocida {}", m.header.label);
             }
             Err(Error::PeerClosed) => {
-                println!("virtcon: el cliente cerró el canal; termino");
+                println!(
+                    "virtcon: el cliente cerró el canal; termino ({} interrupciones)",
+                    dev.irq.count
+                );
                 return 0;
             }
             Err(e) => {

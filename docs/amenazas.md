@@ -29,6 +29,7 @@ físico.
 | En ARM64, lo que ve el kernel es lo que hace cumplir la MMU | Codec entre entradas neutras y descriptores ARM64 (`kcore::paging_arm64`); `TCR_EL1` con permisos jerárquicos y sin PBHA; `SCTLR_EL1.WXN` | Kani: `codec_roundtrip`, `hw_agrees_with_view`, `map_then_hw` contra un modelo de la MMU escrito desde el manual (4 mutaciones las rompen); `intruso`, `fragil` y `test-wx-fault` en QEMU `virt` |
 | Una cell no frena el scheduler ni toca hardware de la CPU | x86_64: anillo 3 (sin `cli`, sin puertos fuera de `IoPorts`). ARM64: `SCTLR_EL1.UMA` = 0 (no enmascara IRQ), `CNTKCTL_EL1` = 0 (no toca timers), FP/SIMD deshabilitado | `dormilona` girando es terminada; `caos` |
 | Nadie fabrica ni amplía capacidades | Handles con generación; derechos que solo se atenúan; `GRANT` para moverlas | Lean: `no_forging`, `run_no_amplification`, `send_requires_grant`, `stale_handle_never_revives`; Kani sobre `kcore`; `intruso` |
+| Una interrupción va solo al driver de su línea, no satura la CPU y no se pierde | Una línea, un dueño (`IrqClaims`); la capacidad `Irq` sin `GRANT` ni `DUPLICATE`; el kernel enmascara al entregar y solo `irq_ack` con `CONTROL` desenmascara; al morir el dueño la línea queda enmascarada | Lean: `IrqModel.no_storm`, `no_lost_irq`, `ack_needs_owner`, `unowned_silent`, `claim_exclusive` (4 mutaciones las rompen); Kani: `claims_exclusive`, `intx_any`; `virtcon` intenta copiar y mandar su `Irq`; `intruso`: `irq_ack` sin capacidad, de un canal y de una memoria; ktest y los tests de migración y almacén exigen interrupciones reales |
 | Una cell solo toca el hardware que se le dio | `IoPorts` con desplazamientos relativos al rango; sin acceso a puertos fuera de él. En ARM64 el kernel asigna él mismo los BAR de E/S, y el acceso pasa por la ventana de E/S mapeada | `intruso`: puertos sin capacidad, con objetos de otro tipo. Kani: `io_ranges_disjoint` (dos rangos asignados nunca se solapan y caben en la ventana) y `pio_access_in_range` (el acceso cae entero en el rango y en la ventana) |
 | Un device tree roto o malicioso no rompe el kernel ni lo hace mapear memoria propia o de una cell como dispositivo (ARM64) | Lector sin índices sin verificar (`kcore::fdt`); toda región de dispositivo (UART, GIC, ECAM, ventana de E/S) se descarta si, redondeada a páginas, toca alguna región no reservada del mapa de memoria (`platform::mmio_allowed`) | Kani: `token_any`, `new_any`, `read_cells_any`, `reg_entry_any`, `translate_any` (sin pánicos, cada token avanza: todo recorrido termina), `mmio_never_touches_ram`, `ecam_addr_in_region`; tests en el host con cada byte de un árbol alterado, cada truncamiento y miles de árboles al azar (el iterador de nodos no entra en Kani) |
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
@@ -129,12 +130,27 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    una clave del almacén (o cifrado autenticado por objeto), cuotas por
    dueño, revocación de handles y un supervisor que cree las raíces.
 
+13. **Interrupciones: líneas compartidas y firmware de confianza.** Con
+   INTx, dos dispositivos pueden compartir una línea. El kernel se la da solo
+   al primer driver; el otro sondea y le pide a su dispositivo que no
+   interrumpa, pero un driver comprometido puede reactivar las interrupciones
+   de su dispositivo y despertar al dueño de la línea de más (o hacer que se
+   vuelva a disparar sin parar si nunca apaga su dispositivo): negación de
+   servicio para ese driver, nunca acceso. Qué línea usa cada dispositivo lo
+   dice el firmware (`Interrupt Line` en x86_64, `interrupt-map` del device
+   tree en ARM64) y el IOAPIC se supone en `0xFEC00000`; un firmware malo
+   puede cruzar líneas (otra vez negación de servicio). *Mitigación futura*:
+   MSI/MSI-X (una interrupción por dispositivo, sin compartir) y leer el
+   enrutamiento de ACPI.
+
 ## Supuestos de confianza
 
 * El kernel (con su `unsafe` registrado) es correcto en lo que no está
   demostrado. Lo demostrado en Lean es el *modelo*; el puente con el código
   son las trazas derivadas del modelo y las pruebas de Kani sobre `kcore`.
 * Los drivers con DMA son de confianza (ver punto 2).
+* El firmware dice qué línea de interrupción usa cada dispositivo (ver
+  punto 13).
 * El firmware (UEFI y su device tree) es de confianza en lo que no se
   valida (ver punto 11).
 * El supervisor `init` recibe las imágenes del kernel y decide qué crear:

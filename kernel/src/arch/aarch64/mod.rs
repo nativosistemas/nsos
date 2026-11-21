@@ -69,6 +69,31 @@ pub fn init_devices() {
     gic::init(d, c);
 }
 
+/// Líneas de interrupción para drivers: SPI del GIC.
+pub mod irq {
+    use super::gic;
+
+    /// ¿Se puede entregar a un driver?
+    pub fn valid(id: u32) -> bool {
+        gic::valid_spi(id)
+    }
+
+    /// Por nivel, hacia el núcleo 0, habilitada.
+    pub fn route(id: u32) {
+        gic::route_spi(id)
+    }
+
+    /// Enmascarar.
+    pub fn mask(id: u32) {
+        gic::disable(id)
+    }
+
+    /// Desenmascarar.
+    pub fn unmask(id: u32) {
+        gic::enable(id)
+    }
+}
+
 /// Semilla para el nonce del enlace entre máquinas. Una cell en EL0 no
 /// puede saber si la CPU tiene `RNDR` (y la Cortex-A76 no lo tiene), así
 /// que el kernel la deriva de la semilla que deja el firmware en el device

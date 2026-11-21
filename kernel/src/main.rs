@@ -15,6 +15,7 @@ mod arch;
 mod boot;
 mod cell;
 mod console;
+mod irq;
 mod ktest;
 mod mm;
 mod pci;
@@ -319,7 +320,9 @@ fn boot_virtio_console(
     };
     let virtcon = module("virtcon").ok_or("falta el módulo virtcon")?;
     let hola = module("hola").ok_or("falta el módulo hola")?;
-    cell::spawn("virtcon", virtcon, alloc::vec![ports, ring, buf, chan(a)]).map_err(&report)?;
+    let mut caps = alloc::vec![ports, ring, buf, chan(a)];
+    caps.extend(dev.irq_cap()); // slot 5, si la línea se pudo entregar
+    cell::spawn("virtcon", virtcon, caps).map_err(&report)?;
     cell::spawn("hola", hola, alloc::vec![chan(b)]).map_err(&report)?;
     Ok(())
 }

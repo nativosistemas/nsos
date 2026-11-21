@@ -42,6 +42,8 @@ casos borde.
 | `check_item_any` | `crates/kcore/src/wait.rs` | Un ítem de `wait` aceptado pide al menos una señal, todas emitibles por el tipo de su objeto, con `reserved` en 0; memoria, puertos e imágenes nunca se aceptan. |
 | `channel_signals_any` | `crates/kcore/src/wait.rs` | Con cualquier estado de canal, las señales son las del tipo y dicen exactamente lo que harían `recv` y `send`: `READABLE` sii hay mensaje, `PEER_CLOSED` sii el peer cerró, `WRITABLE` sii está abierto y su cola tiene lugar. |
 | `deadline_any` | `crates/kcore/src/wait.rs` | El plazo de `wait` nunca desborda: con `At(d)`, `d = now + timeout` exacto y no vence antes; si no entra en 64 bits es "sin plazo". |
+| `claims_exclusive` | `crates/kcore/src/irq.rs` | Una línea de interrupción reclamada no se vuelve a entregar hasta soltarla, reclamar o soltar otra no la cambia, y las líneas fuera de rango nunca se entregan. |
+| `intx_any` | `crates/kcore/src/irq.rs` | Con cualquier `interrupt-map` de hasta dos entradas y cualquier máscara: sin pánicos, y todo INTID que devuelve la búsqueda es una SPI válida (32 a 1019). |
 | `ecam_addr_in_region` | `crates/kcore/src/platform.rs` | La página de configuración de cualquier función PCI cae entera dentro de la región ECAM. |
 
 | `decode_entry_any` | `crates/store/src/layout.rs` | Con cualquier entrada de 128 bytes leída del disco y cualquier tamaño de disco: sin panics ni overflows; si se acepta, el nombre es válido, los datos caen dentro del disco y fuera de las ranuras de superbloque, y codificarla da los mismos bytes. |
@@ -61,6 +63,12 @@ solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
 
 Activar `WRITABLE` aunque el peer esté cerrado (cambiar el `else if` de
 `channel_signals` por un `if`) hace fallar `channel_signals_any`.
+
+### Mutaciones de las interrupciones
+
+Reclamar una línea sin mirar si ya tiene dueño hace fallar
+`claims_exclusive`; aceptar del `interrupt-map` una SPI mayor que 987 (un
+INTID fuera de rango) hace fallar `intx_any`.
 
 ### Mutaciones del device tree y de la plataforma
 

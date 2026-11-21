@@ -85,6 +85,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::CellSpawn => cell_spawn(cell, h(a0), a1, a2),
         Syscall::CellKill => cell_kill(cell, h(a0)),
         Syscall::CellStatus => cell_status(cell, h(a0), a1, a2),
+        Syscall::IrqAck => irq_ack(cell, h(a0)),
         Syscall::IoPortRead => ioport(cell, h(a0), a1, a2, None),
         Syscall::IoPortWrite => ioport(cell, h(a0), a1, a2, Some(a3)),
         _ => Err(Error::Unsupported),
@@ -308,6 +309,17 @@ fn mem_info(cell: &Cell, h: CapHandle, out: u64) -> SysResult<u64> {
     Ok(0)
 }
 
+/// `irq_ack(h)`: con `CONTROL` sobre una línea, borra `IRQ_PENDING` y la
+/// desenmascara (`IrqModel.ack_needs_owner`).
+fn irq_ack(cell: &Cell, h: CapHandle) -> SysResult<u64> {
+    let line = match &cell.cspace.lock().get_with(h, Rights::CONTROL)?.object {
+        KObject::Irq(i) => i.clone(),
+        _ => return Err(Error::WrongType),
+    };
+    line.ack();
+    Ok(0)
+}
+
 /// `ioport_read(h, off, width)` / `ioport_write(h, off, width, valor)`.
 /// `off` es relativo al inicio del rango; el acceso entero debe caer dentro.
 fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -> SysResult<u64> {
@@ -439,6 +451,7 @@ fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
 enum Watched {
     Channel(Arc<cell::Endpoint>),
     Cell(Arc<Cell>),
+    Irq(Arc<crate::irq::IrqLine>),
 }
 
 impl Watched {
@@ -448,6 +461,7 @@ impl Watched {
         match self {
             Watched::Channel(e) => e.watch(wanted, register),
             Watched::Cell(c) => nsos_kcore::wait::cell_signals(c.watch_exit(register)),
+            Watched::Irq(i) => nsos_kcore::wait::irq_signals(i.watch(register)),
         }
     }
 }
@@ -489,6 +503,7 @@ fn wait(cell: &Cell, uptr: u64, n: u64, timeout: u64) -> SysResult<u64> {
                 match &c.object {
                     KObject::Channel(e) => Ok(Watched::Channel(e.clone())),
                     KObject::Cell(x) => Ok(Watched::Cell(x.clone())),
+                    KObject::Irq(x) => Ok(Watched::Irq(x.clone())),
                     // `check_item` ya rechazó los tipos que no emiten señales.
                     _ => Err(Error::WrongType),
                 }
