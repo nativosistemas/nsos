@@ -411,9 +411,46 @@ impl Endpoint {
     }
 
     /// Devuelve un mensaje al frente de la cola (si el receptor no pudo
-    /// aceptarlo, p. ej. por CSpace lleno).
+    /// aceptarlo, p. ej. por CSpace lleno). Vuelve a haber un mensaje: se
+    /// despierta a quienes esperaban `READABLE` (como `raise` en
+    /// `verification/lean/Nsos/Wait.lean`).
     pub fn unrecv(&self, m: QueuedMsg) {
-        self.pair.sides.lock()[self.side].queue.push_front(m);
+        let mut sides = self.pair.sides.lock();
+        let me = &mut sides[self.side];
+        me.queue.push_front(m);
+        wake_all(&mut me.recv_waiters);
+    }
+
+    /// Paso `scan` de `wait` para este extremo, bajo el lock del canal:
+    /// devuelve las señales activas y, si `register`, deja anotado al hilo
+    /// actual en la lista de espera de cada señal pedida en `wanted`:
+    /// * `READABLE` y `PEER_CLOSED` en la de este extremo (la despiertan
+    ///   `send` y el cierre de cualquiera de las dos puntas);
+    /// * `WRITABLE` en la de quienes envían hacia el peer (la despiertan
+    ///   `recv` del peer y el cierre).
+    pub fn watch(&self, wanted: u32, register: bool) -> u32 {
+        use nsos_abi::cap::signals::{PEER_CLOSED, READABLE, WRITABLE};
+        let mut sides = self.pair.sides.lock();
+        if register {
+            let me = sched::current();
+            let add = |list: &mut Vec<ThreadId>| {
+                if !list.contains(&me) {
+                    list.push(me);
+                }
+            };
+            if wanted & (READABLE | PEER_CLOSED) != 0 {
+                add(&mut sides[self.side].recv_waiters);
+            }
+            if wanted & WRITABLE != 0 {
+                add(&mut sides[self.peer()].send_waiters);
+            }
+        }
+        nsos_kcore::wait::channel_signals(nsos_kcore::wait::ChannelState {
+            queued: sides[self.side].queue.len(),
+            peer_closed: sides[self.peer()].closed,
+            peer_queued: sides[self.peer()].queue.len(),
+            limit: QUEUE_LIMIT,
+        })
     }
 }
 
@@ -507,6 +544,19 @@ impl Cell {
     /// ¿Se pidió terminarla?
     pub fn kill_requested(&self) -> bool {
         self.kill.load(Ordering::Acquire)
+    }
+
+    /// Paso `scan` de `wait` para `CELL_EXITED`: ¿ya terminó? Si sigue viva
+    /// y `register`, deja anotado al hilo actual (lo despierta `terminate`).
+    pub fn watch_exit(&self, register: bool) -> bool {
+        let mut g = self.exit.lock();
+        if g.0.is_none() && register {
+            let me = sched::current();
+            if !g.1.contains(&me) {
+                g.1.push(me);
+            }
+        }
+        g.0.is_some()
     }
 
     /// Cómo terminó, o `None` si sigue viva. Con `wait`, si sigue viva deja

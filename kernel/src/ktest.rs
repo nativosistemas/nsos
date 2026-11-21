@@ -662,6 +662,10 @@ pub fn run_cells() -> bool {
         status("caos") == Some(Exited(0)),
     );
     check(
+        "espera: semántica de wait (plazos y señales) y termina con 0",
+        status("espera") == Some(Exited(0)),
+    );
+    check(
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),
     );
@@ -692,12 +696,12 @@ pub fn run_cells() -> bool {
         ),
     );
     check(
-        "dormilona (bloqueada y girando) terminada por cell_kill",
+        "dormilona (bloqueada, girando y en wait) terminada por cell_kill",
         exits
             .iter()
             .filter(|(n, s)| n == "dormilona" && *s == Killed)
             .count()
-            == 2,
+            == 3,
     );
     if crate::virtio_console_present() {
         check(

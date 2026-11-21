@@ -83,6 +83,31 @@ pub fn channel_recv(h: CapHandle, m: &mut Message, flags: u64) -> SysResult<()> 
     .map(|_| ())
 }
 
+/// Espera a que algún ítem tenga activa una de sus señales pedidas
+/// (`wanted`) y devuelve cuántos lo están; en `observed` quedan las señales
+/// activas de cada uno. `timeout_ns` es relativo: `0` solo mira y
+/// [`abi::syscall::WAIT_FOREVER`] no vence. Si vence: `TimedOut`.
+pub fn wait(items: &mut [abi::syscall::WaitItem], timeout_ns: u64) -> SysResult<usize> {
+    decode_ret(syscall4(
+        Syscall::Wait,
+        items.as_mut_ptr() as u64,
+        items.len() as u64,
+        timeout_ns,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Un ítem de [`wait`] para `h` con las señales `wanted`.
+pub fn wait_item(h: CapHandle, wanted: u32) -> abi::syscall::WaitItem {
+    abi::syscall::WaitItem {
+        handle: h.0,
+        wanted,
+        observed: 0,
+        reserved: 0,
+    }
+}
+
 /// Duplica una capacidad con derechos atenuados.
 pub fn cap_dup(h: CapHandle, mask: Rights) -> SysResult<CapHandle> {
     decode_ret(syscall4(

@@ -10,3 +10,4 @@ import Nsos.Store
 import Nsos.Ipc
 import Nsos.Migration
 import Nsos.Link
+import Nsos.Wait

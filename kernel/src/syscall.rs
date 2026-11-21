@@ -78,6 +78,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::ChannelCreate => channel_create(cell, a0),
         Syscall::ChannelSend => channel_send(cell, h(a0), a1, a2),
         Syscall::ChannelRecv => channel_recv(cell, h(a0), a1, a2),
+        Syscall::Wait => wait(cell, a0, a1, a2),
         Syscall::MemCreate => mem_create(cell, a0, a1),
         Syscall::MemMap => mem_map(cell, h(a0), a1, a2),
         Syscall::MemInfo => mem_info(cell, h(a0), a1),
@@ -432,6 +433,107 @@ fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
     m.caps[..handles.len()].copy_from_slice(&handles);
     copy_to_user(cell, uptr, &m.to_bytes())?;
     Ok(0)
+}
+
+/// Objeto que se puede esperar con `wait`.
+enum Watched {
+    Channel(Arc<cell::Endpoint>),
+    Cell(Arc<Cell>),
+}
+
+impl Watched {
+    /// Paso `scan` del modelo (`verification/lean/Nsos/Wait.lean`): señales
+    /// activas y, si `register`, el hilo queda anotado en las pedidas.
+    fn watch(&self, wanted: u32, register: bool) -> u32 {
+        match self {
+            Watched::Channel(e) => e.watch(wanted, register),
+            Watched::Cell(c) => nsos_kcore::wait::cell_signals(c.watch_exit(register)),
+        }
+    }
+}
+
+/// `wait(items, n, timeout_ns) -> n_ready`.
+///
+/// Sigue el modelo `Nsos.WaitModel`: primero marca al hilo bloqueado
+/// (`start`), después recorre los ítems registrándose y mirando cada uno bajo
+/// el lock de su objeto (`scan`; si alguno está listo se despierta a sí
+/// mismo) y recién entonces cede la CPU (`finish`). Al volver (`resume`)
+/// mira todo de nuevo. Así ningún evento que ocurra durante el recorrido se
+/// pierde (`no_lost_wakeup`).
+fn wait(cell: &Cell, uptr: u64, n: u64, timeout: u64) -> SysResult<u64> {
+    use nsos_abi::syscall::WaitItem;
+    use nsos_kcore::wait::{self as w, Deadline, WAIT_MAX};
+    let n = usize::try_from(n).map_err(|_| Error::InvalidArgs)?;
+    if n == 0 || n > WAIT_MAX {
+        return Err(Error::InvalidArgs);
+    }
+    let mut raw = [0u8; WaitItem::SIZE * WAIT_MAX];
+    let raw = &mut raw[..WaitItem::SIZE * n];
+    copy_from_user(cell, uptr, raw)?;
+    copy_to_user(cell, uptr, raw)?; // la respuesta va al mismo arreglo
+    let mut items: alloc::vec::Vec<WaitItem> = raw
+        .as_chunks::<{ WaitItem::SIZE }>()
+        .0
+        .iter()
+        .map(WaitItem::from_bytes)
+        .collect();
+    // Resolver los handles una vez: cada uno con `WAIT` y señales que su
+    // objeto pueda emitir. Las referencias mantienen vivos los objetos.
+    let watched: alloc::vec::Vec<Watched> = {
+        let cs = cell.cspace.lock();
+        items
+            .iter()
+            .map(|it| {
+                let c = cs.get_with(CapHandle(it.handle), Rights::WAIT)?;
+                w::check_item(it, c.object.object_type())?;
+                match &c.object {
+                    KObject::Channel(e) => Ok(Watched::Channel(e.clone())),
+                    KObject::Cell(x) => Ok(Watched::Cell(x.clone())),
+                    // `check_item` ya rechazó los tipos que no emiten señales.
+                    _ => Err(Error::WrongType),
+                }
+            })
+            .collect::<SysResult<_>>()?
+    };
+    let deadline = w::deadline(crate::arch::time::now_ns(), timeout);
+    let block = deadline != Deadline::Poll;
+    let r = loop {
+        if block {
+            sched::block_current(); // start
+        }
+        let mut ready = 0;
+        for (it, x) in items.iter_mut().zip(&watched) {
+            it.observed = x.watch(it.wanted, block); // scan
+            if w::ready(it) {
+                ready += 1;
+            }
+        }
+        if ready > 0 || w::expired(deadline, crate::arch::time::now_ns()) {
+            if block {
+                sched::wake(sched::current()); // seguimos corriendo
+            }
+            break if ready > 0 {
+                Ok(ready as u64)
+            } else {
+                Err(Error::TimedOut)
+            };
+        }
+        if let Deadline::At(d) = deadline {
+            sched::wake_at(d);
+        }
+        // finish + resume; con `cell_kill` pendiente, abandona.
+        if let Err(e) = sleep(cell) {
+            break Err(e);
+        }
+    };
+    if block {
+        sched::cancel_wake_at();
+    }
+    for (chunk, it) in raw.chunks_mut(WaitItem::SIZE).zip(&items) {
+        chunk.copy_from_slice(&it.to_bytes());
+    }
+    copy_to_user(cell, uptr, raw)?;
+    r
 }
 
 /// Una cell causó una excepción de CPU (`vector`: código de la

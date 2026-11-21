@@ -14,10 +14,10 @@
 //! vuelve a arrancar (hasta `MAX_ATTEMPTS`). El resto del sistema sigue
 //! corriendo mientras tanto.
 //!
-//! Fase 2, terminación: arranca `dormilona` dos veces (bloqueada en el
-//! kernel y girando en anillo 3), comprueba que sigue viva, la mata con
-//! `cell_kill` y verifica que terminó como `KILLED` y que su canal quedó
-//! cerrado.
+//! Fase 2, terminación: arranca `dormilona` tres veces (bloqueada en el
+//! kernel, girando en anillo 3 y dormida en `wait`), comprueba que sigue
+//! viva, la mata con `cell_kill`, la espera con `wait` (`CELL_EXITED`) y
+//! verifica que terminó como `KILLED` y que su canal quedó cerrado.
 //!
 //! Fase 3, actualización en vivo (modelo:
 //! `verification/lean/Nsos/Upgrade.lean`): arranca `contador-v1` y su
@@ -39,20 +39,22 @@
 #![no_main]
 #![deny(unsafe_code)]
 
+use nsos_rt::abi::cap::signals;
 use nsos_rt::abi::msg::labels::{
     UPGRADE_ACCEPT, UPGRADE_COMMIT, UPGRADE_PREPARE, UPGRADE_REJECT, UPGRADE_RESTORE,
     UPGRADE_ROLLBACK, UPGRADE_STATE,
 };
-use nsos_rt::abi::syscall::{cell_state, flags, CellStatus};
+use nsos_rt::abi::syscall::{cell_state, flags, CellStatus, WAIT_FOREVER};
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
     bootstrap, cap_drop, cap_dup, cell_kill, cell_spawn, cell_status, channel_create, channel_recv,
-    channel_send, println, yield_now,
+    channel_send, println, wait, wait_item, yield_now,
 };
 
 const ATTEMPT: u64 = 1;
 const READY: u64 = 2;
 const SPIN: u64 = 3;
+const WAIT: u64 = 4;
 const MAX_ATTEMPTS: u32 = 5;
 
 nsos_rt::entry!(main);
@@ -104,11 +106,24 @@ fn restart_phase(image: CapHandle) -> Result<u32, Error> {
     Err(Error::TimedOut)
 }
 
-fn kill_phase(image: CapHandle, spin: bool) -> Result<(), Error> {
+/// Cómo espera `dormilona` a que la maten.
+#[derive(Clone, Copy)]
+enum Sleep {
+    /// Bloqueada en `channel_recv`.
+    Blocked,
+    /// Girando en anillo 3.
+    Spinning,
+    /// Bloqueada en `wait` sobre un canal propio que nunca recibe nada.
+    Waiting,
+}
+
+fn kill_phase(image: CapHandle, how: Sleep) -> Result<(), Error> {
     let (mine, theirs) = channel_create()?;
     let child = cell_spawn(image, &[theirs])?;
-    if spin {
-        channel_send(mine, &Message::new(SPIN, &[]).unwrap(), 0)?;
+    match how {
+        Sleep::Blocked => {}
+        Sleep::Spinning => channel_send(mine, &Message::new(SPIN, &[]).unwrap(), 0)?,
+        Sleep::Waiting => channel_send(mine, &Message::new(WAIT, &[]).unwrap(), 0)?,
     }
     for _ in 0..10 {
         yield_now();
@@ -119,10 +134,26 @@ fn kill_phase(image: CapHandle, spin: bool) -> Result<(), Error> {
         return Err(Error::BadMessage);
     }
     cell_kill(child)?;
-    let after = cell_status(child, 0)?;
+    // Dormir en `wait` hasta que termine (`CELL_EXITED`); su canal ya tiene
+    // que estar cerrado: con plazo 0, `wait` lo ve enseguida.
+    let mut ex = [wait_item(child, signals::CELL_EXITED)];
+    if wait(&mut ex, WAIT_FOREVER)? != 1 || ex[0].observed != signals::CELL_EXITED {
+        println!("init: wait no vio terminar a dormilona");
+        return Err(Error::BadMessage);
+    }
+    let mut pc = [wait_item(mine, signals::PEER_CLOSED)];
+    if wait(&mut pc, 0)? != 1 {
+        println!("init: wait no vio cerrado el canal de dormilona");
+        return Err(Error::BadMessage);
+    }
+    let after = cell_status(child, flags::NONBLOCK)?;
     println!(
         "init: dormilona ({}): {}",
-        if spin { "girando" } else { "bloqueada" },
+        match how {
+            Sleep::Blocked => "bloqueada",
+            Sleep::Spinning => "girando",
+            Sleep::Waiting => "en wait",
+        },
         describe(&after)
     );
     if after.state != cell_state::KILLED {
@@ -289,8 +320,8 @@ fn main() -> i32 {
             return 1;
         }
     }
-    for spin in [false, true] {
-        if let Err(e) = kill_phase(dormilona, spin) {
+    for how in [Sleep::Blocked, Sleep::Spinning, Sleep::Waiting] {
+        if let Err(e) = kill_phase(dormilona, how) {
             println!("init: fase de terminación falló: {:?}", e);
             return 2;
         }
