@@ -274,6 +274,25 @@ fn abuse_wait(m: u64, a: CapHandle, b: CapHandle) -> bool {
         s4(Syscall::IrqAck, m, 0, 0, 0),
         Error::AccessDenied,
     );
+    // Un mensaje válido (todo a cero) en la pila: escribible, como pide
+    // `channel_call` para la respuesta.
+    let mut msg_buf = [0u8; nsos_rt::abi::msg::MSG_SIZE];
+    let pm = core::hint::black_box(msg_buf.as_mut_ptr()) as u64;
+    ok &= expect(
+        "channel_call con el mensaje en el kernel",
+        s4(Syscall::ChannelCall, a.0 as u64, KERNEL_ADDR, 0, 0),
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "channel_call sin capacidad",
+        s4(Syscall::ChannelCall, 0x7_0000, pm, 0, 0),
+        Error::BadHandle,
+    );
+    ok &= expect(
+        "channel_call sobre una memoria",
+        s4(Syscall::ChannelCall, m, pm, 0, 0),
+        Error::AccessDenied,
+    );
     // Un ítem malo invalida la llamada entera, aunque otro esté bien.
     items[0] = item(a.0 as u64, READABLE, 0);
     items[1] = item(m, READABLE, 0);

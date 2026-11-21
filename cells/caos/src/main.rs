@@ -5,7 +5,7 @@
 //! handles inventados o propios, punteros al kernel, a su código, a su pila
 //! o sin mapear, tamaños y flags arbitrarios. Lo único que se acota es lo
 //! que la dejaría bloqueada para siempre (las esperas van con `NONBLOCK` o
-//! plazo 0) o que podría quitarle memoria a las demás cells (objetos de memoria
+//! plazo 0, también `channel_call`) o que podría quitarle memoria a las demás cells (objetos de memoria
 //! chicos). Nunca llama a `exit` al azar.
 //!
 //! El kernel tiene que devolver un error o un resultado válido en cada
@@ -91,7 +91,7 @@ fn main() -> i32 {
             a[2] = 0; // plazo 0: solo mira, nunca duerme
         }
         if n == Syscall::ChannelCall as u64 {
-            a[2] = 0; // sin implementar: debe devolver Unsupported
+            a[2] = 0; // plazo 0: ni el envío ni la respuesta esperan
         }
         if n == Syscall::DebugLog as u64 && a[0] < 0x0000_8000_0000_0000 {
             // No llenar la consola de basura: aquí solo punteros inválidos

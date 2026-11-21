@@ -381,6 +381,40 @@ theorem send_revokes {s : MSys} {a b : Nat} {c : MCap} (hne : a ≠ b)
   obtain ⟨c', hc', hal⟩ := List.any_eq_true.1 hk
   exact hlast c' hc' (allows_obj hal)
 
+/-! ## `mem_unmap`
+
+`mem_unmap` (hito 13) es una sucesión de pasos `unmap`, uno por página del
+objeto. Como todo paso, conserva el aislamiento (`step_iso`). Además: -/
+
+/-- Quitar la página `v` a la cell `a`. -/
+def unmapPage (s : MSys) (a v : Nat) : MSys :=
+  s.set a { s.cells a with maps := (s.cells a).maps.filter (·.vpage != v) }
+
+/-- Después de `unmap`, la cell no tiene ningún mapeo en esa página: un acceso
+ahí es un fallo de página. -/
+theorem unmap_removes (s : MSys) (a v : Nat) :
+    ∀ m, m ∈ ((unmapPage s a v).cells a).maps → m.vpage ≠ v := by
+  intro m hm
+  simp only [unmapPage, set_cells, ite_true, List.mem_filter] at hm
+  simpa using hm.2
+
+/-- `unmap` solo achica: no agrega mapeos, no toca capacidades, ni a otras
+cells, ni a los dueños de los marcos. -/
+theorem unmap_only_shrinks (s : MSys) (a v : Nat) :
+    (∀ m, m ∈ ((unmapPage s a v).cells a).maps → m ∈ (s.cells a).maps) ∧
+    ((unmapPage s a v).cells a).caps = (s.cells a).caps ∧
+    (∀ b, b ≠ a → (unmapPage s a v).cells b = s.cells b) ∧
+    (unmapPage s a v).owner = s.owner := by
+  refine ⟨fun m hm => ?_, ?_, fun b hb => ?_, rfl⟩
+  · simp only [unmapPage, set_cells, ite_true, List.mem_filter] at hm
+    exact hm.1
+  · simp [unmapPage, set_cells]
+  · simp [unmapPage, set_cells, hb]
+
+/-- `unmapPage` es un paso del modelo, así que conserva el aislamiento. -/
+theorem unmap_iso {s : MSys} (h : Iso s) (a v : Nat) : Iso (unmapPage s a v) :=
+  step_iso h Step.unmap
+
 /-- Un sistema sin mapeos cumple el invariante. -/
 theorem iso_empty {s : MSys} (h : ∀ a, (s.cells a).maps = []) : Iso s := by
   intro a m hm

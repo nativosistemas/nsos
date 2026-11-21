@@ -49,6 +49,7 @@ Política:
 | `kernel/src/syscall.rs` (`ioport`) | `in`/`out` en nombre de un driver | el puerto es `base + off` con `off + width` dentro del rango de la capacidad `IoPorts` |
 | `cells/rt/src/lib.rs` | instrucción `syscall` (`svc #0` en ARM64), `_start`, accesos volátiles de `Mapped`, `rdrand` | convención del ABI; el kernel valida todo argumento; `Mapped` solo existe tras un `mem_map` exitoso y cada acceso comprueba rango y alineación; `rdrand` solo si CPUID lo reporta |
 | `cells/intruso/src/main.rs` | leer memoria del kernel a propósito | test de aislamiento: se espera #PF y que el kernel termine la cell |
+| `cells/desmapeo/src/main.rs` | leer una página desmapeada a propósito | prueba de `mem_unmap`: se espera #PF y que el kernel termine la cell |
 | `cells/fragil/src/main.rs` | escribir en la dirección 0 a propósito | test del supervisor: se espera #PF y un reinicio |
 
 Revisión automática: `tools/audit-unsafe.sh` (en `make lint` y en la CI)

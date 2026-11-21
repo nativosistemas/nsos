@@ -656,8 +656,19 @@ pub fn run_cells() -> bool {
         status("caos") == Some(Exited(0)),
     );
     check(
-        "espera: semántica de wait (plazos y señales) y termina con 0",
+        "espera: semántica de wait y channel_call y termina con 0",
         status("espera") == Some(Exited(0)),
+    );
+    check(
+        "desmapeo: mem_unmap y #PF al leer la página desmapeada",
+        matches!(
+            status("desmapeo"),
+            Some(Faulted {
+                vector: crate::arch::FAULT_PAGE,
+                addr: 0x5800_0000,
+                ..
+            })
+        ),
     );
     check(
         "init (supervisor) terminó con 0",

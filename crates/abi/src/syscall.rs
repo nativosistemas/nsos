@@ -38,7 +38,9 @@ pub enum Syscall {
     /// `channel_recv(h, msg: *mut Message, flags)`.
     ChannelRecv = 22,
     /// `channel_call(h, msg: *mut Message, timeout_ns)`: send + recv de la
-    /// respuesta en el mismo canal (camino rápido para RPC síncrono).
+    /// respuesta en el mismo canal (RPC síncrono); la respuesta se escribe
+    /// sobre `msg`. Requiere `SEND` y `RECV`; `msg` no puede adjuntar `h`.
+    /// `timeout_ns` como en `wait`.
     ChannelCall = 23,
 
     // ---- Espera (3x) ----
@@ -53,7 +55,8 @@ pub enum Syscall {
     MemCreate = 40,
     /// `mem_map(h, vaddr_hint, rights) -> vaddr`.
     MemMap = 41,
-    /// `mem_unmap(vaddr, len)`.
+    /// `mem_unmap(vaddr, len)`: quita el mapeo de un objeto `Memory` que
+    /// empieza en `vaddr` y mide exactamente `len` (el objeto entero).
     MemUnmap = 42,
     /// `mem_info(h, out: *mut MemInfo)`: tamaño y, si la capacidad tiene
     /// `CONTROL`, la dirección física (solo para DMA de drivers).
