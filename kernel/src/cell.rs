@@ -775,6 +775,31 @@ impl Cell {
         Ok(())
     }
 
+    /// `mem_unmap(vaddr, len)`: quita el mapeo de un objeto de memoria que
+    /// empieza en `vaddr` y mide exactamente `len` (elegido por
+    /// `nsos_kcore::paging::unmap_target`, verificado con Kani). Primero las
+    /// páginas de la tabla y recién después suelta la referencia al objeto,
+    /// fuera de los locks: los marcos no se liberan mientras estén mapeados.
+    /// Modelo: `Mem.unmap_removes`, `Mem.unmap_only_shrinks`.
+    pub fn unmap_memory(&self, vaddr: u64, len: u64) -> Result<(), Error> {
+        let m = {
+            let mut maps = self.mappings.lock();
+            let spans: Vec<(u64, u64)> = maps.iter().map(|m| (m.vaddr, m.obj.size())).collect();
+            let i =
+                nsos_kcore::paging::unmap_target(&spans, vaddr, len).ok_or(Error::InvalidArgs)?;
+            maps.swap_remove(i)
+        };
+        let mut g = self.space.lock();
+        if let Some(space) = g.as_mut() {
+            for i in 0..m.obj.pages as u64 {
+                space.unmap(m.vaddr + i * PAGE_SIZE);
+            }
+        }
+        drop(g);
+        drop(m);
+        Ok(())
+    }
+
     /// Revocación: quita los mapeos de objetos de memoria para los que la
     /// cell ya no tiene una capacidad con los derechos del mapeo (porque la
     /// envió, la pasó a una cell hija o la soltó). Se llama después de toda

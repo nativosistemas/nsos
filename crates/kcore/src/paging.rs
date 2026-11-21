@@ -202,10 +202,32 @@ pub fn user_range_ok(vaddr: u64, size: u64, min: u64, max: u64) -> bool {
         }
 }
 
+/// `mem_unmap(vaddr, len)`: cuál de los mapeos de objetos `Memory` de la
+/// cell (`(dirección, tamaño)` de cada uno) se quita. Tiene que coincidir
+/// exactamente con uno: misma dirección y mismo tamaño (un objeto se mapea y
+/// se desmapea entero). Así nunca se quita una página de código, de la pila
+/// ni de otro objeto, y nunca queda medio objeto mapeado.
+pub fn unmap_target(maps: &[(u64, u64)], vaddr: u64, len: u64) -> Option<usize> {
+    if len == 0 || !vaddr.is_multiple_of(PAGE_SIZE) {
+        return None;
+    }
+    maps.iter().position(|&(v, l)| v == vaddr && l == len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn unmap_target_matches_exactly() {
+        let maps = [(0x5000_0000, 0x2000), (0x6000_0000, 0x1000)];
+        assert_eq!(unmap_target(&maps, 0x6000_0000, 0x1000), Some(1));
+        assert_eq!(unmap_target(&maps, 0x5000_0000, 0x1000), None); // medio objeto
+        assert_eq!(unmap_target(&maps, 0x5000_1000, 0x1000), None);
+        assert_eq!(unmap_target(&maps, 0x5000_0000, 0), None);
+        assert_eq!(unmap_target(&maps, 0x7000_0000, 0x1000), None);
+    }
     use alloc::vec::Vec;
 
     /// Tablas en un vector: la tabla `k` está en la física `(k + 1) * 4096`.
@@ -458,6 +480,27 @@ mod proofs {
             assert_eq!(translate(&m, PAGE_SIZE, b), Some(pb));
         }
         assert!(!m.touched_kernel);
+    }
+
+    /// `mem_unmap` solo quita un mapeo que coincide exactamente (dirección y
+    /// tamaño), alineado y no vacío; si no hay ninguno, no quita nada.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn unmap_target_exact() {
+        let maps: [(u64, u64); 3] = kani::any();
+        let (vaddr, len): (u64, u64) = (kani::any(), kani::any());
+        match unmap_target(&maps, vaddr, len) {
+            Some(i) => {
+                // Exactamente ese mapeo, y el primero que coincide.
+                assert!(i < maps.len());
+                assert!(maps[i] == (vaddr, len));
+                assert!(len > 0 && vaddr % PAGE_SIZE == 0);
+                assert!(maps[..i].iter().all(|&m| m != (vaddr, len)));
+            }
+            None => assert!(
+                len == 0 || vaddr % PAGE_SIZE != 0 || maps.iter().all(|&m| m != (vaddr, len))
+            ),
+        }
     }
 
     /// Un rango que `user_range_ok` acepta no desborda y queda entero en la

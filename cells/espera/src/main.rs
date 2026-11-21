@@ -1,4 +1,5 @@
-//! Cell `espera`: pruebas de la syscall `wait` (hito 12).
+//! Cell `espera`: pruebas de las syscalls `wait` (hito 12) y `channel_call`
+//! (hito 13).
 //!
 //! Arranca sin capacidades, crea sus propios canales y comprueba la
 //! semántica de `wait`: con plazo 0 solo mira; con plazo vence a tiempo;
@@ -8,6 +9,11 @@
 //! esperado. Las esperas entre cells las prueban `contador-v1` (duerme en
 //! `wait` hasta que el `cliente` le escribe) e `init` (`CELL_EXITED` y
 //! `cell_kill` de una cell dormida en `wait`).
+//!
+//! `channel_call`: con la respuesta ya en la cola vuelve enseguida con ella
+//! (y el pedido llegó al otro extremo); sin respuesta vence el plazo (el
+//! pedido igual se mandó); adjuntar el propio extremo o no tener `RECV` se
+//! rechaza sin mandar nada. Entre cells lo usan `cliente` y `bench`.
 
 #![no_std]
 #![no_main]
@@ -15,9 +21,10 @@
 
 use nsos_rt::abi::cap::signals::{PEER_CLOSED, READABLE, WRITABLE};
 use nsos_rt::abi::syscall::flags::NONBLOCK;
-use nsos_rt::abi::{Error, Message};
+use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    cap_drop, channel_create, channel_recv, channel_send, clock_ns, println, wait, wait_item,
+    cap_drop, cap_dup, channel_call, channel_create, channel_recv, channel_send, clock_ns, println,
+    wait, wait_item,
 };
 
 /// Plazo de la espera que tiene que vencer.
@@ -92,10 +99,70 @@ fn run() -> Result<bool, Error> {
     Ok(ok)
 }
 
+/// `b` tiene exactamente un mensaje con etiqueta `label`.
+fn got_one(b: CapHandle, label: u64) -> bool {
+    let mut m = Message::default();
+    channel_recv(b, &mut m, NONBLOCK).is_ok()
+        && m.header.label == label
+        && channel_recv(b, &mut m, NONBLOCK) == Err(Error::WouldBlock)
+}
+
+fn call_tests() -> Result<bool, Error> {
+    const REQ: u64 = 10;
+    const REP: u64 = 11;
+    let mut ok = true;
+    let (a, b) = channel_create()?;
+
+    channel_send(b, &Message::new(REP, b"listo").unwrap(), 0)?;
+    let mut m = Message::new(REQ, b"pedido").unwrap();
+    let r = channel_call(a, &mut m, 0);
+    ok &= check(
+        "call con la respuesta en la cola: la recibe",
+        r == Ok(()) && m.header.label == REP && m.payload() == b"listo",
+    );
+    ok &= check("  y el pedido llegó al otro extremo", got_one(b, REQ));
+
+    let mut m = Message::new(REQ, b"").unwrap();
+    let t0 = clock_ns();
+    let r = channel_call(a, &mut m, SLEEP_NS);
+    let dt = clock_ns().saturating_sub(t0);
+    ok &= check(
+        "call sin respuesta: TimedOut al vencer el plazo",
+        r == Err(Error::TimedOut) && dt >= SLEEP_NS,
+    );
+    ok &= check("  pero el pedido se mandó", got_one(b, REQ));
+
+    let mut m = Message::new(REQ, b"").unwrap();
+    m.push_cap(a)?;
+    ok &= check(
+        "call adjuntando su propio extremo: InvalidArgs",
+        channel_call(a, &mut m, 0) == Err(Error::InvalidArgs),
+    );
+    let only_send = cap_dup(a, Rights::SEND | Rights::DUPLICATE)?;
+    let mut m = Message::new(REQ, b"").unwrap();
+    ok &= check(
+        "call sin derecho RECV: AccessDenied",
+        channel_call(only_send, &mut m, 0) == Err(Error::AccessDenied),
+    );
+    let mut m = Message::default();
+    ok &= check(
+        "  ninguno de los dos mandó nada",
+        channel_recv(b, &mut m, NONBLOCK) == Err(Error::WouldBlock),
+    );
+
+    cap_drop(b)?;
+    let mut m = Message::new(REQ, b"").unwrap();
+    ok &= check(
+        "call con el peer cerrado: PeerClosed",
+        channel_call(a, &mut m, 0) == Err(Error::PeerClosed),
+    );
+    Ok(ok)
+}
+
 fn main() -> i32 {
-    match run() {
+    match run().and_then(|ok| Ok(ok & call_tests()?)) {
         Ok(true) => {
-            println!("espera: wait OK");
+            println!("espera: wait y channel_call OK");
             0
         }
         Ok(false) => 1,
