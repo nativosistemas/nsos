@@ -6,9 +6,11 @@
 //! 2. `fragil`, que termina sola en cuanto ve su canal cerrado.
 //!
 //! Medidas, impresas como `bench: nombre_unidad = valor`:
-//! * `ipc_ida_y_vuelta_ns`: `ECHO` a `pong` y su respuesta.
+//! * `ipc_ida_y_vuelta_ns`: `ECHO` a `pong` y su respuesta (`send` + `recv`).
+//! * `ipc_call_ns`: lo mismo con una sola syscall, `channel_call`.
 //! * `ciclo_de_vida_cell_us`: `cell_spawn`, correr, terminar y liberar todo.
-//! * `mem_create_map_us`: crear y mapear un objeto de memoria de 64 KiB.
+//! * `mem_create_map_us`: crear, mapear, desmapear (`mem_unmap`) y soltar un
+//!   objeto de memoria de 64 KiB, siempre en la misma dirección.
 
 #![no_std]
 #![no_main]
@@ -17,8 +19,8 @@
 use nsos_rt::abi::syscall::Syscall;
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    bootstrap, cap_drop, cell_spawn, cell_status, channel_create, channel_recv, channel_send,
-    mem_create, mem_map, println, raw_syscall,
+    bootstrap, cap_drop, cell_spawn, cell_status, channel_call, channel_create, channel_recv,
+    channel_send, mem_create, mem_map, mem_unmap, println, raw_syscall,
 };
 
 const ECHO: u64 = 1;
@@ -35,7 +37,8 @@ fn now_ns() -> u64 {
     raw_syscall(Syscall::ClockMonotonic as u64, 0, 0, 0, 0).max(0) as u64
 }
 
-fn ipc(pong: CapHandle) -> Result<u64, Error> {
+/// Ida y vuelta a `pong`: con `send` + `recv`, o con `channel_call`.
+fn ipc(pong: CapHandle, call: bool) -> Result<u64, Error> {
     let (mine, theirs) = channel_create()?;
     let child = cell_spawn(pong, &[theirs])?;
     let msg = Message::new(ECHO, b"x").unwrap();
@@ -45,8 +48,13 @@ fn ipc(pong: CapHandle) -> Result<u64, Error> {
     channel_recv(mine, &mut r, 0)?;
     let t0 = now_ns();
     for _ in 0..IPC_ROUNDS {
-        channel_send(mine, &msg, 0)?;
-        channel_recv(mine, &mut r, 0)?;
+        if call {
+            r = msg;
+            channel_call(mine, &mut r, nsos_rt::abi::syscall::WAIT_FOREVER)?;
+        } else {
+            channel_send(mine, &msg, 0)?;
+            channel_recv(mine, &mut r, 0)?;
+        }
         if r.header.label != ECHO_REPLY {
             return Err(Error::BadMessage);
         }
@@ -75,13 +83,10 @@ fn memory() -> Result<u64, Error> {
     let t0 = now_ns();
     for i in 0..MEM_ROUNDS {
         let h = mem_create(MEM_SIZE)?;
-        // Cada vuelta en una dirección nueva: todavía no hay `mem_unmap`.
-        let m = mem_map(
-            h,
-            0x6000_0000 + i * MEM_SIZE as u64,
-            Rights::READ | Rights::WRITE,
-        )?;
+        // Siempre la misma dirección: `mem_unmap` la deja libre.
+        let m = mem_map(h, 0x6000_0000, Rights::READ | Rights::WRITE)?;
         m.write_u64(0, i);
+        mem_unmap(m)?;
         cap_drop(h)?;
     }
     Ok((now_ns() - t0) / MEM_ROUNDS / 1000)
@@ -89,7 +94,8 @@ fn memory() -> Result<u64, Error> {
 
 fn main() -> i32 {
     let results = [
-        ("ipc_ida_y_vuelta_ns", ipc(bootstrap(1))),
+        ("ipc_ida_y_vuelta_ns", ipc(bootstrap(1), false)),
+        ("ipc_call_ns", ipc(bootstrap(1), true)),
         ("ciclo_de_vida_cell_us", lifecycle(bootstrap(2))),
         ("mem_create_map_us", memory()),
     ];

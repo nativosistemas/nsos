@@ -100,8 +100,8 @@ Tabla completa en [`syscall.rs`](../crates/abi/src/syscall.rs). Estado de
 implementación (hito 7): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
 `channel_recv`, `mem_create`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
-`cell_spawn`, `cell_kill`, `cell_status` y (hito 12) `wait` e `irq_ack`. El
-resto devuelve `Unsupported`. Resumen:
+`cell_spawn`, `cell_kill`, `cell_status`, (hito 12) `wait` e `irq_ack`, y
+(hito 13) `channel_call` y `mem_unmap`: todas las del ABI v1. Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|
@@ -155,8 +155,16 @@ entra desde una cell:
   nuevos. Cada una debe tener `GRANT`; si alguna falla, el envío entero falla
   y el emisor no pierde nada (operación atómica).
 * **recv** saca el mensaje más antiguo. Cola vacía: bloquea o `WouldBlock`.
-* **call** = send + recv de la respuesta en el mismo canal. Permite al
-  scheduler hacer *handoff* directo al servidor (camino rápido de RPC).
+* **call** (`channel_call(h, msg, timeout_ns)`) = send + recv de la
+  respuesta en el mismo extremo, en una syscall; la respuesta se escribe
+  sobre `msg`. Requiere `SEND` y `RECV`, comprobados antes de enviar, y `msg`
+  no puede adjuntar el propio `h` (`InvalidArgs`: la cell lo perdería y
+  esperaría en un extremo que ya no tiene). El plazo cubre las dos mitades,
+  como en `wait` (`0` no espera, `WAIT_FOREVER` no vence). Si el envío falla
+  no se mandó nada; si falla la espera (`TimedOut`, `PeerClosed`), el pedido
+  **ya** se mandó. La respuesta es el próximo mensaje que llegue a `h`:
+  emparejar pedidos y respuestas es cosa del protocolo. No agrega pasos al
+  modelo (`Sys.call_inv`). Todavía sin *handoff* directo al servidor.
 * Orden FIFO por canal. Sin garantías de orden entre canales distintos.
 * **Varios hilos pueden esperar en el mismo extremo.** Un `send` despierta a
   todos los que esperaban recibir; un `recv` despierta a todos los que
@@ -357,6 +365,12 @@ Modelo y demostraciones: [`Nsos/Irq.lean`](../verification/lean/Nsos/Irq.lean)
   dura mientras la cell tenga una capacidad al objeto con esos derechos: si
   la envía, la pasa a una cell hija o la suelta, el kernel lo quita
   (revocación, demostrada en `Mem.step_iso`).
+* `mem_unmap(vaddr, len)`: quita el mapeo de un objeto que empieza en
+  `vaddr` y mide exactamente `len` (un objeto se desmapea entero, como se
+  mapeó). Cualquier otra cosa es `InvalidArgs`: medio objeto, el código, la
+  pila, el kernel, una dirección libre. La capacidad no cambia: se puede
+  volver a mapear. Modelo: `Mem.unmap_removes`, `Mem.unmap_only_shrinks`;
+  Kani: `unmap_target_exact`.
 * `mem_info(h, out)`: escribe `MemInfo { size, phys }`; `phys` es 0 salvo
   que la capacidad tenga `CONTROL`.
 * `ioport_read(h, off, width)` / `ioport_write(h, off, width, v)`: `width`

@@ -183,6 +183,21 @@ impl DevIrq {
     }
 }
 
+/// Envía `m` por `h` y espera la respuesta en el mismo extremo, que queda en
+/// `m`. `timeout_ns` cubre envío y respuesta (`0`: no espera;
+/// [`abi::syscall::WAIT_FOREVER`]: sin plazo). Si falla la espera, el pedido
+/// ya se envió.
+pub fn channel_call(h: CapHandle, m: &mut Message, timeout_ns: u64) -> SysResult<()> {
+    decode_ret(syscall4(
+        Syscall::ChannelCall,
+        h.0 as u64,
+        m as *mut _ as u64,
+        timeout_ns,
+        0,
+    ))
+    .map(|_| ())
+}
+
 /// Duplica una capacidad con derechos atenuados.
 pub fn cap_dup(h: CapHandle, mask: Rights) -> SysResult<CapHandle> {
     decode_ret(syscall4(
@@ -268,6 +283,13 @@ pub fn mem_map(h: CapHandle, vaddr: u64, rights: Rights) -> SysResult<Mapped> {
         base: vaddr,
         len: info.size as usize,
     })
+}
+
+/// Quita el mapeo `m` (el objeto entero). La capacidad sigue siendo de la
+/// cell: se puede volver a mapear. Usar después una copia de `m` es un fallo
+/// de página y el kernel termina la cell (nunca toca memoria ajena).
+pub fn mem_unmap(m: Mapped) -> SysResult<()> {
+    decode_ret(syscall4(Syscall::MemUnmap, m.base, m.len as u64, 0, 0)).map(|_| ())
 }
 
 /// Tamaño y dirección física (si la capacidad tiene CONTROL).

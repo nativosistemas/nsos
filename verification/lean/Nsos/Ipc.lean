@@ -687,5 +687,14 @@ theorem run_inv {s s' : Sys} {tr : List (Nat × Op)} (h : Run s tr s') (hi : s.I
   | ok hs _ ih => exact ih (step_inv hi hs)
   | err _ _ ih => exact ih hi
 
+/-- **`channel_call`** (hito 13) no agrega pasos al modelo: es un `send` en el
+extremo `h` seguido de un `recv` en el mismo extremo, con esperas
+(`waitRecv`) y pasos de otras cells en el medio. Por eso conserva los tres
+invariantes: ningún mensaje se pierde ni se duplica, el recolector no libera
+nada vivo y nadie duerme con un mensaje esperándolo. -/
+theorem call_inv {s s' : Sys} {a h l : Nat} {hs : List Nat} {mid : List (Nat × Op)}
+    (hr : Run s ((a, .send h l hs) :: mid ++ [(a, .recv h)]) s') (hi : s.Inv) : s'.Inv :=
+  run_inv hr hi
+
 end Sys
 end Nsos
