@@ -201,6 +201,7 @@ name = "nsos-contract"
 version = "0.1.0"
 dependencies = [
  "nsos-abi",
+ "nsos-store",
 ]
 
 [[package]]

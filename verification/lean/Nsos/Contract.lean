@@ -538,4 +538,33 @@ theorem counter_check : check counter = some 1 := by decide
 theorem handover_check : check handover = some 2 := by decide
 theorem restore_check : check restore = some 1 := by decide
 
+/-! ### Almacén (etapa 3)
+
+Etiquetas de `nsos_store::proto`. El error (`ERR`, 99) sale de varios
+estados: con el búfer de vuelta si el pedido traía uno (`FailMem`) y sin él
+si no (`Fail`). En cada estado cada etiqueta es un solo mensaje, que es lo
+que necesita el decodificador. -/
+
+/-- `store_root` (dueño ↔ `almacen`, por la raíz). Estados: `Ready` 0,
+`Opening` 1. Etiquetas: `Open` 10, `Opened` 11, `Fail` 99. -/
+def storeRoot : Contract := ⟨0, [⟨0, .ab, 10, 1⟩, ⟨1, .ba, 11, 0⟩, ⟨1, .ba, 99, 0⟩]⟩
+
+/-- `store_obj` (quien tiene el handle ↔ `almacen`). Estados: `Idle` 0;
+`Asking` 1, `Reading` 2, `Writing` 3, `Duping` 4 (contesta el almacén).
+Etiquetas: `Stat` 12, `Info` 13, `Read` 14, `Data` 15, `Write` 16,
+`Written` 17, `DupRo` 18, `Opened` 11, `Fail`/`FailMem` 99. -/
+def storeObj : Contract :=
+  ⟨0, [⟨0, .ab, 12, 1⟩, ⟨0, .ab, 14, 2⟩, ⟨0, .ab, 16, 3⟩, ⟨0, .ab, 18, 4⟩,
+       ⟨1, .ba, 13, 0⟩, ⟨1, .ba, 99, 0⟩, ⟨2, .ba, 15, 0⟩, ⟨2, .ba, 99, 0⟩,
+       ⟨3, .ba, 17, 0⟩, ⟨3, .ba, 99, 0⟩, ⟨4, .ba, 11, 0⟩, ⟨4, .ba, 99, 0⟩]⟩
+
+theorem storeRoot_check : check storeRoot = some 1 := by decide
+theorem storeObj_check : check storeObj = some 1 := by decide
+
+/-- `store_share` (`escritor` ↔ `curioso`). Estados: `Start` 0, `Waiting` 1,
+`End` 2. Etiquetas: `Share` 1, `Verdict` 2. -/
+def storeShare : Contract := ⟨0, [⟨0, .ab, 1, 1⟩, ⟨1, .ba, 2, 2⟩]⟩
+
+theorem storeShare_check : check storeShare = some 1 := by decide
+
 end Nsos.Contract

@@ -6,7 +6,9 @@
 //! nuevo, nunca una mezcla. El acceso a cada objeto es una capacidad: un
 //! extremo de canal ("handle") que se obtiene por la raíz del dueño y se
 //! puede pasar a otra cell, entero o en copia de solo lectura. Protocolo:
-//! `nsos_store::proto`. Modelo: `verification/lean/Nsos/Store.lean`.
+//! `nsos_store::proto`, escrito como los contratos `store_root` (por las
+//! raíces) y `store_obj` (por cada handle) de `nsos_contract::protocols`.
+//! Modelos: `verification/lean/Nsos/Store.lean` y `StoreContract.lean`.
 //!
 //! Capacidades de arranque:
 //! 1. Canal con el driver de bloques (`virtblk`).
@@ -25,15 +27,15 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::syscall::flags::NONBLOCK;
-use nsos_rt::abi::{CapHandle, Error, Message, Rights};
+use nsos_rt::abi::{CapHandle, Message, Rights};
+use nsos_rt::contract::protocols::{store_obj, store_root};
+use nsos_rt::contract::{Chan, Endpoint, RecvError};
 use nsos_rt::{
-    bootstrap, cap_drop, channel_create, channel_recv, channel_send, exit, mem_map, println,
-    yield_now, Mapped,
+    bootstrap, channel_recv, channel_send, exit, mem_map, println, yield_now, Mapped, Sys,
 };
 use nsos_store::handles::{Handles, MAX_HANDLES};
 use nsos_store::layout::Name;
-use nsos_store::proto::{self, u32_at, u64_at};
+use nsos_store::proto::{self, u64_at};
 use nsos_store::{BlockDev, DevError, Store, BLOCK};
 
 // Protocolo con el driver (ver `cells/virtblk`).
@@ -123,11 +125,16 @@ impl BlockDev for Disk {
     }
 }
 
+type Root = Chan<Sys, store_root::server::Ready>;
+type Obj = Chan<Sys, store_obj::server::Idle>;
+
 struct Server {
     store: Store<Disk>,
-    roots: [Option<CapHandle>; ROOTS],
+    roots: [Option<Root>; ROOTS],
     handles: Handles,
-    eps: [CapHandle; MAX_HANDLES],
+    /// El extremo del almacén de cada handle abierto. `None` también
+    /// mientras se atiende un pedido por él.
+    eps: [Option<Obj>; MAX_HANDLES],
 }
 
 /// Un pedido rechazado: código de error y versión actual.
@@ -145,32 +152,42 @@ impl From<nsos_store::Error> for Fail {
 
 const BAD: Fail = Fail(proto::E_BAD_REQUEST, 0);
 
-fn err(code: u32, version: u64) -> Message {
-    let mut p = [0u8; 12];
-    p[..4].copy_from_slice(&code.to_le_bytes());
-    p[4..].copy_from_slice(&version.to_le_bytes());
-    Message::new(proto::ERR, &p).unwrap_or_default()
+/// Datos de un handle recién abierto, para `Opened`.
+struct NewHandle {
+    version: u64,
+    len: u32,
+    write: bool,
+    handle: Endpoint<store_obj::client::Idle>,
+}
+
+/// Lo que pasó al mirar un canal.
+enum Polled<C> {
+    /// No había nada; el canal vuelve.
+    Idle(C),
+    /// Se atendió un pedido; el canal vuelve.
+    Served(C),
+    /// El cliente cerró.
+    Closed,
 }
 
 impl Server {
-    /// Abre un handle nuevo y devuelve el mensaje `OPENED` con el extremo
-    /// del cliente adjunto.
-    fn new_handle(&mut self, h: Option<usize>) -> Message {
-        let Some(h) = h else {
-            return err(proto::E_NO_HANDLES, 0);
-        };
-        let Ok((mine, theirs)) = channel_create() else {
+    /// Abre un handle nuevo: canal propio, con el extremo del cliente para
+    /// mandarlo en `Opened`.
+    fn new_handle(&mut self, h: Option<usize>) -> Result<NewHandle, Fail> {
+        let h = h.ok_or(Fail(proto::E_NO_HANDLES, 0))?;
+        let Ok((theirs, mine)) = store_obj::pair(Sys) else {
             self.handles.close(h);
-            return err(proto::E_NO_HANDLES, 0);
+            return Err(Fail(proto::E_NO_HANDLES, 0));
         };
-        self.eps[h] = mine;
+        self.eps[h] = Some(mine);
         let x = self.handles.get(h).expect("handle recién abierto");
-        let (v, len) = self.stat(&x.name, x.owner);
-        let mut m = Message::new(proto::OPENED, &proto::info(v, len, x.write)).unwrap_or_default();
-        if m.push_cap(theirs).is_err() {
-            return err(proto::E_BAD_REQUEST, 0);
-        }
-        m
+        let (version, len) = self.stat(&x.name, x.owner);
+        Ok(NewHandle {
+            version,
+            len,
+            write: x.write,
+            handle: theirs.into_endpoint(),
+        })
     }
 
     fn stat(&self, name: &Name, owner: u32) -> (u64, u32) {
@@ -180,86 +197,132 @@ impl Server {
             .unwrap_or((0, 0))
     }
 
-    /// Pedido por la raíz del dueño `owner`.
-    fn on_root(&mut self, owner: u32, m: &Message) -> Message {
-        let p = m.payload();
-        if m.header.label != proto::OPEN || p.is_empty() {
-            return err(proto::E_BAD_REQUEST, 0);
-        }
-        let Some(name) = Name::new(&p[1..]) else {
-            return err(proto::E_BAD_REQUEST, 0);
+    /// Un pedido por la raíz del dueño `owner`.
+    fn poll_root(&mut self, owner: u32, root: Root) -> Polled<Root> {
+        let (opening, o) = match root.try_recv() {
+            Ok(store_root::server::recv::Ready::Open(c, o)) => (c, o),
+            Err(RecvError::WouldBlock(c)) => return Polled::Idle(c),
+            Err(RecvError::Violation { chan, label }) => {
+                println!(
+                    "almacen: pedido fuera de protocolo por una raíz ({})",
+                    label
+                );
+                return Polled::Served(chan);
+            }
+            Err(RecvError::Failed(_)) => return Polled::Closed,
         };
-        // El dueño sale de la raíz, nunca del mensaje.
-        let h = self
-            .handles
-            .open(owner, name, p[0] & proto::OPEN_WRITE != 0);
-        self.new_handle(h)
+        // El dueño sale de la raíz: `Open` no tiene campo de dueño.
+        let r = match Name::new(o.name.as_slice()) {
+            Some(name) => {
+                let h = self
+                    .handles
+                    .open(owner, name, o.flags & proto::OPEN_WRITE != 0);
+                self.new_handle(h)
+            }
+            None => Err(BAD),
+        };
+        let sent = match r {
+            Ok(n) => opening.send(store_root::Opened {
+                version: n.version,
+                len: n.len,
+                write: n.write,
+                handle: n.handle,
+            }),
+            Err(Fail(code, version)) => opening.send(store_root::Fail { code, version }),
+        };
+        match sent {
+            Ok(c) => Polled::Served(c),
+            Err(_) => Polled::Closed,
+        }
     }
 
-    /// Pedido por el handle `h`.
-    fn on_handle(&mut self, h: usize, m: &Message) -> Message {
+    /// Un pedido por el handle `h`.
+    fn poll_handle(&mut self, h: usize, ch: Obj) -> Polled<Obj> {
+        use store_obj::server::recv::Idle as Req;
         let Some(x) = self.handles.get(h) else {
-            return err(proto::E_BAD_REQUEST, 0);
+            return Polled::Closed;
         };
-        match m.header.label {
-            proto::STAT => {
-                let (v, len) = self.stat(&x.name, x.owner);
-                Message::new(proto::INFO, &proto::info(v, len, x.write)).unwrap_or_default()
+        let sent = match ch.try_recv() {
+            Err(RecvError::WouldBlock(c)) => return Polled::Idle(c),
+            Err(RecvError::Violation { chan, label }) => {
+                println!(
+                    "almacen: pedido fuera de protocolo por un handle ({})",
+                    label
+                );
+                return Polled::Served(chan);
             }
-            proto::DUP_RO => {
+            Err(RecvError::Failed(_)) => return Polled::Closed,
+            Ok(Req::Stat(c, _)) => {
+                let (version, len) = self.stat(&x.name, x.owner);
+                c.send(store_obj::Info {
+                    version,
+                    len,
+                    write: x.write,
+                })
+            }
+            Ok(Req::DupRo(c, _)) => {
                 let n = self.handles.dup_ro(h);
-                self.new_handle(n)
-            }
-            proto::READ => self.with_mem(m, |s, mem| s.read(x.owner, &x.name, mem)),
-            proto::WRITE => {
-                // Solo con un handle escribible (`Handles::writable`).
-                if self.handles.writable(h).is_none() {
-                    return self.with_mem(m, |_, _| Err(Fail(proto::E_READ_ONLY, 0)));
+                match self.new_handle(n) {
+                    Ok(n) => c.send(store_obj::Opened {
+                        version: n.version,
+                        len: n.len,
+                        write: n.write,
+                        handle: n.handle,
+                    }),
+                    Err(Fail(code, version)) => c.send(store_obj::Fail { code, version }),
                 }
-                let expected = match u64_at(m.payload(), 0) {
-                    proto::ANY_VERSION => None,
-                    v => Some(v),
+            }
+            Ok(Req::Read(c, r)) => {
+                // El búfer vuelve en toda respuesta: el contrato no deja otra.
+                let mapped = mem_map(r.buf.handle(), CLIENT_VADDR, Rights::READ | Rights::WRITE);
+                match mapped
+                    .map_err(|_| BAD)
+                    .and_then(|m| self.read(x.owner, &x.name, m))
+                {
+                    Ok((version, len)) => c.send(store_obj::Data {
+                        version,
+                        len,
+                        buf: r.buf,
+                    }),
+                    Err(Fail(code, version)) => c.send(store_obj::FailMem {
+                        code,
+                        version,
+                        buf: r.buf,
+                    }),
+                }
+            }
+            Ok(Req::Write(c, w)) => {
+                let result = if self.handles.writable(h).is_none() {
+                    Err(Fail(proto::E_READ_ONLY, 0))
+                } else {
+                    let expected = match w.expected {
+                        proto::ANY_VERSION => None,
+                        v => Some(v),
+                    };
+                    mem_map(w.buf.handle(), CLIENT_VADDR, Rights::READ)
+                        .map_err(|_| BAD)
+                        .and_then(|m| self.write(x.owner, &x.name, expected, w.len as usize, m))
                 };
-                let len = u32_at(m.payload(), 8) as usize;
-                self.with_mem(m, |s, mem| s.write(x.owner, &x.name, expected, len, mem))
+                match result {
+                    Ok(version) => c.send(store_obj::Written {
+                        version,
+                        buf: w.buf,
+                    }),
+                    Err(Fail(code, version)) => c.send(store_obj::FailMem {
+                        code,
+                        version,
+                        buf: w.buf,
+                    }),
+                }
             }
-            _ => err(proto::E_BAD_REQUEST, 0),
+        };
+        match sent {
+            Ok(c) => Polled::Served(c),
+            Err(_) => Polled::Closed,
         }
     }
 
-    /// Corre `f` con el `Memory` adjunto mapeado y lo devuelve en la
-    /// respuesta (pase lo que pase).
-    fn with_mem(
-        &mut self,
-        m: &Message,
-        f: impl FnOnce(&mut Self, Option<Mapped>) -> Result<Message, Fail>,
-    ) -> Message {
-        let [mem] = *m.cap_slice() else {
-            for c in m.cap_slice() {
-                let _ = cap_drop(*c);
-            }
-            return err(proto::E_BAD_REQUEST, 0);
-        };
-        let write_ok = m.header.label == proto::READ;
-        let rights = if write_ok {
-            Rights::READ | Rights::WRITE
-        } else {
-            Rights::READ
-        };
-        let mapped = mem_map(mem, CLIENT_VADDR, rights).ok();
-        let mut r = match f(self, mapped) {
-            Ok(r) => r,
-            Err(Fail(code, v)) => err(code, v),
-        };
-        // Devolverlo también revoca el mapeo (lo hace el kernel).
-        if r.push_cap(mem).is_err() {
-            let _ = cap_drop(mem);
-        }
-        r
-    }
-
-    fn read(&mut self, owner: u32, name: &Name, mem: Option<Mapped>) -> Result<Message, Fail> {
-        let mem = mem.ok_or(BAD)?;
+    fn read(&mut self, owner: u32, name: &Name, mem: Mapped) -> Result<(u64, u32), Fail> {
         let e = self
             .store
             .get(owner, name)
@@ -275,10 +338,7 @@ impl Server {
             mem.write_bytes(i as usize * BLOCK, &buf[..n]);
             left -= n;
         }
-        let mut p = [0u8; 12];
-        p[..8].copy_from_slice(&e.version.to_le_bytes());
-        p[8..].copy_from_slice(&e.len.to_le_bytes());
-        Message::new(proto::DATA, &p).map_err(|_| BAD)
+        Ok((e.version, e.len))
     }
 
     fn write(
@@ -287,9 +347,8 @@ impl Server {
         name: &Name,
         expected: Option<u64>,
         len: usize,
-        mem: Option<Mapped>,
-    ) -> Result<Message, Fail> {
-        let mem = mem.ok_or(BAD)?;
+        mem: Mapped,
+    ) -> Result<u64, Fail> {
         if mem.len() < len {
             return Err(BAD);
         }
@@ -301,52 +360,40 @@ impl Server {
             }
             Ok(())
         })?;
-        Message::new(proto::WRITTEN, &v.to_le_bytes()).map_err(|_| BAD)
-    }
-
-    /// Atiende lo que haya en un canal. `Ok(false)` si no había nada,
-    /// `Err(())` si el cliente cerró.
-    fn poll(&mut self, ch: CapHandle, root: Option<u32>, h: usize) -> Result<bool, ()> {
-        let mut m = Message::default();
-        match channel_recv(ch, &mut m, NONBLOCK) {
-            Ok(()) => {}
-            Err(Error::WouldBlock) => return Ok(false),
-            Err(_) => return Err(()),
-        }
-        let r = match root {
-            Some(owner) => self.on_root(owner, &m),
-            None => self.on_handle(h, &m),
-        };
-        match channel_send(ch, &r, 0) {
-            Ok(()) => Ok(true),
-            Err(_) => Err(()),
-        }
+        Ok(v)
     }
 
     fn run(&mut self) {
         loop {
             let mut idle = true;
             for i in 0..ROOTS {
-                let Some(ch) = self.roots[i] else { continue };
-                match self.poll(ch, Some(i as u32 + 1), 0) {
-                    Ok(b) => idle &= !b,
-                    Err(()) => {
-                        let _ = cap_drop(ch);
-                        self.roots[i] = None;
+                let Some(ch) = self.roots[i].take() else {
+                    continue;
+                };
+                self.roots[i] = match self.poll_root(i as u32 + 1, ch) {
+                    Polled::Idle(c) => Some(c),
+                    Polled::Served(c) => {
+                        idle = false;
+                        Some(c)
                     }
-                }
+                    Polled::Closed => None,
+                };
             }
             for h in 0..MAX_HANDLES {
-                if self.handles.get(h).is_none() {
+                let Some(ch) = self.eps[h].take() else {
                     continue;
-                }
-                match self.poll(self.eps[h], None, h) {
-                    Ok(b) => idle &= !b,
-                    Err(()) => {
-                        let _ = cap_drop(self.eps[h]);
-                        self.handles.close(h);
+                };
+                self.eps[h] = match self.poll_handle(h, ch) {
+                    Polled::Idle(c) => Some(c),
+                    Polled::Served(c) => {
+                        idle = false;
+                        Some(c)
                     }
-                }
+                    Polled::Closed => {
+                        self.handles.close(h);
+                        None
+                    }
+                };
             }
             if self.roots.iter().all(|r| r.is_none())
                 && self.handles.open_indices().next().is_none()
@@ -425,11 +472,15 @@ fn main() -> i32 {
         );
     }
     store_arm(&mut store);
+    let (Ok(r1), Ok(r2)) = (Root::open(Sys, bootstrap(4)), Root::open(Sys, bootstrap(5))) else {
+        println!("almacen: las raíces no son canales");
+        return 7;
+    };
     let mut s = Server {
         store,
-        roots: [Some(bootstrap(4)), Some(bootstrap(5))],
+        roots: [Some(r1), Some(r2)],
         handles: Handles::new(),
-        eps: [CapHandle::INVALID; MAX_HANDLES],
+        eps: [const { None }; MAX_HANDLES],
     };
     s.run();
     println!("almacen: sin clientes, termino");

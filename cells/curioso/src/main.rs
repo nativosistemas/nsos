@@ -7,128 +7,145 @@
 //!    Puede leerla (y comprobar que está entera), pero escribir con ella se
 //!    rechaza, y copiarla de nuevo da otra de solo lectura.
 //!
-//! Capacidades de arranque: 1. raíz del dueño 2; 2. canal con `escritor`.
-//! Responde `RESULT [1]` al escritor si todo fue como se esperaba y sale
-//! con 0; si no, `RESULT [0]` y sale con 1.
+//! Capacidades de arranque: 1. raíz del dueño 2 (cliente de `store_root`);
+//! 2. canal con `escritor` (servidor de `store_share`). Le contesta
+//! `Verdict { ok: true }` al escritor si todo fue como se esperaba y sale
+//! con 0; si no, `ok: false` y sale con 1.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::{CapHandle, Message, Rights};
-use nsos_rt::{bootstrap, channel_recv, channel_send, mem_create, mem_map, println};
-use nsos_store::proto::{self, demo_word, u32_at, u64_at};
+use nsos_rt::abi::Rights;
+use nsos_rt::contract::protocols::{store_obj, store_root, store_share};
+use nsos_rt::contract::{Bytes, Chan, Mem, RW};
+use nsos_rt::{bootstrap, mem_create, mem_map, println, Sys};
+use nsos_store::proto::{self, demo_word};
 
 const MEM_VADDR: u64 = 0x4000_0000;
 const SIZE: usize = 16 * 1024;
-const SHARE: u64 = 1;
-const RESULT: u64 = 2;
 
-fn call(ch: CapHandle, m: Message) -> Option<Message> {
-    channel_send(ch, &m, 0).ok()?;
-    let mut r = Message::default();
-    channel_recv(ch, &mut r, 0).ok()?;
-    Some(r)
-}
-
-fn with_mem(label: u64, p: &[u8], mem: CapHandle) -> Option<Message> {
-    let mut m = Message::new(label, p).ok()?;
-    m.push_cap(mem).ok()?;
-    Some(m)
-}
+type Handle = Chan<Sys, store_obj::client::Idle>;
 
 fn check(what: &str, ok: bool) -> bool {
     println!("curioso: {} ... {}", what, if ok { "ok" } else { "FALLO" });
     ok
 }
 
-fn run() -> Option<bool> {
-    let root = bootstrap(1);
-    let peer = bootstrap(2);
+/// `Stat`: devuelve el handle y si dice que escribe.
+fn stat(h: Handle) -> Option<(Handle, u64, bool)> {
+    match h.call(store_obj::Stat {}).ok()? {
+        store_obj::client::recv::Asking::Info(h, i) => Some((h, i.version, i.write)),
+        store_obj::client::recv::Asking::Fail(..) => None,
+    }
+}
+
+/// Las pruebas. Devuelve el canal con el escritor (en `Waiting`, para
+/// contestarle) y si todo salió bien.
+fn run(
+    peer: Chan<Sys, store_share::server::Start>,
+) -> Option<(Chan<Sys, store_share::server::Waiting>, bool)> {
+    let root = Chan::<Sys, store_root::client::Ready>::open(Sys, bootstrap(1)).ok()?;
     let mut ok = true;
 
     // 1. Mi "contador" (dueño 2) es otro objeto.
-    let mut p = [0u8; 9];
-    p[0] = proto::OPEN_WRITE;
-    p[1..].copy_from_slice(b"contador");
-    let r = call(root, Message::new(proto::OPEN, &p).ok()?)?;
-    let [mine] = *r.cap_slice() else {
-        return Some(false);
+    let open = store_root::Open {
+        flags: proto::OPEN_WRITE,
+        name: Bytes::new(b"contador")?,
     };
-    let v0 = u64_at(r.payload(), 0);
-    let mem = mem_create(SIZE).ok()?;
-    let map = mem_map(mem, MEM_VADDR, Rights::READ | Rights::WRITE).ok()?;
+    let store_root::client::recv::Opening::Opened(_root, o) = root.call(open).ok()? else {
+        return None;
+    };
+    let (mine, v0): (Handle, u64) = (Chan::attach(Sys, o.handle), o.version);
+    let buf = Mem::<RW>::open(Sys, mem_create(SIZE).ok()?).ok()?;
+    let map = mem_map(buf.handle(), MEM_VADDR, Rights::READ | Rights::WRITE).ok()?;
     map.write_bytes(0, b"soy el curioso");
-    let mut wp = [0u8; 12];
-    wp[..8].copy_from_slice(&proto::ANY_VERSION.to_le_bytes());
-    wp[8..].copy_from_slice(&14u32.to_le_bytes());
-    let r = call(mine, with_mem(proto::WRITE, &wp, mem)?)?;
-    let [mut mem] = *r.cap_slice() else {
-        return Some(false);
+    let w = store_obj::Write {
+        expected: proto::ANY_VERSION,
+        len: 14,
+        buf,
+    };
+    let (written, buf) = match mine.call(w).ok()? {
+        store_obj::client::recv::Writing::Written(_mine, w) => (w.version == v0 + 1, w.buf),
+        store_obj::client::recv::Writing::FailMem(_mine, f) => (false, f.buf),
     };
     ok &= check(
         "mi \"contador\" es mío (otro dueño, otro objeto) y lo puedo escribir",
-        r.header.label == proto::WRITTEN && u64_at(r.payload(), 0) == v0 + 1,
+        written,
     );
 
     // 2. La copia de solo lectura del escritor.
-    let mut m = Message::default();
-    channel_recv(peer, &mut m, 0).ok()?;
-    let [ro] = *m.cap_slice() else {
-        return Some(false);
+    let store_share::server::recv::Start::Share(peer, s) = peer.recv().ok()?;
+    ok &= check("me llegó una copia de solo lectura", true);
+    let ro: Handle = Chan::attach(Sys, s.handle);
+    let (ro, v, write) = stat(ro)?;
+    ok &= check("la copia dice que no escribe", !write);
+    let (ro, buf) = match ro.call(store_obj::Read { buf }).ok()? {
+        store_obj::client::recv::Reading::Data(ro, d) => {
+            let len = d.len as usize;
+            let map = mem_map(d.buf.handle(), MEM_VADDR, Rights::READ).ok()?;
+            let entero = (0..len / 8).all(|k| map.read_u64(k * 8) == demo_word(v, k));
+            ok &= check(
+                "puedo leer el objeto del escritor, entero",
+                len == SIZE && entero && d.version == v,
+            );
+            (ro, d.buf)
+        }
+        store_obj::client::recv::Reading::FailMem(ro, f) => {
+            ok &= check("puedo leer el objeto del escritor, entero", false);
+            (ro, f.buf)
+        }
     };
-    ok &= check(
-        "me llegó una copia de solo lectura",
-        m.header.label == SHARE,
-    );
-    let r = call(ro, Message::new(proto::STAT, &[]).ok()?)?;
-    let v = u64_at(r.payload(), 0);
-    ok &= check(
-        "la copia dice que no escribe",
-        r.header.label == proto::INFO && r.payload().get(12) == Some(&0),
-    );
-    let r = call(ro, with_mem(proto::READ, &[], mem)?)?;
-    let [m2] = *r.cap_slice() else {
-        return Some(false);
+    let w = store_obj::Write {
+        expected: proto::ANY_VERSION,
+        len: 8,
+        buf,
     };
-    mem = m2;
-    let len = u32_at(r.payload(), 8) as usize;
-    let map = mem_map(mem, MEM_VADDR, Rights::READ).ok()?;
-    let entero = (0..len / 8).all(|k| map.read_u64(k * 8) == demo_word(v, k));
-    ok &= check(
-        "puedo leer el objeto del escritor, entero",
-        r.header.label == proto::DATA && len == SIZE && entero,
-    );
-    let mut wp = [0u8; 12];
-    wp[..8].copy_from_slice(&proto::ANY_VERSION.to_le_bytes());
-    wp[8..].copy_from_slice(&8u32.to_le_bytes());
-    let r = call(ro, with_mem(proto::WRITE, &wp, mem)?)?;
-    ok &= check(
-        "escribir con la copia de solo lectura: rechazado",
-        r.header.label == proto::ERR && u32_at(r.payload(), 0) == proto::E_READ_ONLY,
-    );
-    let r = call(ro, Message::new(proto::DUP_RO, &[]).ok()?)?;
-    let [ro2] = *r.cap_slice() else {
-        return Some(false);
+    let ro = match ro.call(w).ok()? {
+        store_obj::client::recv::Writing::FailMem(ro, f) => {
+            ok &= check(
+                "escribir con la copia de solo lectura: rechazado",
+                f.code == proto::E_READ_ONLY,
+            );
+            f.buf.release(Sys);
+            ro
+        }
+        store_obj::client::recv::Writing::Written(ro, w) => {
+            ok &= check("escribir con la copia de solo lectura: rechazado", false);
+            w.buf.release(Sys);
+            ro
+        }
     };
-    let r2 = call(ro2, Message::new(proto::STAT, &[]).ok()?)?;
+    let store_obj::client::recv::Duping::Opened(_ro, o) = ro.call(store_obj::DupRo {}).ok()? else {
+        return None;
+    };
+    let (_ro2, _, write2) = stat(Chan::attach(Sys, o.handle))?;
     ok &= check(
         "copiar la copia da otra de solo lectura",
-        r.header.label == proto::OPENED && r2.payload().get(12) == Some(&0),
+        !o.write && !write2,
     );
-    let res = Message::new(RESULT, &[ok as u8]).ok()?;
-    channel_send(peer, &res, 0).ok()?;
-    Some(ok)
+    Some((peer, ok))
 }
 
 nsos_rt::entry!(main);
 
 fn main() -> i32 {
-    match run() {
-        Some(true) => 0,
-        _ => {
-            println!("curioso: algo no salió como se esperaba");
-            1
+    let Ok(peer) = Chan::<Sys, store_share::server::Start>::open(Sys, bootstrap(2)) else {
+        return 1;
+    };
+    let ok = match run(peer) {
+        Some((peer, ok)) => {
+            peer.send(store_share::Verdict { ok })
+                .map(|end| end.close())
+                .is_ok()
+                && ok
         }
+        None => false,
+    };
+    if ok {
+        0
+    } else {
+        println!("curioso: algo no salió como se esperaba");
+        1
     }
 }

@@ -45,8 +45,9 @@
 ///
 /// Al compilar comprueba con [`check`](crate::check) que el contrato esté
 /// bien formado (ningún estado deja mandar a las dos puntas, cada etiqueta
-/// lleva a un solo estado, la cota entra en la cola del kernel), que las
-/// etiquetas no se repitan y que cada mensaje entre en un [`Message`]
+/// lleva a un solo estado, la cota entra en la cola del kernel), que en un
+/// mismo estado no haya dos mensajes con la misma etiqueta y que cada
+/// mensaje entre en un [`Message`]
 /// (`crate::abi::Message`). Un mensaje repetido en un estado es un error de
 /// compilación (variante repetida).
 #[macro_export]
@@ -147,7 +148,7 @@ macro_rules! contract {
 
             /// Máximo de mensajes en vuelo entre las dos puntas
             /// (`Contract.queue_bound`).
-            pub const BOUND: u32 = $crate::__assert_contract(TRANSITIONS, LABELS);
+            pub const BOUND: u32 = $crate::__assert_contract(TRANSITIONS);
             const _: u32 = BOUND;
 
             /// Crea un canal con un extremo de cada lado, en el estado inicial.

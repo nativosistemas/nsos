@@ -352,8 +352,12 @@ un tipo por estado, y se comprueba al compilar.
   `counter`, `handover` y `restore`; el estado viaja a la versión nueva
   como `Mem<RO>`. Modelo: `UpgradeContract.lean` demuestra que cada paso
   de `Upgrade.lean` es un paso de los contratos (8 mutaciones lo rompen).
-* Etapa 3: almacén. Etapa 4: drivers y enlace. Etapa 5 (opcional):
-  `contract_id` en el kernel.
+* Etapa 3 (hecha): almacén con `store_root`, `store_obj` y
+  `store_share`; el búfer vuelve en toda respuesta por tipo. Modelo:
+  `StoreContract.lean`. Las etiquetas pasaron a exigirse distintas por
+  estado.
+* Etapa 4: drivers y enlace. Etapa 5 (opcional): `contract_id` en el
+  kernel.
 
 ## ARM64 (en curso)
 

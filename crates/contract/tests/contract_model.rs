@@ -9,7 +9,10 @@
 //! * que las tablas que genera `contract!` sean las del modelo, que ya
 //!   demostró `echo_check` y `note_check`.
 
-use nsos_contract::protocols::{counter, echo, handover, note, restore};
+use nsos_contract::protocols::{
+    counter, echo, handover, note, restore, store_obj, store_root, store_share,
+};
+use nsos_contract::Msg;
 use nsos_contract::{check, Dir, Transition};
 
 const TRACE: &str = include_str!("data/contract_model.trace");
@@ -88,6 +91,9 @@ fn protocol_tables_are_the_model_ones() {
         ("counter", counter::START, counter::TRANSITIONS),
         ("handover", handover::START, handover::TRANSITIONS),
         ("restore", restore::START, restore::TRANSITIONS),
+        ("store_root", store_root::START, store_root::TRANSITIONS),
+        ("store_obj", store_obj::START, store_obj::TRANSITIONS),
+        ("store_share", store_share::START, store_share::TRANSITIONS),
     ] {
         let (mstart, mtable) = model_table(name);
         assert_eq!(start, mstart, "{name}: estado inicial");
@@ -98,4 +104,26 @@ fn protocol_tables_are_the_model_ones() {
     assert_eq!(counter::BOUND, 1);
     assert_eq!(handover::BOUND, 2);
     assert_eq!(restore::BOUND, 1);
+    assert_eq!(store_root::BOUND, 1);
+    assert_eq!(store_obj::BOUND, 1);
+}
+
+/// Los contratos del almacén usan las etiquetas de `nsos_store::proto`, que
+/// es lo que habla el resto del sistema.
+#[test]
+fn store_labels_are_the_protocol_ones() {
+    use nsos_store::proto as p;
+    assert_eq!(<store_root::Open as Msg>::LABEL, p::OPEN);
+    assert_eq!(<store_root::Opened as Msg>::LABEL, p::OPENED);
+    assert_eq!(<store_root::Fail as Msg>::LABEL, p::ERR);
+    assert_eq!(<store_obj::Stat as Msg>::LABEL, p::STAT);
+    assert_eq!(<store_obj::Info as Msg>::LABEL, p::INFO);
+    assert_eq!(<store_obj::Read as Msg>::LABEL, p::READ);
+    assert_eq!(<store_obj::Data as Msg>::LABEL, p::DATA);
+    assert_eq!(<store_obj::Write as Msg>::LABEL, p::WRITE);
+    assert_eq!(<store_obj::Written as Msg>::LABEL, p::WRITTEN);
+    assert_eq!(<store_obj::DupRo as Msg>::LABEL, p::DUP_RO);
+    assert_eq!(<store_obj::Opened as Msg>::LABEL, p::OPENED);
+    assert_eq!(<store_obj::Fail as Msg>::LABEL, p::ERR);
+    assert_eq!(<store_obj::FailMem as Msg>::LABEL, p::ERR);
 }

@@ -10,9 +10,10 @@
 //! * `c n`: escribe hasta que el almacén se cae (prueba de caídas).
 //! * `s`: escribe sin parar, hasta que maten a QEMU.
 //!
-//! Capacidades de arranque: 1. raíz del dueño 1 en el almacén;
-//! 2. configuración (`[modo, n, ...]`, solo lectura); 3. canal con
-//! `curioso` (en los modos `e` y `v`).
+//! Capacidades de arranque: 1. raíz del dueño 1 en el almacén (cliente de
+//! `store_root`); 2. configuración (`[modo, n, ...]`, solo lectura);
+//! 3. canal con `curioso` (cliente de `store_share`, en los modos `e` y
+//! `v`). El handle del objeto es un `store_obj`.
 //!
 //! Sale con 0 si todo salió como se esperaba, 1 si encontró datos
 //! inconsistentes y 4 si el almacén se cayó.
@@ -21,54 +22,62 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::{CapHandle, Message, Rights};
-use nsos_rt::{bootstrap, channel_recv, channel_send, mem_create, mem_map, println};
-use nsos_store::proto::{self, demo_word, u32_at, u64_at};
+use nsos_rt::abi::Rights;
+use nsos_rt::contract::protocols::{store_obj, store_root, store_share};
+use nsos_rt::contract::{Bytes, Chan, Mem, RW};
+use nsos_rt::{bootstrap, mem_create, mem_map, println, Sys};
+use nsos_store::proto::{self, demo_word};
 
 const OBJECT: &[u8] = b"contador";
 const SIZE: usize = 16 * 1024;
 const WORDS: usize = SIZE / 8;
 /// Dónde se mapea el búfer para leer y para escribir. Son distintos porque
 /// el mapeo de lectura sigue hasta que el búfer se vuelve a enviar (enviarlo
-/// lo revoca; todavía no hay `mem_unmap`).
+/// lo revoca).
 const READ_VADDR: u64 = 0x4000_0000;
 const WRITE_VADDR: u64 = 0x4200_0000;
 const CONFIG_VADDR: u64 = 0x4100_0000;
-const SHARE: u64 = 1;
-const RESULT: u64 = 2;
 
-/// El almacén se cayó (cerró el canal).
+/// El almacén se cayó (cerró el canal) o contestó fuera de protocolo.
 struct Gone;
 
-fn call(ch: CapHandle, m: &Message) -> Result<Message, Gone> {
-    channel_send(ch, m, 0).map_err(|_| Gone)?;
-    let mut r = Message::default();
-    channel_recv(ch, &mut r, 0).map_err(|_| Gone)?;
-    Ok(r)
-}
+type Handle = Chan<Sys, store_obj::client::Idle>;
 
 struct Client {
-    handle: CapHandle,
-    mem: CapHandle,
+    /// `None` solo mientras hay un pedido en curso.
+    handle: Option<Handle>,
+    /// El búfer: siempre vuelve con la respuesta (`Mem<RW>` en todas).
+    buf: Option<Mem<RW>>,
     version: u64,
 }
 
 impl Client {
+    fn take(&mut self) -> Result<(Handle, Mem<RW>), Gone> {
+        Ok((
+            self.handle.take().ok_or(Gone)?,
+            self.buf.take().ok_or(Gone)?,
+        ))
+    }
+
     /// Lee el objeto y comprueba que todas sus palabras sean de su versión.
     fn verify(&mut self) -> Result<bool, Gone> {
-        let mut m = Message::new(proto::READ, &[]).map_err(|_| Gone)?;
-        m.push_cap(self.mem).map_err(|_| Gone)?;
-        let r = call(self.handle, &m)?;
-        let [mem] = *r.cap_slice() else {
+        let (h, buf) = self.take()?;
+        let (v, len) = match h.call(store_obj::Read { buf }) {
+            Ok(store_obj::client::recv::Reading::Data(h, d)) => {
+                (self.handle, self.buf) = (Some(h), Some(d.buf));
+                (d.version, d.len as usize)
+            }
+            Ok(store_obj::client::recv::Reading::FailMem(h, f)) => {
+                (self.handle, self.buf) = (Some(h), Some(f.buf));
+                println!("escritor: no pude leer (código {})", f.code);
+                return Ok(false);
+            }
+            Err(_) => return Err(Gone),
+        };
+        let Some(buf) = &self.buf else {
             return Err(Gone);
         };
-        self.mem = mem;
-        if r.header.label != proto::DATA {
-            println!("escritor: no pude leer (código {})", u32_at(r.payload(), 0));
-            return Ok(false);
-        }
-        let (v, len) = (u64_at(r.payload(), 0), u32_at(r.payload(), 8) as usize);
-        let Ok(map) = mem_map(self.mem, READ_VADDR, Rights::READ) else {
+        let Ok(map) = mem_map(buf.handle(), READ_VADDR, Rights::READ) else {
             return Ok(false);
         };
         let bad = (0..WORDS)
@@ -88,27 +97,37 @@ impl Client {
     /// Escribe la versión siguiente. `Ok(false)` si el almacén la rechazó.
     fn write_next(&mut self) -> Result<bool, Gone> {
         let v = self.version + 1;
-        let map = mem_map(self.mem, WRITE_VADDR, Rights::READ | Rights::WRITE).map_err(|_| Gone)?;
+        let (h, buf) = self.take()?;
+        let map =
+            mem_map(buf.handle(), WRITE_VADDR, Rights::READ | Rights::WRITE).map_err(|_| Gone)?;
         for k in 0..WORDS {
             map.write_u64(k * 8, demo_word(v, k));
         }
-        let mut p = [0u8; 12];
-        p[..8].copy_from_slice(&self.version.to_le_bytes());
-        p[8..].copy_from_slice(&(SIZE as u32).to_le_bytes());
-        let mut m = Message::new(proto::WRITE, &p).map_err(|_| Gone)?;
-        m.push_cap(self.mem).map_err(|_| Gone)?;
-        let r = call(self.handle, &m)?;
-        let [mem] = *r.cap_slice() else {
-            return Err(Gone);
+        let req = store_obj::Write {
+            expected: self.version,
+            len: SIZE as u32,
+            buf,
         };
-        self.mem = mem;
-        if r.header.label != proto::WRITTEN || u64_at(r.payload(), 0) != v {
-            println!(
-                "escritor: la escritura de la versión {} falló (código {})",
-                v,
-                u32_at(r.payload(), 0)
-            );
-            return Ok(false);
+        match h.call(req) {
+            Ok(store_obj::client::recv::Writing::Written(h, w)) => {
+                (self.handle, self.buf) = (Some(h), Some(w.buf));
+                if w.version != v {
+                    println!(
+                        "escritor: el almacén dice versión {} (esperaba {})",
+                        w.version, v
+                    );
+                    return Ok(false);
+                }
+            }
+            Ok(store_obj::client::recv::Writing::FailMem(h, f)) => {
+                (self.handle, self.buf) = (Some(h), Some(f.buf));
+                println!(
+                    "escritor: la escritura de la versión {} falló (código {})",
+                    v, f.code
+                );
+                return Ok(false);
+            }
+            Err(_) => return Err(Gone),
         }
         self.version = v;
         Ok(true)
@@ -116,24 +135,31 @@ impl Client {
 }
 
 /// Le da a `curioso` una copia de solo lectura y espera su resultado.
-fn share(c: &mut Client, peer: CapHandle) -> Result<bool, Gone> {
-    let r = call(
-        c.handle,
-        &Message::new(proto::DUP_RO, &[]).map_err(|_| Gone)?,
-    )?;
-    let [ro] = *r.cap_slice() else {
-        return Ok(false);
+fn share(c: &mut Client) -> Result<bool, Gone> {
+    let h = c.handle.take().ok_or(Gone)?;
+    let ro = match h.call(store_obj::DupRo {}) {
+        Ok(store_obj::client::recv::Duping::Opened(h, o)) => {
+            c.handle = Some(h);
+            o.handle
+        }
+        Ok(store_obj::client::recv::Duping::Fail(h, f)) => {
+            c.handle = Some(h);
+            println!("escritor: no pude copiar el handle (código {})", f.code);
+            return Ok(false);
+        }
+        Err(_) => return Err(Gone),
     };
-    let mut m = Message::new(SHARE, &[]).map_err(|_| Gone)?;
-    m.push_cap(ro).map_err(|_| Gone)?;
-    if channel_send(peer, &m, 0).is_err() {
+    let Ok(peer) = Chan::<Sys, store_share::client::Start>::open(Sys, bootstrap(3)) else {
         println!("escritor: no está el curioso");
         return Ok(false);
-    }
-    let mut r = Message::default();
-    let ok = channel_recv(peer, &mut r, 0).is_ok()
-        && r.header.label == RESULT
-        && r.payload().first() == Some(&1);
+    };
+    let ok = match peer.call(store_share::Share { handle: ro }) {
+        Ok(store_share::client::recv::Waiting::Verdict(end, v)) => {
+            end.close();
+            v.ok
+        }
+        Err(_) => false,
+    };
     // El objeto tiene que seguir igual.
     let before = c.version;
     let same = c.verify()? && c.version == before;
@@ -147,20 +173,28 @@ fn share(c: &mut Client, peer: CapHandle) -> Result<bool, Gone> {
 }
 
 fn run(mode: u8, n: u8) -> Result<i32, Gone> {
-    let root = bootstrap(1);
-    let mut p = [0u8; 1 + OBJECT.len()];
-    p[0] = proto::OPEN_WRITE;
-    p[1..].copy_from_slice(OBJECT);
-    let r = call(root, &Message::new(proto::OPEN, &p).map_err(|_| Gone)?)?;
-    let [handle] = *r.cap_slice() else {
-        println!("escritor: no pude abrir \"contador\"");
-        return Ok(1);
+    let root = Chan::<Sys, store_root::client::Ready>::open(Sys, bootstrap(1)).map_err(|_| Gone)?;
+    let open = store_root::Open {
+        flags: proto::OPEN_WRITE,
+        name: Bytes::new(OBJECT).ok_or(Gone)?,
     };
-    let mem = mem_create(SIZE).map_err(|_| Gone)?;
+    let (handle, version) = match root.call(open) {
+        Ok(store_root::client::recv::Opening::Opened(_root, o)) => {
+            (Chan::attach(Sys, o.handle), o.version)
+        }
+        Ok(store_root::client::recv::Opening::Fail(..)) => {
+            println!("escritor: no pude abrir \"contador\"");
+            return Ok(1);
+        }
+        Err(_) => return Err(Gone),
+    };
+    let buf = mem_create(SIZE)
+        .and_then(|h| Mem::<RW>::open(Sys, h))
+        .map_err(|_| Gone)?;
     let mut c = Client {
-        handle,
-        mem,
-        version: u64_at(r.payload(), 0),
+        handle: Some(handle),
+        buf: Some(buf),
+        version,
     };
     if c.version == 0 {
         println!("escritor: \"contador\" todavía no existe");
@@ -181,7 +215,7 @@ fn run(mode: u8, n: u8) -> Result<i32, Gone> {
                 }
                 println!("escritor: escribí la versión {}", c.version);
             }
-            Ok(if share(&mut c, bootstrap(3))? { 0 } else { 1 })
+            Ok(if share(&mut c)? { 0 } else { 1 })
         }
         b'c' | b's' => loop {
             if !c.write_next()? {

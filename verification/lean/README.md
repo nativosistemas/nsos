@@ -21,6 +21,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Store.lean` | Almacén de objetos: consistencia ante caídas (copy-on-write) y aislamiento entre dueños (handles). |
 | `Nsos/Contract.lean` | Contratos de canal tipados (`crates/contract`): autómata, dos puntas con colas FIFO, el control `check` y su corrección. |
 | `Nsos/UpgradeContract.lean` | El protocolo de `Upgrade.lean` sigue los contratos `handover` y `restore`. |
+| `Nsos/StoreContract.lean` | El almacén de `Store.lean` sigue los contratos `store_root` y `store_obj`. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
@@ -152,6 +153,26 @@ cambiados. `check` es el control que corre la macro al compilar.
   (compilado sin sus demostraciones propias, para aislar la simulación),
   `commit` antes de `accept`, `forward` sin haber recibido el estado y
   `resume` sin `rollback`.
+  Para compilar así se escribe el `.olean` a mano (`lake env lean -o`).
+  Lake decide si recompilar por el hash del fuente, no del `.olean`, así
+  que después hay que borrar `.lake/build`: si no, queda el modelo mutado
+  y recortado aunque el fuente esté bien.
+
+### El almacén sigue sus contratos (`Nsos/StoreContract.lean`)
+
+* `answered_steps`: un pedido del cliente y una respuesta permitida son
+  cuatro pasos del contrato, de reposo a reposo.
+* `exec_follows`: cada pedido que el modelo de `Store.lean` atiende
+  (`openObj`, `dupRo`, `write`) es un intercambio de su contrato con la
+  respuesta de éxito; `rejected_follows`: los rechazados tienen la de
+  error. `read_answered`, `stat_answered`: lo mismo para `Read` y `Stat`.
+* `buffer_states_reply_only`: en los estados que esperan respuesta a un
+  pedido con búfer solo se contesta con `Data`, `Written` o el error (en
+  la crate, los tres llevan el búfer).
+* `storeRoot_check`, `storeObj_check`, `storeShare_check`: cota 1.
+* Mutaciones: quitar `Written` o el error de `Write`, contestar `Read` con
+  `Written`, y que una respuesta no vuelva al reposo (estas dos las atrapa
+  también la cota de `check`).
 
 ### IPC completo (`Nsos/Ipc.lean`)
 
@@ -199,9 +220,10 @@ real y exige resultados idénticos: handles, errores, objetos, derechos y
 cantidad de capacidades vivas. La CI regenera la traza y falla si el archivo
 del repo no coincide con lo que produce el modelo.
 
-Para los contratos, `tracegen` evalúa `Contract.check` sobre 409 contratos
+Para los contratos, `tracegen` evalúa `Contract.check` sobre 412 contratos
 (los contraejemplos y otros al azar) y exporta las tablas de `echo`,
-`note`, `counter`, `handover` y `restore`. `crates/contract/tests/contract_model.rs` exige que la `const fn`
+`note`, `counter`, `handover`, `restore`, `store_root`, `store_obj` y
+`store_share`. `crates/contract/tests/contract_model.rs` exige que la `const fn`
 `nsos_contract::check` dé el mismo veredicto y la misma cota, y que las
 tablas que genera la macro `contract!` sean las del modelo.
 

@@ -192,7 +192,7 @@ def contractTraces : GenM Unit := do
   emit "# P <nombre> <inicio> <transiciones>...   (tablas de nsos_contract::protocols)"
   for c in [Contract.mixed, Contract.nondet, Contract.flood, Contract.echoOld,
             Contract.echo, Contract.note, Contract.counter, Contract.handover,
-            Contract.restore] do
+            Contract.restore, Contract.storeRoot, Contract.storeObj, Contract.storeShare] do
     emit s!"C {c.start} {transStr c} => {checkStr c}"
   for _ in [0:400] do
     let c ← randContract
@@ -202,6 +202,9 @@ def contractTraces : GenM Unit := do
   emit s!"P counter {Contract.counter.start} {transStr Contract.counter}"
   emit s!"P handover {Contract.handover.start} {transStr Contract.handover}"
   emit s!"P restore {Contract.restore.start} {transStr Contract.restore}"
+  emit s!"P store_root {Contract.storeRoot.start} {transStr Contract.storeRoot}"
+  emit s!"P store_obj {Contract.storeObj.start} {transStr Contract.storeObj}"
+  emit s!"P store_share {Contract.storeShare.start} {transStr Contract.storeShare}"
 
 def writeLines (path : String) (gen : GenM Unit) : IO Unit := do
   let (((), _), lines) ← (gen.run ⟨20261119⟩).run #[]

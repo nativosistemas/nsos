@@ -11,3 +11,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [dependencies]
 nsos-abi = { path = "../abi" }
+
+[dev-dependencies]
+# Solo para comprobar que las etiquetas de los contratos del almacén son las
+# de `nsos_store::proto`.
+nsos-store = { path = "../store" }

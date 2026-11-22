@@ -88,18 +88,33 @@
 //! }
 //! ```
 //!
-//! Dos mensajes con la misma etiqueta:
+//! Dos mensajes con la misma etiqueta que pueden llegar en el mismo
+//! estado (el decodificador no sabría cuál es):
 //!
 //! ```compile_fail,E0080
 //! nsos_contract::contract! {
 //!     pub contract dup {
-//!         messages { Ping(1) {}, Pong(1) {} }
+//!         messages { Ping(1) {}, Pong(1) {}, Ack(2) {} }
 //!         start A;
-//!         client A { Ping => B }
-//!         server B { Pong => C }
-//!         end C;
+//!         client A { Ping => B, Pong => B }
+//!         server B { Ack => A }
 //!     }
 //! }
+//! ```
+//!
+//! En estados distintos sí pueden compartirla (como el error del almacén,
+//! que según el estado devuelve o no el búfer):
+//!
+//! ```
+//! nsos_contract::contract! {
+//!     pub contract shared {
+//!         messages { Ping(1) {}, Pong(1) {}, Ack(2) {} }
+//!         start A;
+//!         client A { Ping => B }
+//!         server B { Pong => A }
+//!     }
+//! }
+//! # fn main() {}
 //! ```
 
 #![no_std]
@@ -252,14 +267,19 @@ const fn reach_n(table: &[Transition], d: Dir, steps: usize, from: u64) -> u64 {
     cur
 }
 
-/// `true` si las etiquetas no se repiten (dos mensajes de un contrato no
-/// pueden compartir etiqueta: el decodificador no sabría cuál es).
-pub const fn labels_distinct(labels: &[u64]) -> bool {
+/// `true` si en cada estado las etiquetas de sus transiciones no se
+/// repiten. El decodificador elige el mensaje por la etiqueta **en el
+/// estado actual**, así que dos mensajes que pueden llegar en el mismo
+/// estado no pueden compartirla; en estados distintos sí (el modelo
+/// identifica cada mensaje por estado y etiqueta). La macro genera una fila
+/// por cada par (estado, mensaje), así que dos filas con el mismo origen y
+/// la misma etiqueta son dos mensajes distintos.
+pub const fn labels_distinct_per_state(table: &[Transition]) -> bool {
     let mut i = 0;
-    while i < labels.len() {
+    while i < table.len() {
         let mut j = i + 1;
-        while j < labels.len() {
-            if labels[i] == labels[j] {
+        while j < table.len() {
+            if table[i].src == table[j].src && table[i].label == table[j].label {
                 return false;
             }
             j += 1;
@@ -273,9 +293,9 @@ pub const fn labels_distinct(labels: &[u64]) -> bool {
 /// mensaje si el contrato no está bien formado o su cota no entra en la
 /// cola del kernel.
 #[doc(hidden)]
-pub const fn __assert_contract(table: &[Transition], labels: &[u64]) -> u32 {
-    if !labels_distinct(labels) {
-        panic!("contrato: dos mensajes con la misma etiqueta");
+pub const fn __assert_contract(table: &[Transition]) -> u32 {
+    if !labels_distinct_per_state(table) {
+        panic!("contrato: dos mensajes con la misma etiqueta en un mismo estado");
     }
     match check(table) {
         Ok(k) if k <= QUEUE_CAP => k,

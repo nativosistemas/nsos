@@ -6,7 +6,7 @@ use nsos_abi::cap::CapInfo;
 use nsos_abi::msg::{MsgHeader, MAX_CAPS, MAX_DATA};
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::{echo, restore};
+use crate::protocols::{echo, restore, store_obj};
 use crate::{check, Bytes, Chan, Dir, Msg, Receives, RecvError, Transition, Transport};
 
 /// Transporte cuyo `recv` entrega un mensaje cualquiera y cuyo `cap_info`
@@ -268,6 +268,50 @@ fn restore_decode_any() {
             let (ty, _) = t.answered(r.service.handle()).unwrap();
             assert_eq!(ty, ObjectType::Channel as u32);
             core::mem::forget(c);
+        }
+        Err(RecvError::Violation { chan, .. }) => {
+            assert_eq!(drops.get(), n);
+            core::mem::forget(chan);
+        }
+        Err(_) => unreachable!(),
+    };
+}
+
+/// El cliente del almacén esperando la respuesta a `Read`, con cualquier
+/// mensaje y cualquier respuesta de `cap_info`: sin pánicos; si acepta, es
+/// `Data` o `FailMem` y trae exactamente una capacidad, un objeto `Memory`
+/// con `READ` y `WRITE` (el búfer de vuelta); si no, se soltaron todas y el
+/// cliente sigue esperando en `Reading`.
+#[kani::proof]
+#[kani::unwind(230)]
+fn store_reading_decode_any() {
+    let msg = any_valid_message();
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let t = Any {
+        msg: &msg,
+        drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
+    };
+    let c: Chan<_, store_obj::client::Reading> = Chan::__from_parts(t, CapHandle(1));
+    let n = msg.cap_slice().len();
+    let check_buf = |h: CapHandle| {
+        assert_eq!(n, 1);
+        assert_eq!(h, msg.caps[0]);
+        let (ty, rights) = t.answered(h).unwrap();
+        assert_eq!(ty, ObjectType::Memory as u32);
+        assert!(Rights(rights).contains(Rights::READ | Rights::WRITE));
+    };
+    match c.recv() {
+        Ok(store_obj::client::recv::Reading::Data(idle, d)) => {
+            assert_eq!(msg.header.label, 15);
+            check_buf(d.buf.handle());
+            core::mem::forget(idle);
+        }
+        Ok(store_obj::client::recv::Reading::FailMem(idle, f)) => {
+            assert_eq!(msg.header.label, 99);
+            check_buf(f.buf.handle());
+            core::mem::forget(idle);
         }
         Err(RecvError::Violation { chan, .. }) => {
             assert_eq!(drops.get(), n);

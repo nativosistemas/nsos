@@ -161,3 +161,158 @@ contract! {
         end End;
     }
 }
+
+contract! {
+    /// Almacén, por la **raíz** de un dueño (`escritor`, `curioso` ↔
+    /// `almacen`). Etiquetas de `nsos_store::proto`. Modelo:
+    /// `Store.lean` y `StoreContract.lean`.
+    ///
+    /// `Open` no tiene campo de dueño: el almacén lo toma de la raíz por la
+    /// que llega el pedido, nunca del mensaje (`Store.rw_handle_from_owner`).
+    pub contract store_root {
+        messages {
+            /// Abrir el objeto `name` del dueño de esta raíz.
+            Open(10) {
+                /// `nsos_store::proto::OPEN_WRITE` pide escritura.
+                flags: u8,
+                /// Nombre (1 a 31 bytes, sin ceros).
+                name: Bytes<31>,
+            },
+            /// Abierto: datos del objeto y su handle.
+            Opened(11) {
+                /// Versión actual (0: todavía no existe).
+                version: u64,
+                /// Largo en bytes.
+                len: u32,
+                /// Si el handle permite escribir.
+                write: bool,
+                /// El handle: un canal que da acceso a este objeto y a nada más.
+                handle: Endpoint<store_obj::client::Idle>,
+            },
+            /// No se pudo.
+            Fail(99) {
+                /// Código (`nsos_store::proto::E_*`).
+                code: u32,
+                /// Versión actual, si viene al caso.
+                version: u64,
+            },
+        }
+        start Ready;
+        client Ready { Open => Opening }
+        server Opening { Opened => Ready, Fail => Ready }
+    }
+}
+
+contract! {
+    /// Almacén, por un **handle** (quien lo tenga ↔ `almacen`).
+    ///
+    /// `Read` y `Write` llevan el búfer del cliente (`Mem<RW>`) y **toda**
+    /// respuesta a ellos lo devuelve, también la de error (`FailMem`): el
+    /// cliente tipado siempre lo recupera. Por eso hay dos errores con la
+    /// misma etiqueta, cada uno en sus estados.
+    pub contract store_obj {
+        messages {
+            /// Datos del objeto.
+            Stat(12) {},
+            /// Respuesta a `Stat`.
+            Info(13) {
+                /// Versión actual.
+                version: u64,
+                /// Largo en bytes.
+                len: u32,
+                /// Si este handle permite escribir.
+                write: bool,
+            },
+            /// Leer el objeto en el búfer.
+            Read(14) {
+                /// Búfer (el almacén escribe en él).
+                buf: Mem<RW>,
+            },
+            /// Respuesta a `Read`: los datos están al principio del búfer.
+            Data(15) {
+                /// Versión leída.
+                version: u64,
+                /// Bytes leídos.
+                len: u32,
+                /// El búfer, de vuelta.
+                buf: Mem<RW>,
+            },
+            /// Escribir los primeros `len` bytes del búfer.
+            Write(16) {
+                /// Versión que se espera encontrar (`ANY_VERSION`: cualquiera;
+                /// 0: que no exista).
+                expected: u64,
+                /// Bytes a escribir.
+                len: u32,
+                /// Búfer con los datos.
+                buf: Mem<RW>,
+            },
+            /// Respuesta a `Write`.
+            Written(17) {
+                /// Versión nueva.
+                version: u64,
+                /// El búfer, de vuelta.
+                buf: Mem<RW>,
+            },
+            /// Un handle nuevo de **solo lectura** al mismo objeto.
+            DupRo(18) {},
+            /// Respuesta a `DupRo`.
+            Opened(11) {
+                /// Versión actual.
+                version: u64,
+                /// Largo en bytes.
+                len: u32,
+                /// Siempre `false`.
+                write: bool,
+                /// El handle nuevo.
+                handle: Endpoint<client::Idle>,
+            },
+            /// Error de un pedido sin búfer.
+            Fail(99) {
+                /// Código.
+                code: u32,
+                /// Versión actual, si viene al caso.
+                version: u64,
+            },
+            /// Error de un pedido con búfer: lo devuelve.
+            FailMem(99) {
+                /// Código.
+                code: u32,
+                /// Versión actual, si viene al caso.
+                version: u64,
+                /// El búfer, de vuelta.
+                buf: Mem<RW>,
+            },
+        }
+        start Idle;
+        client Idle { Stat => Asking, Read => Reading, Write => Writing, DupRo => Duping }
+        server Asking { Info => Idle, Fail => Idle }
+        server Reading { Data => Idle, FailMem => Idle }
+        server Writing { Written => Idle, FailMem => Idle }
+        server Duping { Opened => Idle, Fail => Idle }
+    }
+}
+
+contract! {
+    /// Prueba del almacén: `escritor` (cliente) le pasa a `curioso`
+    /// (servidor) un handle de solo lectura a su objeto, y `curioso`
+    /// contesta si todo salió como se esperaba.
+    pub contract store_share {
+        messages {
+            /// El handle de solo lectura.
+            Share(1) {
+                /// Handle (se mueve).
+                handle: Endpoint<store_obj::client::Idle>,
+            },
+            /// Resultado de las pruebas de `curioso`.
+            Verdict(2) {
+                /// `true` si todo fue como se esperaba.
+                ok: bool,
+            },
+        }
+        start Start;
+        client Start { Share => Waiting }
+        server Waiting { Verdict => End }
+        end End;
+    }
+}

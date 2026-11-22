@@ -9,10 +9,10 @@ use std::vec::Vec;
 use nsos_abi::cap::CapInfo;
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::{counter, echo, handover, note, restore};
+use crate::protocols::{counter, echo, handover, note, restore, store_obj, store_root};
 use crate::{
-    check, labels_distinct, Bytes, Chan, CheckError, Dir, Mem, Msg, RecvError, Transition,
-    Transport, RO, RW,
+    check, labels_distinct_per_state, Bytes, Chan, CheckError, Dir, Mem, Msg, RecvError,
+    Transition, Transport, RO, RW,
 };
 
 /// Un objeto del kernel simulado.
@@ -370,8 +370,15 @@ fn check_rejects_what_the_model_rejects() {
     let three = [tr(0, true, 1, 1), tr(1, true, 2, 2), tr(2, true, 3, 3)];
     assert_eq!(check(&three), Ok(3));
     assert_eq!(check(&[tr(64, true, 1, 0)]), Err(CheckError::TooManyStates));
-    assert!(labels_distinct(&[1, 2, 3]));
-    assert!(!labels_distinct(&[1, 2, 1]));
+    // La misma etiqueta en dos estados, sí; en el mismo, no.
+    assert!(labels_distinct_per_state(&[
+        tr(0, true, 1, 1),
+        tr(1, false, 1, 0)
+    ]));
+    assert!(!labels_distinct_per_state(&[
+        tr(0, true, 1, 1),
+        tr(0, true, 1, 2)
+    ]));
 }
 
 fn mem(k: &RefCell<Kernel>, r: Rights) -> CapHandle {
@@ -544,4 +551,62 @@ fn call_is_send_then_recv() {
     let mut m = Message::default();
     t.recv(srv, &mut m, true).unwrap();
     assert_eq!(m.header.label, 1);
+}
+
+/// El formato en el cable es el de `nsos_store::proto`: `OPENED` es
+/// `[versión u64 | largo u32 | escribe u8]` con el handle adjunto.
+#[test]
+fn store_wire_format() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = t.channel_create().unwrap();
+    let cli: Chan<_, store_root::client::Ready> = Chan::open(t, cli).unwrap();
+    let opening = cli
+        .send(store_root::Open {
+            flags: 1,
+            name: Bytes::new(b"contador").unwrap(),
+        })
+        .unwrap();
+    let mut m = Message::default();
+    t.recv(srv, &mut m, true).unwrap();
+    assert_eq!((m.header.label, m.payload()), (10, &b"\x01contador"[..]));
+    // El almacén contesta a mano, como hoy.
+    let (_mine, theirs) = t.channel_create().unwrap();
+    let mut p = [0u8; 13];
+    p[..8].copy_from_slice(&3u64.to_le_bytes());
+    p[8..12].copy_from_slice(&16u32.to_le_bytes());
+    p[12] = 1;
+    raw(t, srv, 11, &p, &[theirs]);
+    let store_root::client::recv::Opening::Opened(_ready, o) = opening.recv().unwrap() else {
+        panic!("esperaba Opened");
+    };
+    assert_eq!((o.version, o.len, o.write), (3, 16, true));
+    let h: Chan<_, store_obj::client::Idle> = Chan::attach(t, o.handle);
+    drop(h);
+}
+
+/// Un pedido con búfer: el error lo devuelve; una respuesta sin búfer no es
+/// del contrato y el cliente sigue esperando en `Reading`.
+#[test]
+fn store_buffer_always_comes_back() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = t.channel_create().unwrap();
+    let cli: Chan<_, store_obj::client::Idle> = Chan::open(t, cli).unwrap();
+    let buf: Mem<RW> = Mem::open(t, mem(&k, ALL)).unwrap();
+    let reading = cli.send(store_obj::Read { buf }).unwrap();
+    let mut m = Message::default();
+    t.recv(srv, &mut m, true).unwrap();
+    let back = m.caps[0];
+    // Un error sin el búfer: violación (el cliente no lo pierde de vista).
+    raw(t, srv, 99, &[0; 12], &[]);
+    let Err(RecvError::Violation { chan: reading, .. }) = reading.recv() else {
+        panic!("esperaba una violación");
+    };
+    // El error con el búfer: `FailMem`.
+    raw(t, srv, 99, &[0; 12], &[back]);
+    let store_obj::client::recv::Reading::FailMem(_idle, f) = reading.recv().unwrap() else {
+        panic!("esperaba FailMem");
+    };
+    assert!(Mem::<RW>::open(t, f.buf.handle()).is_ok());
 }

@@ -1,10 +1,11 @@
 # Contratos de canal tipados
 
-Estado: **etapa 2** (crate `nsos-contract`, modelo en Lean, `ping`/`pong`
-y la actualización en vivo migrados). La fuente de verdad ejecutable es
-[`crates/contract`](../crates/contract), y los modelos,
-[`verification/lean/Nsos/Contract.lean`](../verification/lean/Nsos/Contract.lean)
-y [`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean).
+Estado: **etapa 3** (crate `nsos-contract`, modelo en Lean; `ping`/`pong`,
+la actualización en vivo y el almacén migrados). La fuente de verdad
+ejecutable es [`crates/contract`](../crates/contract), y los modelos,
+[`Contract.lean`](../verification/lean/Nsos/Contract.lean),
+[`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean) y
+[`StoreContract.lean`](../verification/lean/Nsos/StoreContract.lean).
 
 ## Qué son
 
@@ -74,7 +75,7 @@ contrato. Si falla, el programa no compila:
 | En cada estado manda una sola punta | Si las dos pueden mandar a la vez, cada una recibe algo que no espera | `Contract.mixed_breaks` |
 | Una etiqueta lleva a un solo estado | Si no, las puntas quedan desfasadas | `Contract.nondet_breaks` |
 | Hay una cota `k` de mensajes seguidos de una misma punta, y `k ≤ 64` | Sin cota, la cola del kernel (64 mensajes) se llena | `Contract.loop_unbounded` |
-| Las etiquetas no se repiten | El decodificador no sabría qué mensaje es | — |
+| En un mismo estado, dos mensajes no comparten etiqueta | El decodificador elige el mensaje por la etiqueta en el estado actual. En estados distintos sí pueden (el error del almacén va con o sin búfer según el estado) | — |
 | Cada mensaje entra en un `Message` (224 bytes, 4 capacidades) | — | — |
 
 La sintaxis ya impide algunos errores: un estado en `client` y en `server` a
@@ -128,7 +129,8 @@ contrato no prevé.
   genera la macro sean las del modelo. La CI regenera la traza y falla si
   cambió.
 * Kani (`crates/contract/src/proofs.rs`): `decode_any`, `restore_decode_any`,
-  `roundtrip_echo`, `roundtrip_endpoint`, `check_any`.
+  `store_reading_decode_any`, `roundtrip_echo`, `roundtrip_endpoint`,
+  `check_any`.
 
 La macro numera los estados como el modelo: primero los estados `client`,
 después los `server` y al final los `end`, cada grupo en el orden en que se
@@ -182,13 +184,54 @@ el estado, retomar sin `Rollback`) y cinco de los contratos.
 y `destino` usan los contratos; `enlace` sigue sin tipos (etapa 4), pero
 ahora le pasa a `destino` el estado de solo lectura, como exige `restore`.
 
+## El almacén (etapa 3)
+
+El protocolo de [`almacenamiento.md`](almacenamiento.md) son dos contratos,
+con las etiquetas de `nsos_store::proto` (un test lo comprueba):
+
+| Contrato | Cliente ↔ servidor | Tabla | Cota |
+|---|---|---|---|
+| `store_root` | dueño ↔ `almacen` | `Ready: Open → Opening`; `Opening: Opened → Ready`, `Fail → Ready` | 1 |
+| `store_obj` | quien tiene el handle ↔ `almacen` | `Idle: Stat → Asking`, `Read → Reading`, `Write → Writing`, `DupRo → Duping`; `Asking: Info`, `Fail`; `Reading: Data`, `FailMem`; `Writing: Written`, `FailMem`; `Duping: Opened`, `Fail` (todas a `Idle`) | 1 |
+
+Más `store_share`, el canal de prueba por el que `escritor` le pasa a
+`curioso` un handle de solo lectura.
+
+**Lo que garantiza el tipo.**
+* `Open` lleva `flags` y `name`, **no** un dueño: el almacén lo toma de la
+  raíz por la que llegó (`Store.rw_handle_from_owner` supone eso).
+* El handle viaja como `Endpoint<store_obj::client::Idle>`, en `Opened`
+  y en `Share`.
+* `Read` y `Write` llevan el búfer del cliente (`Mem<RW>`), y sus
+  respuestas también, la de error incluida (`FailMem`). El almacén tipado
+  no puede contestar sin devolverlo, y el cliente tipado descarta una
+  respuesta sin él (Kani: `store_reading_decode_any`; test
+  `store_buffer_always_comes_back`).
+* El error tiene la misma etiqueta (99) con y sin búfer. Por eso la regla
+  de etiquetas distintas pasó a ser **por estado**, que es lo que necesita
+  el decodificador.
+
+**Lo que demuestra el modelo** (`Nsos/StoreContract.lean`): cada pedido
+del modelo del almacén es un intercambio completo de su contrato, de
+reposo a reposo (`exec_follows`), y los que el modelo rechaza tienen su
+respuesta de error (`rejected_follows`). Es una correspondencia por tipo
+de pedido: lo que decide si se atiende (quién puede escribir) lo sigue
+demostrando `Store.lean`. `buffer_states_reply_only` es la propiedad de la
+tabla en que se apoya la devolución del búfer. Cinco mutaciones de las
+tablas lo rompen.
+
+Un cambio de comportamiento: un nombre de más de 31 bytes ya no recibe
+`ERR`, porque no es del contrato (`Bytes<31>`): el almacén lo descarta
+como violación. Ningún cliente del sistema lo mandaba.
+
 ## Etapas
 
 1. **(hecha)** Crate, modelo, `ping`/`pong`.
 2. **(hecha)** Protocolo de actualización en vivo (`init`, `contador-*`,
    `cliente`, `origen`, `destino`), con `Mem<RW>`/`Mem<RO>` y `call`. El
    modelo `Upgrade.lean` sigue los contratos (`UpgradeContract.lean`).
-3. Protocolo del almacén (`nsos_store::proto`).
+3. **(hecha)** Protocolo del almacén (`almacen`, `escritor`, `curioso`):
+   `store_root`, `store_obj` y `store_share` (`StoreContract.lean`).
 4. Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de migración.
 5. Opcional: un `contract_id` fijo en cada canal, que el kernel informe en
    `cap_info`, para que la identidad del contrato de un extremo recibido la

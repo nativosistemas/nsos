@@ -14,3 +14,4 @@ import Nsos.Wait
 import Nsos.Irq
 import Nsos.Contract
 import Nsos.UpgradeContract
+import Nsos.StoreContract
