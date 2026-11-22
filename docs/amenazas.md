@@ -160,6 +160,18 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    informe en `cap_info` (etapa 5 de [`contratos.md`](contratos.md)), y
    `send` con plazo.
 
+15. **Inundar la red ya no bloquea a `virtnet`** (*resuelto*). Entregaba
+   cada trama al enlace con un `send` bloqueante y el enlace le mandaba
+   paquetes también bloqueando: alguien que pudiera poner tramas en la red
+   (sin la clave) llenaba la cola del enlace mientras este atendía al
+   cliente, y los dos quedaban esperándose (`Contract.stream_unbounded`
+   muestra por qué un flujo no tiene cota). Ahora `virtnet` entrega con
+   `try_send` y descarta lo que no entra. Lo que queda es negación de
+   servicio de la red misma: tramas legítimas descartadas mientras dure la
+   inundación, que el enlace ya trata como pérdida. No hay prueba en QEMU
+   que inunde la red; lo cubren el modelo, el test
+   `net_try_send_drops_when_full` y Kani (`try_send_any`).
+
 ## Supuestos de confianza
 
 * El kernel (con su `unsafe` registrado) es correcto en lo que no está

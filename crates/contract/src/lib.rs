@@ -127,7 +127,9 @@ mod mem;
 pub mod protocols;
 mod wire;
 
-pub use chan::{Chan, Endpoint, Receives, RecvError, RecvResult, Sends, State, Transport};
+pub use chan::{
+    Chan, Endpoint, Receives, RecvError, RecvResult, Sends, State, Transport, TrySendError,
+};
 pub use mem::{Access, Mem, RO, RW};
 pub use wire::{Bytes, Field, Msg, Reader, Writer};
 
@@ -287,6 +289,34 @@ pub const fn labels_distinct_per_state(table: &[Transition]) -> bool {
         i += 1;
     }
     true
+}
+
+/// `true` si la tabla es un **flujo**: todas sus transiciones salen de
+/// `start` y vuelven a `start` (`Contract.streamB`). En un flujo mandan las
+/// dos puntas sin cambiar de estado, así que todo lo que llega es esperado
+/// (`Contract.stream_head_receivable_a/b`), pero la cola no tiene cota
+/// (`Contract.stream_unbounded`): al menos una punta tiene que mandar con
+/// [`Chan::try_send`] y descartar lo que no entra.
+pub const fn stream_check(table: &[Transition], start: u16) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].src != start || table[i].dst != start {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// El control de un flujo que corre la macro al compilar.
+#[doc(hidden)]
+pub const fn __assert_stream(table: &[Transition]) {
+    if !labels_distinct_per_state(table) {
+        panic!("flujo: dos mensajes con la misma etiqueta");
+    }
+    if !stream_check(table, 0) {
+        panic!("flujo: una transición cambia de estado");
+    }
 }
 
 /// El control que corre la macro al compilar: falla la compilación con un

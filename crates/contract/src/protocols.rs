@@ -316,3 +316,96 @@ contract! {
         end End;
     }
 }
+
+contract! {
+    /// Consola virtio (`hola` ↔ `virtcon`): texto y cuántos bytes salieron.
+    pub contract console {
+        messages {
+            /// Texto a transmitir.
+            Write(1) {
+                /// El texto.
+                text: Bytes<224>,
+            },
+            /// Se transmitió.
+            Written(2) {
+                /// Bytes transmitidos.
+                n: u32,
+            },
+        }
+        start Ready;
+        client Ready { Write => Writing }
+        server Writing { Written => Ready }
+    }
+}
+
+contract! {
+    /// Disco virtio (`almacen` ↔ `virtblk`). Los datos van por el búfer que
+    /// comparten (lo reparte el kernel); por el canal, solo los pedidos. Un
+    /// sector son 512 bytes. `Info` es pedido y respuesta con la misma
+    /// etiqueta, en estados distintos.
+    pub contract block {
+        messages {
+            /// Geometría del disco.
+            Info(1) {},
+            /// Respuesta a `Info`.
+            Geometry(1) {
+                /// Sectores del disco.
+                sectors: u64,
+                /// Si el disco tiene caché (y `Flush` hace algo).
+                flush: bool,
+                /// Tamaño del búfer compartido, en sectores.
+                buf_sectors: u32,
+            },
+            /// Leer `count` sectores desde `sector` al principio del búfer.
+            Read(2) {
+                /// Primer sector.
+                sector: u64,
+                /// Cantidad.
+                count: u32,
+            },
+            /// Escribir lo que hay al principio del búfer.
+            Write(3) {
+                /// Primer sector.
+                sector: u64,
+                /// Cantidad.
+                count: u32,
+            },
+            /// Que todo lo escrito quede en el disco.
+            Flush(5) {},
+            /// Respuesta a `Read`, `Write` y `Flush`.
+            Done(4) {
+                /// 0 = bien, 1 = error del dispositivo, 2 = pedido inválido.
+                status: u8,
+            },
+        }
+        start Ready;
+        client Ready { Info => Asking, Read => Busy, Write => Busy, Flush => Busy }
+        server Asking { Geometry => Ready }
+        server Busy { Done => Ready }
+    }
+}
+
+contract! {
+    /// Red virtio (`enlace` ↔ `virtnet`): un **flujo**. Los paquetes van y
+    /// vienen sin pedido ni respuesta, así que no hay cota de mensajes en
+    /// vuelo (`Contract.stream_unbounded`). `virtnet` entrega lo que llega
+    /// con `try_send` y descarta si la cola del enlace está llena, como una
+    /// placa de red con el anillo lleno: así nunca se bloquean los dos a la
+    /// vez esperándose.
+    pub stream net {
+        messages {
+            /// Paquete para mandar a la red.
+            Send(1) {
+                /// El paquete.
+                packet: Bytes<224>,
+            },
+            /// Paquete que llegó de la red.
+            Recv(2) {
+                /// El paquete.
+                packet: Bytes<224>,
+            },
+        }
+        client sends { Send }
+        server sends { Recv }
+    }
+}

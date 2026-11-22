@@ -22,6 +22,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Contract.lean` | Contratos de canal tipados (`crates/contract`): autómata, dos puntas con colas FIFO, el control `check` y su corrección. |
 | `Nsos/UpgradeContract.lean` | El protocolo de `Upgrade.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/StoreContract.lean` | El almacén de `Store.lean` sigue los contratos `store_root` y `store_obj`. |
+| `Nsos/MigrationContract.lean` | La migración de `Migration.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
@@ -156,7 +157,9 @@ cambiados. `check` es el control que corre la macro al compilar.
   Para compilar así se escribe el `.olean` a mano (`lake env lean -o`).
   Lake decide si recompilar por el hash del fuente, no del `.olean`, así
   que después hay que borrar `.lake/build`: si no, queda el modelo mutado
-  y recortado aunque el fuente esté bien.
+  y recortado aunque el fuente esté bien. Por lo mismo, antes de usar
+  `lake env lean` hay que hacer `lake build` de lo que se restauró de una
+  mutación anterior: `lake env lean` usa el `.olean` que haya.
 
 ### El almacén sigue sus contratos (`Nsos/StoreContract.lean`)
 
@@ -173,6 +176,30 @@ cambiados. `check` es el control que corre la macro al compilar.
 * Mutaciones: quitar `Written` o el error de `Write`, contestar `Read` con
   `Written`, y que una respuesta no vuelva al reposo (estas dos las atrapa
   también la cota de `check`).
+
+### Flujos (`Nsos/Contract.lean`)
+
+* `streamB`: todas las transiciones salen del estado inicial y vuelven a
+  él (las dos puntas mandan sin cambiar de estado).
+* `stream_inv`, `stream_head_receivable_a/b`: en un flujo, todo lo que
+  llega es esperado aunque los mensajes se crucen.
+* `stream_unbounded`: pero la cola crece sin límite; por eso al menos una
+  punta tiene que mandar sin bloquear (`try_send`).
+* `net_is_stream`: `net` es un flujo y `check` lo rechaza.
+* `console_check`, `block_check`: cota 1.
+* Mutaciones: que `streamB` no exija volver al estado (rompe
+  `stream_inv`) y que `Send` cambie de estado (rompe `net_is_stream`).
+
+### La migración sigue sus contratos (`Nsos/MigrationContract.lean`)
+
+* `handover_follows`, `restore_follows`: cada paso de la migración es cero,
+  uno o dos pasos de cada contrato, sin excepciones (el canal con el
+  enlace es el mismo en todos los intentos).
+* `handover_reachable`, `restore_reachable`, `migration_contract_safe`.
+* Mutaciones: que `Reject` termine el canal, y en el modelo (recortado,
+  como en `UpgradeContract`) que el enlace tome los recursos sin
+  `MIGRATE`, que `origen` haga commit sin que el enlace le pase el
+  `ACCEPT` y que haga rollback sin que el enlace le devuelva los recursos.
 
 ### IPC completo (`Nsos/Ipc.lean`)
 
@@ -222,8 +249,9 @@ del repo no coincide con lo que produce el modelo.
 
 Para los contratos, `tracegen` evalúa `Contract.check` sobre 412 contratos
 (los contraejemplos y otros al azar) y exporta las tablas de `echo`,
-`note`, `counter`, `handover`, `restore`, `store_root`, `store_obj` y
-`store_share`. `crates/contract/tests/contract_model.rs` exige que la `const fn`
+`note`, `counter`, `handover`, `restore`, `store_root`, `store_obj`,
+`store_share`, `console`, `block` y `net`, y el veredicto de `streamB`
+(test `stream_check_agrees_with_model`). `crates/contract/tests/contract_model.rs` exige que la `const fn`
 `nsos_contract::check` dé el mismo veredicto y la misma cota, y que las
 tablas que genera la macro `contract!` sean las del modelo.
 

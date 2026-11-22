@@ -12,6 +12,8 @@ use crate::wire::Msg;
 pub trait Transport: Copy {
     /// `channel_send` (bloqueante).
     fn send(self, h: CapHandle, m: &Message) -> Result<(), Error>;
+    /// `channel_send` con `NONBLOCK`: `WouldBlock` si la cola está llena.
+    fn try_send(self, h: CapHandle, m: &Message) -> Result<(), Error>;
     /// `channel_recv`; con `nonblock`, `WouldBlock` si la cola está vacía.
     fn recv(self, h: CapHandle, m: &mut Message, nonblock: bool) -> Result<(), Error>;
     /// `cap_info`.
@@ -117,6 +119,24 @@ pub struct Chan<T: Transport, S: State> {
     _s: PhantomData<S>,
 }
 
+/// Error de [`Chan::try_send`].
+pub enum TrySendError<C> {
+    /// La cola de la otra punta está llena: el mensaje se descartó (y se
+    /// soltaron sus capacidades); el canal vuelve en el mismo estado.
+    Full(C),
+    /// Falló la syscall (por ejemplo `PeerClosed`); el canal se cerró.
+    Failed(Error),
+}
+
+impl<C> core::fmt::Debug for TrySendError<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TrySendError::Full(_) => f.write_str("Full"),
+            TrySendError::Failed(e) => write!(f, "Failed({e:?})"),
+        }
+    }
+}
+
 /// Lo que devuelve recibir en el estado `S`: la rama que llegó, o el error
 /// (con el canal, si sigue abierto).
 pub type RecvResult<T, S> = Result<<S as Receives>::Branch<T>, RecvError<Chan<T, S>>>;
@@ -220,6 +240,33 @@ impl<T: Transport, S: State> Chan<T, S> {
 }
 
 impl<T: Transport, S: State> Chan<T, S> {
+    /// Como `send`, pero sin bloquear: si la cola de la otra punta está
+    /// llena, descarta el mensaje y devuelve el canal en el mismo estado
+    /// ([`TrySendError::Full`]). Es lo que exige un flujo
+    /// ([`stream_check`](crate::stream_check)) en al menos una punta.
+    pub fn try_send<M: Msg>(self, msg: M) -> Result<Chan<T, S::Next>, TrySendError<Self>>
+    where
+        S: Sends<M>,
+    {
+        let mut m = Message::default();
+        msg.encode(&mut m);
+        match self.t.try_send(self.h, &m) {
+            Ok(()) => {
+                let (t, h) = (self.t, self.h);
+                core::mem::forget(self);
+                Ok(Chan::__from_parts(t, h))
+            }
+            Err(Error::WouldBlock) => {
+                crate::discard(self.t, &m);
+                Err(TrySendError::Full(self))
+            }
+            Err(e) => {
+                crate::discard(self.t, &m);
+                Err(TrySendError::Failed(e))
+            }
+        }
+    }
+
     /// Manda `msg` y espera la respuesta en una sola syscall
     /// (`channel_call`). Es `send` seguido de `recv` en el estado siguiente.
     ///

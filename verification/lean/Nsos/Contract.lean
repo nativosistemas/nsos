@@ -567,4 +567,119 @@ def storeShare : Contract := ⟨0, [⟨0, .ab, 1, 1⟩, ⟨1, .ba, 2, 2⟩]⟩
 
 theorem storeShare_check : check storeShare = some 1 := by decide
 
+/-! ### Drivers (etapa 4) -/
+
+/-- `console` (`hola` ↔ `virtcon`). Estados: `Ready` 0, `Writing` 1.
+Etiquetas: `Write` 1, `Written` 2. -/
+def console : Contract := ⟨0, [⟨0, .ab, 1, 1⟩, ⟨1, .ba, 2, 0⟩]⟩
+
+/-- `block` (`almacen` ↔ `virtblk`). Estados: `Ready` 0, `Asking` 1,
+`Busy` 2. Etiquetas: `Info` 1 (pedido y respuesta, en estados distintos),
+`Read` 2, `Write` 3, `Done` 4, `Flush` 5. -/
+def block : Contract :=
+  ⟨0, [⟨0, .ab, 1, 1⟩, ⟨0, .ab, 2, 2⟩, ⟨0, .ab, 3, 2⟩, ⟨0, .ab, 5, 2⟩,
+       ⟨1, .ba, 1, 0⟩, ⟨2, .ba, 4, 0⟩]⟩
+
+theorem console_check : check console = some 1 := by decide
+theorem block_check : check block = some 1 := by decide
+
+/-! ## Flujos
+
+Un **flujo** es un contrato de un solo estado del que nunca se sale y en el
+que mandan las dos puntas: paquetes que van y vienen sin pedido ni
+respuesta (`virtnet` ↔ `enlace`). `check` lo rechaza, porque es un estado
+mixto y sin cota. Pero los mensajes cruzados no son un problema: como
+nadie cambia de estado, todo lo que llega es esperado
+(`stream_head_receivable_a/b`). Lo que sí pasa es que la cola crece sin
+límite (`stream_unbounded`): con colas finitas, una punta que manda
+bloqueando puede quedar esperando a la otra, y si las dos lo hacen, se
+bloquean mutuamente. Por eso en un flujo al menos una punta tiene que
+mandar sin bloquear y descartar lo que no entra (`try_send` en la crate),
+como hace una placa de red con el anillo lleno. -/
+
+/-- Todas las transiciones salen del estado inicial y vuelven a él. -/
+def streamB : Bool := C.trans.all fun t => t.src == C.start && t.dst == C.start
+
+theorem streamB_sound (h : streamB C = true) :
+    ∀ t ∈ C.trans, t.src = C.start ∧ t.dst = C.start := by
+  intro t ht
+  simp only [streamB, List.all_eq_true] at h
+  have := h t ht
+  simp at this
+  exact this
+
+/-- Invariante de un flujo: las dos puntas en el único estado, y en cada
+cola solo etiquetas que la otra punta puede mandar. -/
+def StreamInv (c : Cfg) : Prop :=
+  c.a = C.start ∧ c.b = C.start ∧
+  (∀ l ∈ c.qa, ∃ t ∈ C.trans, t.dir = .ba ∧ t.label = l) ∧
+  (∀ l ∈ c.qb, ∃ t ∈ C.trans, t.dir = .ab ∧ t.label = l)
+
+theorem stream_inv (h : streamB C = true) {c : Cfg} (hr : Reachable C c) :
+    StreamInv C c := by
+  have hs := streamB_sound C h
+  induction hr with
+  | init => exact ⟨rfl, rfl, by simp [init], by simp [init]⟩
+  | step _ st ih =>
+    obtain ⟨ha, hb, hqa, hqb⟩ := ih
+    cases st with
+    | sendA t ht _ hd =>
+      refine ⟨(hs t ht).2, hb, hqa, ?_⟩
+      intro l hl
+      rcases List.mem_append.mp hl with hl | hl
+      · exact hqb l hl
+      · simp at hl; exact ⟨t, ht, hd, hl.symm⟩
+    | recvA t r hq ht _ _ =>
+      refine ⟨(hs t ht).2, hb, ?_, hqb⟩
+      intro l hl; exact hqa l (by rw [hq]; exact List.mem_cons_of_mem _ hl)
+    | sendB t ht _ hd =>
+      refine ⟨ha, (hs t ht).2, ?_, hqb⟩
+      intro l hl
+      rcases List.mem_append.mp hl with hl | hl
+      · exact hqa l hl
+      · simp at hl; exact ⟨t, ht, hd, hl.symm⟩
+    | recvB t r hq ht _ _ =>
+      refine ⟨ha, (hs t ht).2, hqa, ?_⟩
+      intro l hl; exact hqb l (by rw [hq]; exact List.mem_cons_of_mem _ hl)
+
+/-- En un flujo, todo lo que llega al cliente lo puede recibir. -/
+theorem stream_head_receivable_a (h : streamB C = true) {c : Cfg} (hr : Reachable C c)
+    {l : Nat} {r : List Nat} (hq : c.qa = l :: r) :
+    ∃ t ∈ C.trans, t.src = c.a ∧ t.dir = .ba ∧ t.label = l := by
+  obtain ⟨ha, _, hqa, _⟩ := stream_inv C h hr
+  obtain ⟨t, ht, hd, hl⟩ := hqa l (by rw [hq]; exact List.mem_cons_self ..)
+  exact ⟨t, ht, ((streamB_sound C h) t ht).1.trans ha.symm, hd, hl⟩
+
+/-- En un flujo, todo lo que llega al servidor lo puede recibir. -/
+theorem stream_head_receivable_b (h : streamB C = true) {c : Cfg} (hr : Reachable C c)
+    {l : Nat} {r : List Nat} (hq : c.qb = l :: r) :
+    ∃ t ∈ C.trans, t.src = c.b ∧ t.dir = .ab ∧ t.label = l := by
+  obtain ⟨_, hb, _, hqb⟩ := stream_inv C h hr
+  obtain ⟨t, ht, hd, hl⟩ := hqb l (by rw [hq]; exact List.mem_cons_self ..)
+  exact ⟨t, ht, ((streamB_sound C h) t ht).1.trans hb.symm, hd, hl⟩
+
+/-- Y no hay cota: si el cliente puede mandar algo, la cola del servidor
+puede crecer tanto como se quiera. -/
+theorem stream_unbounded (h : streamB C = true) {t : Trans} (ht : t ∈ C.trans)
+    (hd : t.dir = .ab) : ∀ n, ∃ c, Reachable C c ∧ n ≤ c.qb.length := by
+  have hs := streamB_sound C h
+  have key : ∀ n, ∃ c, Reachable C c ∧ c.a = C.start ∧ n ≤ c.qb.length := by
+    intro n
+    induction n with
+    | zero => exact ⟨init C, Reachable.init, rfl, Nat.zero_le _⟩
+    | succ n ih =>
+      obtain ⟨c, hc, ha, hn⟩ := ih
+      refine ⟨_, Reachable.step hc (Step.sendA c t ht ((hs t ht).1.trans ha.symm) hd),
+        (hs t ht).2, ?_⟩
+      simp; omega
+  intro n
+  obtain ⟨c, hc, _, hn⟩ := key n
+  exact ⟨c, hc, hn⟩
+
+/-- `net` (`enlace` ↔ `virtnet`): un flujo. Estado `Open` 0. Etiquetas:
+`Send` 1 (paquete a la red), `Recv` 2 (paquete de la red). -/
+def net : Contract := ⟨0, [⟨0, .ab, 1, 0⟩, ⟨0, .ba, 2, 0⟩]⟩
+
+theorem net_is_stream : streamB net = true ∧ check net = none := by decide
+
 end Nsos.Contract

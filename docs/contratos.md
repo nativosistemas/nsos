@@ -1,11 +1,13 @@
 # Contratos de canal tipados
 
-Estado: **etapa 3** (crate `nsos-contract`, modelo en Lean; `ping`/`pong`,
-la actualización en vivo y el almacén migrados). La fuente de verdad
-ejecutable es [`crates/contract`](../crates/contract), y los modelos,
+Estado: **etapa 4** (crate `nsos-contract`, modelo en Lean; todos los
+protocolos entre cells del sistema migrados, salvo los ad hoc de las
+pruebas del supervisor). La fuente de verdad ejecutable es
+[`crates/contract`](../crates/contract), y los modelos,
 [`Contract.lean`](../verification/lean/Nsos/Contract.lean),
-[`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean) y
-[`StoreContract.lean`](../verification/lean/Nsos/StoreContract.lean).
+[`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean),
+[`StoreContract.lean`](../verification/lean/Nsos/StoreContract.lean) y
+[`MigrationContract.lean`](../verification/lean/Nsos/MigrationContract.lean).
 
 ## Qué son
 
@@ -129,8 +131,8 @@ contrato no prevé.
   genera la macro sean las del modelo. La CI regenera la traza y falla si
   cambió.
 * Kani (`crates/contract/src/proofs.rs`): `decode_any`, `restore_decode_any`,
-  `store_reading_decode_any`, `roundtrip_echo`, `roundtrip_endpoint`,
-  `check_any`.
+  `store_reading_decode_any`, `try_send_any`, `roundtrip_echo`,
+  `roundtrip_endpoint`, `check_any`.
 
 La macro numera los estados como el modelo: primero los estados `client`,
 después los `server` y al final los `end`, cada grupo en el orden en que se
@@ -224,6 +226,53 @@ Un cambio de comportamiento: un nombre de más de 31 bytes ya no recibe
 `ERR`, porque no es del contrato (`Bytes<31>`): el almacén lo descarta
 como violación. Ningún cliente del sistema lo mandaba.
 
+## Drivers, flujos y el enlace (etapa 4)
+
+| Contrato | Cliente ↔ servidor | Tabla | Cota |
+|---|---|---|---|
+| `console` | `hola` ↔ `virtcon` | `Ready: Write → Writing`; `Writing: Written → Ready` | 1 |
+| `block` | `almacen` ↔ `virtblk` | `Ready: Info → Asking`, `Read`/`Write`/`Flush → Busy`; `Asking: Geometry → Ready`; `Busy: Done → Ready` | 1 |
+| `net` (flujo) | `enlace` ↔ `virtnet` | `Open: Send → Open` (cliente), `Recv → Open` (servidor) | sin cota |
+
+**Flujos.** La red no es pedido y respuesta: `enlace` manda paquetes cuando
+quiere y `virtnet` le entrega cada trama que llega. Eso es un estado en el
+que mandan las dos puntas, que `check` rechaza. Para eso está la otra forma
+de la macro, `stream`: un solo estado, `Open`, del que nunca se sale. Se
+comprueba al compilar con `stream_check` (`Contract.streamB` en el modelo;
+el test `contract_model` compara las dos en 412 contratos). Lo que vale:
+
+* ningún mensaje inesperado: como nadie cambia de estado, los mensajes
+  cruzados se reciben bien (`Contract.stream_head_receivable_a/b`);
+* pero **no hay cota**: la cola puede crecer tanto como se quiera
+  (`Contract.stream_unbounded`).
+
+Con colas finitas, lo segundo es un riesgo concreto. Antes de esta etapa,
+`virtnet` entregaba cada trama con un `send` bloqueante y `enlace` le
+mandaba paquetes también bloqueando. Si alguien inunda la red mientras
+`enlace` atiende al cliente (y no lee la red), se llena la cola de
+`enlace`, `virtnet` queda bloqueado, deja de transmitir, se llena su propia
+cola y `enlace` también se bloquea. No hace falta la clave del enlace:
+alcanza con poder poner tramas en la red. Ahora `virtnet` entrega con
+`Chan::try_send` y, si la cola de `enlace` está llena, descarta la trama y
+la cuenta, como una placa de red con el anillo lleno. La regla para todo
+flujo: al menos una punta manda sin bloquear.
+
+**El enlace** usa `net` hacia `virtnet`, `restore` hacia los supervisores
+(servidor del lado de origen, donde el enlace hace de versión nueva;
+cliente del lado de destino) y `counter` para el servicio que reenvía. Lo
+que viaja por el cable no cambió (`T_REQ`/`T_RESP` con etiqueta y datos),
+así que el modelo del enlace autenticado (`Link.lean`) sigue valiendo.
+
+**Lo que demuestra el modelo** (`Nsos/MigrationContract.lean`): cada paso
+de la migración de `Migration.lean` es cero, uno o dos pasos de `handover`
+y `restore`, ahora sin excepciones (el canal con el enlace es el mismo en
+todos los intentos y por eso `restore` vuelve a `Start`), y en todo estado
+alcanzable valen los teoremas de `Contract.lean`
+(`migration_contract_safe`). Al escribirlo apareció un error en el mapeo
+(el paso en que `origen` recibe el estado de la vieja); la demostración no
+cerraba hasta corregirlo. Tres mutaciones del modelo y tres de las tablas y
+de la teoría de flujos lo rompen.
+
 ## Etapas
 
 1. **(hecha)** Crate, modelo, `ping`/`pong`.
@@ -232,7 +281,9 @@ como violación. Ningún cliente del sistema lo mandaba.
    modelo `Upgrade.lean` sigue los contratos (`UpgradeContract.lean`).
 3. **(hecha)** Protocolo del almacén (`almacen`, `escritor`, `curioso`):
    `store_root`, `store_obj` y `store_share` (`StoreContract.lean`).
-4. Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de migración.
+4. **(hecha)** Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de
+   migración: `console`, `block`, el flujo `net` y `restore`/`counter` en
+   `enlace` (`MigrationContract.lean`).
 5. Opcional: un `contract_id` fijo en cada canal, que el kernel informe en
    `cap_info`, para que la identidad del contrato de un extremo recibido la
    garantice el kernel (hoy se comprueba solo que sea un canal con `SEND` y

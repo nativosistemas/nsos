@@ -34,6 +34,10 @@ impl contract::Transport for Sys {
         channel_send(h, m, 0)
     }
 
+    fn try_send(self, h: CapHandle, m: &Message) -> SysResult<()> {
+        channel_send(h, m, abi::syscall::flags::NONBLOCK)
+    }
+
     fn recv(self, h: CapHandle, m: &mut Message, nonblock: bool) -> SysResult<()> {
         let flags = if nonblock {
             abi::syscall::flags::NONBLOCK

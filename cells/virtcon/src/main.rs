@@ -9,9 +9,10 @@
 //! 4. Canal hacia el cliente.
 //! 5. `Irq` de su línea de interrupción, si el kernel la pudo entregar.
 //!
-//! Protocolo con el cliente: `WRITE` con texto → el driver lo transmite por
-//! la cola 1 (transmitq del puerto 0) y responde `WRITTEN` con la cantidad
-//! de bytes. Cuando el cliente cierra el canal, el driver termina con 0.
+//! Protocolo con el cliente (contrato `console`): `Write` con texto → el
+//! driver lo transmite por la cola 1 (transmitq del puerto 0) y responde
+//! `Written` con la cantidad de bytes. Cuando el cliente cierra el canal,
+//! el driver termina con 0.
 //!
 //! Espera la finalización durmiendo en `IRQ_PENDING` (`wait`): al llegar la
 //! interrupción lee el registro ISR (eso apaga la línea), mira el anillo
@@ -24,13 +25,12 @@
 #![deny(unsafe_code)]
 
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
+use nsos_rt::contract::protocols::console;
+use nsos_rt::contract::{Chan, RecvError};
 use nsos_rt::{
-    bootstrap, cap_dup, cap_info, channel_recv, channel_send, fence, ioport_read, ioport_write,
-    mem_info, mem_map, println, DevIrq, Mapped,
+    bootstrap, cap_dup, cap_info, channel_send, fence, ioport_read, ioport_write, mem_info,
+    mem_map, println, DevIrq, Mapped, Sys,
 };
-
-const WRITE: u64 = 1;
-const WRITTEN: u64 = 2;
 
 // Registros virtio legacy (desplazamientos desde BAR0).
 const REG_DEVICE_FEATURES: u16 = 0x00;
@@ -200,8 +200,10 @@ fn irq_stays_here(h: CapHandle, client: CapHandle) -> bool {
 nsos_rt::entry!(main);
 
 fn main() -> i32 {
-    let client = bootstrap(4);
-    let mut m = Message::default();
+    let Ok(mut client) = Chan::<Sys, console::server::Ready>::open(Sys, bootstrap(4)) else {
+        println!("virtcon: la capacidad del cliente no es un canal");
+        return 1;
+    };
     let irq = DevIrq::from_bootstrap(5);
     let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3), irq) {
         Ok(d) => d,
@@ -211,35 +213,41 @@ fn main() -> i32 {
         }
     };
     if let Some(h) = dev.irq.handle() {
-        if !irq_stays_here(h, client) {
+        if !irq_stays_here(h, client.handle()) {
             return 5;
         }
     }
     loop {
-        match channel_recv(client, &mut m, 0) {
-            Ok(()) if m.header.label == WRITE => {
-                let n = m.payload().len();
-                if let Err(e) = dev.transmit(m.payload()) {
+        client = match client.recv() {
+            Ok(console::server::recv::Ready::Write(c, w)) => {
+                let text = w.text.as_slice();
+                if let Err(e) = dev.transmit(text) {
                     println!("virtcon: transmisión falló: {:?}", e);
                     return 3;
                 }
-                let r = Message::new(WRITTEN, &(n as u32).to_le_bytes()).unwrap();
-                let _ = channel_send(client, &r, 0);
+                match c.send(console::Written {
+                    n: text.len() as u32,
+                }) {
+                    Ok(c) => c,
+                    Err(_) => return 0,
+                }
             }
-            Ok(()) => {
-                println!("virtcon: etiqueta desconocida {}", m.header.label);
+            Err(RecvError::Violation { chan, label }) => {
+                println!("virtcon: pedido fuera de protocolo {}", label);
+                chan
             }
-            Err(Error::PeerClosed) => {
+            Err(RecvError::WouldBlock(c)) => c,
+            Err(RecvError::Failed(Error::PeerClosed)) => {
                 println!(
                     "virtcon: el cliente cerró el canal; termino ({} interrupciones)",
                     dev.irq.count
                 );
                 return 0;
             }
-            Err(e) => {
+            Err(RecvError::Failed(e)) => {
                 println!("virtcon: recv falló: {:?}", e);
                 return 4;
             }
-        }
+        };
     }
 }

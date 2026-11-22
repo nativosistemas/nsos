@@ -9,10 +9,10 @@ use std::vec::Vec;
 use nsos_abi::cap::CapInfo;
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::{counter, echo, handover, note, restore, store_obj, store_root};
+use crate::protocols::{block, counter, echo, handover, net, note, restore, store_obj, store_root};
 use crate::{
     check, labels_distinct_per_state, Bytes, Chan, CheckError, Dir, Mem, Msg, RecvError,
-    Transition, Transport, RO, RW,
+    Transition, Transport, TrySendError, RO, RW,
 };
 
 /// Un objeto del kernel simulado.
@@ -72,6 +72,10 @@ impl Transport for Sim<'_> {
         if !k.endpoint_alive(e ^ 1) {
             return Err(Error::PeerClosed);
         }
+        if k.queues[e ^ 1].len() >= crate::QUEUE_CAP as usize {
+            // Un solo hilo: bloquear sería colgarse.
+            return Err(Error::WouldBlock);
+        }
         let mut moved = Vec::new();
         for c in m.cap_slice() {
             moved.push(*k.caps.get(&c.0).ok_or(Error::BadHandle)?);
@@ -81,6 +85,10 @@ impl Transport for Sim<'_> {
         }
         k.queues[e ^ 1].push_back((*m, moved));
         Ok(())
+    }
+
+    fn try_send(self, h: CapHandle, m: &Message) -> Result<(), Error> {
+        self.send(h, m)
     }
 
     fn recv(self, h: CapHandle, m: &mut Message, nonblock: bool) -> Result<(), Error> {
@@ -609,4 +617,88 @@ fn store_buffer_always_comes_back() {
         panic!("esperaba FailMem");
     };
     assert!(Mem::<RW>::open(t, f.buf.handle()).is_ok());
+}
+
+/// Un flujo: las dos puntas mandan sin cambiar de estado, y los mensajes
+/// cruzados llegan bien.
+#[test]
+fn net_stream_both_ways() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = net::pair(t).unwrap();
+    // Los dos mandan a la vez.
+    let cli = cli
+        .send(net::Send {
+            packet: Bytes::new(b"a").unwrap(),
+        })
+        .unwrap();
+    let srv = srv
+        .send(net::Recv {
+            packet: Bytes::new(b"b").unwrap(),
+        })
+        .unwrap();
+    let net::server::recv::Open::Send(_srv, p) = srv.recv().unwrap();
+    assert_eq!(p.packet.as_slice(), b"a");
+    let net::client::recv::Open::Recv(_cli, p) = cli.recv().unwrap();
+    assert_eq!(p.packet.as_slice(), b"b");
+}
+
+/// Con la cola llena, `try_send` descarta y devuelve el canal: la punta que
+/// entrega nunca queda bloqueada esperando a la otra.
+#[test]
+fn net_try_send_drops_when_full() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, mut srv) = net::pair(t).unwrap();
+    let mut dropped = 0;
+    for i in 0..100u8 {
+        srv = match srv.try_send(net::Recv {
+            packet: Bytes::new(&[i]).unwrap(),
+        }) {
+            Ok(s) => s,
+            Err(TrySendError::Full(s)) => {
+                dropped += 1;
+                s
+            }
+            Err(TrySendError::Failed(e)) => panic!("{e:?}"),
+        };
+    }
+    assert_eq!(dropped, 100 - crate::QUEUE_CAP);
+    // Llegan los primeros 64, en orden.
+    let net::client::recv::Open::Recv(_c, p) = cli.recv().unwrap();
+    assert_eq!(p.packet.as_slice(), &[0]);
+    drop(srv);
+}
+
+/// El formato en el cable de `block` es el de `virtblk`: `Info` y su
+/// respuesta comparten la etiqueta 1, y `Geometry` es
+/// `[sectores u64 | flush u8 | búfer en sectores u32]`.
+#[test]
+fn block_wire_format() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, drv) = t.channel_create().unwrap();
+    let cli: Chan<_, block::client::Ready> = Chan::open(t, cli).unwrap();
+    let asking = cli.send(block::Info {}).unwrap();
+    let mut m = Message::default();
+    t.recv(drv, &mut m, true).unwrap();
+    assert_eq!((m.header.label, m.payload().len()), (1, 0));
+    let mut p = [0u8; 13];
+    p[..8].copy_from_slice(&2048u64.to_le_bytes());
+    p[8] = 1;
+    p[9..].copy_from_slice(&8u32.to_le_bytes());
+    raw(t, drv, 1, &p, &[]);
+    let block::client::recv::Asking::Geometry(ready, g) = asking.recv().unwrap();
+    assert_eq!((g.sectors, g.flush, g.buf_sectors), (2048, true, 8));
+    let busy = ready
+        .send(block::Read {
+            sector: 7,
+            count: 8,
+        })
+        .unwrap();
+    t.recv(drv, &mut m, true).unwrap();
+    assert_eq!(m.payload(), &[7, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0]);
+    raw(t, drv, 4, &[0], &[]);
+    let block::client::recv::Busy::Done(_r, d) = busy.recv().unwrap();
+    assert_eq!(d.status, 0);
 }

@@ -11,7 +11,7 @@
 //! Modelos: `verification/lean/Nsos/Store.lean` y `StoreContract.lean`.
 //!
 //! Capacidades de arranque:
-//! 1. Canal con el driver de bloques (`virtblk`).
+//! 1. Canal con el driver de bloques (`virtblk`; cliente del contrato `block`).
 //! 2. `Memory` (lectura y escritura, sin `CONTROL`): el búfer que el driver
 //!    usa para DMA, compartido.
 //! 3. `Memory` de solo lectura con la configuración (`[modo, n, formatear]`).
@@ -27,23 +27,16 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::{CapHandle, Message, Rights};
-use nsos_rt::contract::protocols::{store_obj, store_root};
-use nsos_rt::contract::{Chan, Endpoint, RecvError};
-use nsos_rt::{
-    bootstrap, channel_recv, channel_send, exit, mem_map, println, yield_now, Mapped, Sys,
-};
+use nsos_rt::abi::Rights;
+use nsos_rt::contract::protocols::{block, store_obj, store_root};
+use nsos_rt::contract::{Chan, Endpoint, RecvError, RecvResult};
+use nsos_rt::{bootstrap, exit, mem_map, println, yield_now, Mapped, Sys};
 use nsos_store::handles::{Handles, MAX_HANDLES};
 use nsos_store::layout::Name;
-use nsos_store::proto::{self, u64_at};
+use nsos_store::proto;
 use nsos_store::{BlockDev, DevError, Store, BLOCK};
 
-// Protocolo con el driver (ver `cells/virtblk`).
-const DRV_INFO: u64 = 1;
-const DRV_READ: u64 = 2;
-const DRV_WRITE: u64 = 3;
-const DRV_DONE: u64 = 4;
-const DRV_FLUSH: u64 = 5;
+// Con el driver se habla el contrato `block` (ver `cells/virtblk`).
 const SECTORS_PER_BLOCK: u64 = (BLOCK / 512) as u64;
 
 const BUF_VADDR: u64 = 0x2000_0000;
@@ -56,7 +49,8 @@ const CRASH_EXIT: i32 = 7;
 
 /// El disco, visto a través del driver.
 struct Disk {
-    drv: CapHandle,
+    /// `None` solo si el driver se fue.
+    drv: Option<Drv>,
     buf: Mapped,
     blocks: u32,
     /// Prueba de caídas: terminar antes del superbloque de la escritura
@@ -66,24 +60,45 @@ struct Disk {
     supers: u32,
 }
 
+type Drv = Chan<Sys, block::client::Ready>;
+
 impl Disk {
-    fn call(&self, label: u64, p: &[u8]) -> Result<Message, DevError> {
-        let m = Message::new(label, p).map_err(|_| DevError)?;
-        channel_send(self.drv, &m, 0).map_err(|_| DevError)?;
-        let mut r = Message::default();
-        channel_recv(self.drv, &mut r, 0).map_err(|_| DevError)?;
-        Ok(r)
+    /// Un pedido de lectura o escritura de un bloque; `Ok` si el driver
+    /// contestó `Done` con estado 0.
+    fn io(&mut self, write: bool, blk: u32) -> Result<(), DevError> {
+        let drv = self.drv.take().ok_or(DevError)?;
+        let (sector, count) = (blk as u64 * SECTORS_PER_BLOCK, SECTORS_PER_BLOCK as u32);
+        let r = if write {
+            drv.call(block::Write { sector, count })
+        } else {
+            drv.call(block::Read { sector, count })
+        };
+        self.done(r)
     }
 
-    fn io(&self, label: u64, blk: u32) -> Result<(), DevError> {
-        let mut p = [0u8; 12];
-        p[..8].copy_from_slice(&(blk as u64 * SECTORS_PER_BLOCK).to_le_bytes());
-        p[8..12].copy_from_slice(&(SECTORS_PER_BLOCK as u32).to_le_bytes());
-        let r = self.call(label, &p)?;
-        if r.header.label == DRV_DONE && r.payload().first() == Some(&0) {
-            Ok(())
-        } else {
-            Err(DevError)
+    fn done(&mut self, r: RecvResult<Sys, block::client::Busy>) -> Result<(), DevError> {
+        match r {
+            Ok(block::client::recv::Busy::Done(drv, d)) => {
+                self.drv = Some(drv);
+                if d.status == 0 {
+                    Ok(())
+                } else {
+                    Err(DevError)
+                }
+            }
+            Err(_) => Err(DevError),
+        }
+    }
+
+    /// Cantidad de sectores del disco.
+    fn sectors(&mut self) -> Option<u64> {
+        let drv = self.drv.take()?;
+        match drv.call(block::Info {}) {
+            Ok(block::client::recv::Asking::Geometry(drv, g)) => {
+                self.drv = Some(drv);
+                Some(g.sectors)
+            }
+            Err(_) => None,
         }
     }
 }
@@ -93,7 +108,7 @@ impl BlockDev for Disk {
         self.blocks
     }
     fn read(&mut self, blk: u32, out: &mut [u8; BLOCK]) -> Result<(), DevError> {
-        self.io(DRV_READ, blk)?;
+        self.io(false, blk)?;
         for (i, w) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
             *w = self.buf.read_u64(i * 8).to_le_bytes();
         }
@@ -113,15 +128,12 @@ impl BlockDev for Disk {
         for (i, w) in data.as_chunks::<8>().0.iter().enumerate() {
             self.buf.write_u64(i * 8, u64::from_le_bytes(*w));
         }
-        self.io(DRV_WRITE, blk)
+        self.io(true, blk)
     }
     fn flush(&mut self) -> Result<(), DevError> {
-        let r = self.call(DRV_FLUSH, &[])?;
-        if r.header.label == DRV_DONE && r.payload().first() == Some(&0) {
-            Ok(())
-        } else {
-            Err(DevError)
-        }
+        let drv = self.drv.take().ok_or(DevError)?;
+        let r = drv.call(block::Flush {});
+        self.done(r)
     }
 }
 
@@ -425,17 +437,21 @@ fn main() -> i32 {
             return 2;
         }
     };
+    let Ok(drv) = Drv::open(Sys, bootstrap(1)) else {
+        println!("almacen: la capacidad del driver no es un canal");
+        return 3;
+    };
     let mut disk = Disk {
-        drv: bootstrap(1),
+        drv: Some(drv),
         buf,
         blocks: 0,
         crash_at: if mode == b'c' { n as u32 } else { 0 },
         armed: false,
         supers: 0,
     };
-    let sectors = match disk.call(DRV_INFO, &[]) {
-        Ok(r) if r.header.label == DRV_INFO => u64_at(r.payload(), 0),
-        _ => {
+    let sectors = match disk.sectors() {
+        Some(n) => n,
+        None => {
             println!("almacen: el driver no responde");
             return 3;
         }

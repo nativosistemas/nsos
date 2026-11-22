@@ -356,8 +356,11 @@ un tipo por estado, y se comprueba al compilar.
   `store_share`; el búfer vuelve en toda respuesta por tipo. Modelo:
   `StoreContract.lean`. Las etiquetas pasaron a exigirse distintas por
   estado.
-* Etapa 4: drivers y enlace. Etapa 5 (opcional): `contract_id` en el
-  kernel.
+* Etapa 4 (hecha): drivers y enlace con `console`, `block` y el flujo
+  `net` (forma `stream` de la macro, `try_send`); el modelo de flujos
+  mostró un bloqueo mutuo posible entre `virtnet` y `enlace`, que se
+  corrigió. Modelo: `MigrationContract.lean`.
+* Etapa 5 (opcional): `contract_id` en el kernel.
 
 ## ARM64 (en curso)
 

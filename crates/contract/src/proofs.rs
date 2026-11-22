@@ -36,6 +36,13 @@ impl Transport for Any<'_> {
     fn send(self, _: CapHandle, _: &Message) -> Result<(), Error> {
         Ok(())
     }
+    fn try_send(self, _: CapHandle, _: &Message) -> Result<(), Error> {
+        match kani::any::<u8>() % 3 {
+            0 => Ok(()),
+            1 => Err(Error::WouldBlock),
+            _ => Err(Error::PeerClosed),
+        }
+    }
     fn recv(self, _: CapHandle, m: &mut Message, _: bool) -> Result<(), Error> {
         *m = *self.msg;
         Ok(())
@@ -318,5 +325,44 @@ fn store_reading_decode_any() {
             core::mem::forget(chan);
         }
         Err(_) => unreachable!(),
+    };
+}
+
+/// `try_send` con cualquier resultado de la syscall: si se mandó, no se
+/// soltó nada (las capacidades viajan); si la cola estaba llena, el canal
+/// vuelve en el mismo estado y se soltó la capacidad del mensaje; si falló,
+/// se soltó también, y el canal se cerró. Nunca queda una capacidad
+/// ocupando un slot.
+#[kani::proof]
+fn try_send_any() {
+    let msg = Message::default();
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let t = Any {
+        msg: &msg,
+        drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
+    };
+    let h = CapHandle(kani::any());
+    kani::assume(h.is_valid());
+    let c: Chan<_, echo::client::Ready> = Chan::__from_parts(t, CapHandle(1));
+    let m = echo::NewChannel {
+        side: crate::Endpoint::from_raw(h),
+    };
+    match c.try_send(m) {
+        Ok(next) => {
+            assert_eq!(drops.get(), 0);
+            core::mem::forget(next);
+        }
+        Err(crate::TrySendError::Full(same)) => {
+            assert_eq!(drops.get(), 1);
+            assert_eq!(same.handle(), CapHandle(1));
+            core::mem::forget(same);
+        }
+        Err(crate::TrySendError::Failed(e)) => {
+            // La capacidad del mensaje y el canal mismo, que se cerró.
+            assert_eq!(e, Error::PeerClosed);
+            assert_eq!(drops.get(), 2);
+        }
     };
 }

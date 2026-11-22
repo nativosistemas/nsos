@@ -23,30 +23,30 @@
 //! Por la red solo viajan **bytes**: una copia del estado, los pedidos del
 //! cliente y sus respuestas. Nunca capacidades.
 //!
-//! Para el supervisor de origen, el enlace *es* la versión nueva: recibe
-//! `UPGRADE_RESTORE [mem, ep]` (con el nombre de la versión que debe
-//! arrancar en la otra máquina) y contesta `UPGRADE_ACCEPT` o
-//! `UPGRADE_REJECT [mem, ep]` según decida la otra punta. Si aceptó, se queda
-//! con `ep` y reenvía cada pedido del cliente (uno por vez). Del lado de
-//! destino hace lo simétrico con un `Memory` y un canal locales.
+//! Contratos (`nsos_contract::protocols`): el flujo `net` con `virtnet`;
+//! `restore` con el supervisor (del lado de origen el enlace *es* la
+//! versión nueva: recibe `Restore` con el estado de solo lectura, el extremo
+//! del cliente y el nombre de la versión que debe arrancar en la otra
+//! máquina, y contesta `Accept` o `Reject` según decida la otra punta; del
+//! lado de destino es el cliente y le pasa a `destino` un estado y un canal
+//! locales); y `counter` con el cliente (origen) o con la versión nueva
+//! (destino). Si la otra punta aceptó, el enlace de origen atiende el
+//! extremo del cliente y reenvía cada pedido por la red (uno por vez); el
+//! de destino los entrega por el canal local.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
 use nsos_link::{Role, Session, NONCE_LEN};
-use nsos_rt::abi::msg::labels::{UPGRADE_ACCEPT, UPGRADE_REJECT, UPGRADE_RESTORE};
 use nsos_rt::abi::msg::MAX_DATA;
-use nsos_rt::abi::syscall::flags::NONBLOCK;
-use nsos_rt::abi::{CapHandle, Error, Message, Rights};
-use nsos_rt::{
-    bootstrap, cap_drop, cap_dup, channel_create, channel_recv, channel_send, clock_ns, mem_create,
-    mem_map, println, random_u64, yield_now,
-};
+use nsos_rt::abi::{Error, Rights};
+use nsos_rt::contract::protocols::{counter, net, restore};
+use nsos_rt::contract::{Bytes, Chan, Mem, Msg, RecvError, RW};
+use nsos_rt::{bootstrap, clock_ns, mem_create, mem_map, println, random_u64, yield_now, Sys};
 
-/// Etiquetas del protocolo con `virtnet`.
-const NET_SEND: u64 = 1;
-const NET_RECV: u64 = 2;
+/// El flujo con `virtnet`.
+type Net = Chan<Sys, net::client::Open>;
 
 // Tipos de mensaje dentro del enlace (primer byte de los datos).
 const T_MIGRATE: u8 = 1;
@@ -74,7 +74,8 @@ const DATA_MAX: usize = PACKET_MAX - nsos_link::DATA_OVERHEAD;
 nsos_rt::entry!(main);
 
 struct Link {
-    net: CapHandle,
+    /// `None` solo un instante, mientras se manda o se recibe.
+    net: Option<Net>,
     role: Role,
     psk: [u8; 32],
     nonce: [u8; NONCE_LEN],
@@ -88,24 +89,30 @@ struct Link {
 }
 
 impl Link {
-    fn send_packet(&self, p: &[u8]) -> Result<(), Error> {
-        channel_send(self.net, &Message::new(NET_SEND, p)?, 0)
+    /// Manda un paquete. Puede bloquear si la cola de `virtnet` está llena:
+    /// `virtnet` nunca bloquea al entregar (descarta), así que siempre la
+    /// termina vaciando.
+    fn send_packet(&mut self, p: &[u8]) -> Result<(), Error> {
+        let n = self.net.take().ok_or(Error::PeerClosed)?;
+        let packet = Bytes::new(p).ok_or(Error::InvalidArgs)?;
+        self.net = Some(n.send(net::Send { packet })?);
+        Ok(())
     }
 
-    fn send_hello(&self) -> Result<(), Error> {
+    fn send_hello(&mut self) -> Result<(), Error> {
         let mut buf = [0u8; nsos_link::HELLO_LEN];
         let n =
             nsos_link::hello(self.role, &self.nonce, &mut buf).map_err(|_| Error::BadMessage)?;
         self.send_packet(&buf[..n])
     }
 
-    fn send_confirm(&self) -> Result<(), Error> {
-        if let Some(s) = &self.session {
-            let mut buf = [0u8; nsos_link::DATA_OVERHEAD];
-            let n = s.confirm(&mut buf).map_err(|_| Error::BadMessage)?;
-            self.send_packet(&buf[..n])?;
-        }
-        Ok(())
+    fn send_confirm(&mut self) -> Result<(), Error> {
+        let mut buf = [0u8; nsos_link::DATA_OVERHEAD];
+        let n = match &self.session {
+            Some(s) => s.confirm(&mut buf).map_err(|_| Error::BadMessage)?,
+            None => return Ok(()),
+        };
+        self.send_packet(&buf[..n])
     }
 
     fn drop_frame(&mut self, why: &str) {
@@ -170,12 +177,21 @@ impl Link {
 
     /// Un paquete de la red, si hay.
     fn poll(&mut self, out: &mut [u8; DATA_MAX]) -> Result<Option<usize>, Error> {
-        let mut m = Message::default();
-        match channel_recv(self.net, &mut m, NONBLOCK) {
-            Ok(()) if m.header.label == NET_RECV => self.process(m.payload(), out),
-            Ok(()) => Err(Error::BadMessage),
-            Err(Error::WouldBlock) => Ok(None),
-            Err(e) => Err(e),
+        let n = self.net.take().ok_or(Error::PeerClosed)?;
+        match n.try_recv() {
+            Ok(net::client::recv::Open::Recv(n, p)) => {
+                self.net = Some(n);
+                self.process(p.packet.as_slice(), out)
+            }
+            Err(RecvError::Violation { chan, .. }) => {
+                self.net = Some(chan);
+                Err(Error::BadMessage)
+            }
+            Err(RecvError::WouldBlock(n)) => {
+                self.net = Some(n);
+                Ok(None)
+            }
+            Err(RecvError::Failed(e)) => Err(e),
         }
     }
 
@@ -247,56 +263,86 @@ impl Link {
     }
 }
 
-/// Origen, servicio aceptado en la otra punta: cada pedido del cliente
-/// cruza la red y la respuesta vuelve por `ep`.
-fn proxy_out(link: &mut Link, ep: CapHandle) -> Result<u64, Error> {
-    let mut m = Message::default();
+/// El servicio que se reenvía es el contador (`counter`). Por el cable va
+/// genérico: `T_REQ [etiqueta u64 | datos]` y `T_RESP [etiqueta u64 | datos]`.
+fn encode_wire<M: Msg>(m: M, out: &mut [u8; DATA_MAX]) -> Result<usize, Error> {
+    let mut msg = nsos_rt::abi::Message::default();
+    m.encode(&mut msg);
+    let p = msg.payload();
+    out[..8].copy_from_slice(&M::LABEL.to_le_bytes());
+    out.get_mut(8..8 + p.len())
+        .ok_or(Error::InvalidArgs)?
+        .copy_from_slice(p);
+    Ok(8 + p.len())
+}
+
+/// Decodifica lo que llegó por el cable (`[etiqueta u64 | datos]`) como `M`.
+fn decode_wire<M: Msg>(b: &[u8]) -> Result<M, Error> {
+    let (label, data) = b.split_at_checked(8).ok_or(Error::BadMessage)?;
+    let label = u64::from_le_bytes(label.try_into().map_err(|_| Error::BadMessage)?);
+    let msg = nsos_rt::abi::Message::new(label, data)?;
+    M::decode(Sys, &msg).ok_or(Error::BadMessage)
+}
+
+/// Origen, servicio aceptado en la otra punta: el enlace atiende el extremo
+/// del cliente (`counter`) y cada pedido cruza la red; la respuesta vuelve
+/// por el cable y por el mismo extremo.
+fn proxy_out(link: &mut Link, mut ep: Chan<Sys, counter::server::Serving>) -> Result<u64, Error> {
     let mut buf = [0u8; DATA_MAX];
     let mut n = 0;
     loop {
-        match channel_recv(ep, &mut m, 0) {
-            Ok(()) => {
-                for &c in m.cap_slice() {
-                    // Las capacidades no cruzan de máquina.
-                    cap_drop(c)?;
-                }
-                link.send(T_REQ, &[&m.header.label.to_le_bytes(), m.payload()])?;
-                let (kind, len) = link.recv(&mut buf)?;
-                if kind != T_RESP || len < 9 {
-                    return Err(Error::BadMessage);
-                }
-                let label = u64::from_le_bytes(buf[1..9].try_into().unwrap());
-                channel_send(ep, &Message::new(label, &buf[9..len])?, 0)?;
-                n += 1;
+        let waiting = match ep.recv() {
+            Ok(counter::server::recv::Serving::Inc(w, inc)) => {
+                let len = encode_wire(inc, &mut buf)?;
+                link.send(T_REQ, &[&buf[..len]])?;
+                w
             }
-            Err(Error::PeerClosed) => {
+            Err(RecvError::Violation { chan, label }) => {
+                println!("enlace: pedido fuera de protocolo del cliente ({})", label);
+                ep = chan;
+                continue;
+            }
+            Err(RecvError::WouldBlock(c)) => {
+                ep = c;
+                continue;
+            }
+            Err(RecvError::Failed(Error::PeerClosed)) => {
                 link.send(T_CLOSE, &[])?;
                 return Ok(n);
             }
-            Err(e) => return Err(e),
+            Err(RecvError::Failed(e)) => return Err(e),
+        };
+        let (kind, len) = link.recv(&mut buf)?;
+        if kind != T_RESP {
+            return Err(Error::BadMessage);
         }
+        let count: counter::Count = decode_wire(&buf[1..len])?;
+        ep = waiting.send(count)?;
+        n += 1;
     }
 }
 
-fn reject(ctrl: CapHandle, mem: CapHandle, ep: CapHandle) -> Result<(), Error> {
-    let mut r = Message::new(UPGRADE_REJECT, b"")?;
-    r.push_cap(mem)?;
-    r.push_cap(ep)?;
-    channel_send(ctrl, &r, 0)
-}
-
-/// Origen: el supervisor entregó `[mem, ep]`. Manda la copia del estado y
-/// espera la decisión. Devuelve `true` si terminó el servicio.
-fn migrate_out(link: &mut Link, ctrl: CapHandle, m: &Message, attempt: u64) -> Result<bool, Error> {
-    let &[mem, ep] = m.cap_slice() else {
-        return Err(Error::BadMessage);
-    };
-    let name = m.payload();
+/// Origen: el supervisor entregó estado (solo lectura) y extremo del
+/// cliente. Manda la copia del estado y espera la decisión. Devuelve el
+/// canal de control otra vez en `Start` si la otra punta rechazó, o `None`
+/// si aceptó y el servicio ya terminó.
+fn migrate_out(
+    link: &mut Link,
+    deciding: Chan<Sys, restore::server::Deciding>,
+    r: restore::Restore,
+    attempt: u64,
+) -> Result<Option<Chan<Sys, restore::server::Start>>, Error> {
+    let name = r.mode.as_slice();
     if name.is_empty() || name.len() > NAME_MAX {
         return Err(Error::BadMessage);
     }
-    // Solo lectura: si la otra punta rechaza, el estado vuelve intacto.
-    let state = mem_map(mem, STATE_VADDR + attempt * STATE_STRIDE, Rights::READ)?;
+    // Solo lectura (`Mem<RO>`): si la otra punta rechaza, el estado vuelve
+    // intacto.
+    let state = mem_map(
+        r.state.handle(),
+        STATE_VADDR + attempt * STATE_STRIDE,
+        Rights::READ,
+    )?;
     let mut copy = [0u8; STATE_LEN];
     for (i, b) in copy.iter_mut().enumerate() {
         *b = state.read_u8(i);
@@ -311,125 +357,138 @@ fn migrate_out(link: &mut Link, ctrl: CapHandle, m: &Message, attempt: u64) -> R
     match link.recv(&mut buf)?.0 {
         T_ACCEPT => {
             println!("enlace: la otra máquina aceptó; reenvío los pedidos del cliente");
-            channel_send(ctrl, &Message::new(UPGRADE_ACCEPT, b"")?, 0)?;
-            let n = proxy_out(link, ep)?;
+            deciding.send(restore::Accept {})?.close();
+            r.state.release(Sys);
+            let n = proxy_out(link, Chan::attach(Sys, r.service))?;
             println!(
                 "enlace: el cliente cerró; reenvié {} pedidos ({} tramas descartadas)",
                 n, link.dropped
             );
-            Ok(true)
+            Ok(None)
         }
         T_REJECT => {
             println!("enlace: la otra máquina rechazó; devuelvo estado y cliente");
-            reject(ctrl, mem, ep)?;
-            Ok(false)
+            let start = deciding.send(restore::Reject {
+                state: r.state,
+                service: r.service,
+            })?;
+            Ok(Some(start))
         }
         _ => Err(Error::BadMessage),
     }
 }
 
-/// Destino: llegó una copia del estado. Arma `[mem, ep]` locales, se los
-/// pasa al supervisor y contesta su decisión. Devuelve el extremo del
-/// servicio si aceptó.
+/// Canal de control del lado de destino (el enlace es el cliente).
+type DestCtrl = Chan<Sys, restore::client::Start>;
+/// Punta del enlace del canal de servicio local, del lado de destino.
+type Proxy = Chan<Sys, counter::client::Serving>;
+
+/// Destino: llegó una copia del estado. Arma estado (de solo lectura) y un
+/// canal de servicio locales, se los pasa al supervisor y contesta su
+/// decisión. Devuelve el canal de control para el próximo intento y, si
+/// aceptó, la punta del enlace del canal de servicio.
 fn migrate_in(
     link: &mut Link,
-    ctrl: CapHandle,
+    ctrl: DestCtrl,
     data: &[u8],
     attempt: u64,
-) -> Result<Option<CapHandle>, Error> {
+) -> Result<(Option<DestCtrl>, Option<Proxy>), Error> {
     let n = *data.first().ok_or(Error::BadMessage)? as usize;
     if n == 0 || n > NAME_MAX || data.len() != 1 + n + STATE_LEN {
         return Err(Error::BadMessage);
     }
     let (name, copy) = data[1..].split_at(n);
-    let mem = mem_create(4096)?;
+    let mem = Mem::<RW>::open(Sys, mem_create(4096)?)?;
     let state = mem_map(
-        mem,
+        mem.handle(),
         STATE_VADDR + attempt * STATE_STRIDE,
         Rights::READ | Rights::WRITE,
     )?;
     state.write_bytes(0, copy);
-    // Al supervisor le llega de solo lectura, como exige el contrato
-    // `restore` (`Mem<RO>`); la escribible se suelta.
-    let mem_ro = cap_dup(mem, Rights::READ | Rights::GRANT)?;
-    cap_drop(mem)?;
-    let (proxy_end, srv_end) = channel_create()?;
-    let mut r = Message::new(UPGRADE_RESTORE, name)?;
-    r.push_cap(mem_ro)?;
-    r.push_cap(srv_end)?;
-    channel_send(ctrl, &r, 0)?;
-    let mut m = Message::default();
-    channel_recv(ctrl, &mut m, 0)?;
-    match m.header.label {
-        UPGRADE_ACCEPT => {
+    // Al supervisor le llega de solo lectura, como exige `restore`; la
+    // escribible se suelta.
+    let ro = mem.read_only(Sys)?;
+    mem.release(Sys);
+    let (proxy, srv) = counter::pair(Sys)?;
+    let deciding = ctrl.send(restore::Restore {
+        state: ro,
+        service: srv.into_endpoint(),
+        mode: Bytes::new(name).ok_or(Error::BadMessage)?,
+    })?;
+    match deciding.recv() {
+        Ok(restore::client::recv::Deciding::Accept(end, _)) => {
+            end.close();
             link.send(T_ACCEPT, &[])?;
-            Ok(Some(proxy_end))
+            Ok((None, Some(proxy)))
         }
-        UPGRADE_REJECT => {
-            for &c in m.cap_slice() {
-                cap_drop(c)?;
-            }
-            cap_drop(proxy_end)?;
+        Ok(restore::client::recv::Deciding::Reject(start, back)) => {
+            // Son copias locales: se sueltan.
+            back.state.release(Sys);
+            back.service.release(Sys);
+            drop(proxy);
             link.send(T_REJECT, &[])?;
-            Ok(None)
+            Ok((Some(start), None))
         }
-        _ => Err(Error::BadMessage),
+        Err(_) => Err(Error::BadMessage),
     }
 }
 
 /// Destino, servicio aceptado: entrega cada pedido que llega por la red.
-fn proxy_in(link: &mut Link, srv: CapHandle) -> Result<u64, Error> {
+fn proxy_in(link: &mut Link, mut srv: Proxy) -> Result<u64, Error> {
     let mut buf = [0u8; DATA_MAX];
-    let mut m = Message::default();
+    let mut out = [0u8; DATA_MAX];
     let mut n = 0;
     loop {
         let (kind, len) = link.recv(&mut buf)?;
         match kind {
-            T_REQ if len >= 9 => {
-                let label = u64::from_le_bytes(buf[1..9].try_into().unwrap());
-                channel_send(srv, &Message::new(label, &buf[9..len])?, 0)?;
-                channel_recv(srv, &mut m, 0)?;
-                for &c in m.cap_slice() {
-                    cap_drop(c)?;
-                }
-                link.send(T_RESP, &[&m.header.label.to_le_bytes(), m.payload()])?;
+            T_REQ => {
+                let inc: counter::Inc = decode_wire(&buf[1..len])?;
+                let count = match srv.call(inc) {
+                    Ok(counter::client::recv::Waiting::Count(c, m)) => {
+                        srv = c;
+                        m
+                    }
+                    Err(_) => return Err(Error::PeerClosed),
+                };
+                let len = encode_wire(count, &mut out)?;
+                link.send(T_RESP, &[&out[..len]])?;
                 n += 1;
             }
-            T_CLOSE => {
-                cap_drop(srv)?;
-                return Ok(n);
-            }
+            T_CLOSE => return Ok(n),
             _ => return Err(Error::BadMessage),
         }
     }
 }
 
-fn run_origin(link: &mut Link, ctrl: CapHandle, authenticated: bool) -> Result<(), Error> {
-    let mut m = Message::default();
+fn run_origin(
+    link: &mut Link,
+    mut ctrl: Chan<Sys, restore::server::Start>,
+    authenticated: bool,
+) -> Result<(), Error> {
     for attempt in 0..MAX_ATTEMPTS {
-        match channel_recv(ctrl, &mut m, 0) {
-            Ok(()) if m.header.label == UPGRADE_RESTORE => {
-                if !authenticated {
-                    println!("enlace: sin enlace autenticado; rechazo la migración");
-                    let &[mem, ep] = m.cap_slice() else {
-                        return Err(Error::BadMessage);
-                    };
-                    reject(ctrl, mem, ep)?;
-                    continue;
-                }
-                if migrate_out(link, ctrl, &m, attempt)? {
-                    return Ok(());
-                }
-            }
-            Ok(()) => return Err(Error::BadMessage),
-            Err(Error::PeerClosed) if authenticated => return Ok(()),
-            Err(e) => return Err(e),
+        let (deciding, r) = match ctrl.recv() {
+            Ok(restore::server::recv::Start::Restore(d, r)) => (d, r),
+            Err(RecvError::Failed(Error::PeerClosed)) if authenticated => return Ok(()),
+            Err(RecvError::Failed(e)) => return Err(e),
+            Err(_) => return Err(Error::BadMessage),
+        };
+        if !authenticated {
+            println!("enlace: sin enlace autenticado; rechazo la migración");
+            ctrl = deciding.send(restore::Reject {
+                state: r.state,
+                service: r.service,
+            })?;
+            continue;
+        }
+        match migrate_out(link, deciding, r, attempt)? {
+            Some(start) => ctrl = start,
+            None => return Ok(()),
         }
     }
     Err(Error::TimedOut)
 }
 
-fn run_dest(link: &mut Link, ctrl: CapHandle) -> Result<(), Error> {
+fn run_dest(link: &mut Link, mut ctrl: DestCtrl) -> Result<(), Error> {
     let mut buf = [0u8; DATA_MAX];
     for attempt in 0..MAX_ATTEMPTS {
         let (kind, len) = link.recv(&mut buf)?;
@@ -437,22 +496,25 @@ fn run_dest(link: &mut Link, ctrl: CapHandle) -> Result<(), Error> {
             return Err(Error::BadMessage);
         }
         println!("enlace: llegó un estado autenticado de la otra máquina");
-        if let Some(srv) = migrate_in(link, ctrl, &buf[1..len], attempt)? {
-            let n = proxy_in(link, srv)?;
-            println!(
-                "enlace: el cliente remoto cerró; atendí {} pedidos ({} tramas descartadas)",
-                n, link.dropped
-            );
-            return Ok(());
+        match migrate_in(link, ctrl, &buf[1..len], attempt)? {
+            (_, Some(srv)) => {
+                let n = proxy_in(link, srv)?;
+                println!(
+                    "enlace: el cliente remoto cerró; atendí {} pedidos ({} tramas descartadas)",
+                    n, link.dropped
+                );
+                return Ok(());
+            }
+            (Some(start), None) => ctrl = start,
+            (None, None) => return Err(Error::BadMessage),
         }
     }
     Err(Error::TimedOut)
 }
 
 fn run() -> Result<(), Error> {
-    let net = bootstrap(1);
+    let net = Net::open(Sys, bootstrap(1))?;
     let config = mem_map(bootstrap(2), CONFIG_VADDR, Rights::READ)?;
-    let ctrl = bootstrap(3);
     let mut psk = [0u8; 32];
     for (i, b) in psk.iter_mut().enumerate() {
         *b = config.read_u8(i);
@@ -476,7 +538,7 @@ fn run() -> Result<(), Error> {
         return Err(Error::Unsupported);
     }
     let mut link = Link {
-        net,
+        net: Some(net),
         role,
         psk,
         nonce,
@@ -495,9 +557,11 @@ fn run() -> Result<(), Error> {
             link.dropped
         );
     }
+    // El canal de control: servidor de `restore` del lado de origen (el
+    // enlace hace de versión nueva) y cliente del lado de destino.
     match role {
-        Role::Origin => run_origin(&mut link, ctrl, ok)?,
-        Role::Dest if ok => run_dest(&mut link, ctrl)?,
+        Role::Origin => run_origin(&mut link, Chan::open(Sys, bootstrap(3))?, ok)?,
+        Role::Dest if ok => run_dest(&mut link, Chan::open(Sys, bootstrap(3))?)?,
         Role::Dest => return Err(Error::AccessDenied),
     }
     if ok {

@@ -10,10 +10,10 @@
 //!   demostró `echo_check` y `note_check`.
 
 use nsos_contract::protocols::{
-    counter, echo, handover, note, restore, store_obj, store_root, store_share,
+    block, console, counter, echo, handover, net, note, restore, store_obj, store_root, store_share,
 };
 use nsos_contract::Msg;
-use nsos_contract::{check, Dir, Transition};
+use nsos_contract::{check, stream_check, CheckError, Dir, Transition};
 
 const TRACE: &str = include_str!("data/contract_model.trace");
 
@@ -94,6 +94,9 @@ fn protocol_tables_are_the_model_ones() {
         ("store_root", store_root::START, store_root::TRANSITIONS),
         ("store_obj", store_obj::START, store_obj::TRANSITIONS),
         ("store_share", store_share::START, store_share::TRANSITIONS),
+        ("console", console::START, console::TRANSITIONS),
+        ("block", block::START, block::TRANSITIONS),
+        ("net", net::START, net::TRANSITIONS),
     ] {
         let (mstart, mtable) = model_table(name);
         assert_eq!(start, mstart, "{name}: estado inicial");
@@ -106,6 +109,31 @@ fn protocol_tables_are_the_model_ones() {
     assert_eq!(restore::BOUND, 1);
     assert_eq!(store_root::BOUND, 1);
     assert_eq!(store_obj::BOUND, 1);
+    assert_eq!(console::BOUND, 1);
+    assert_eq!(block::BOUND, 1);
+    // `net` es un flujo: `check` lo rechaza (estado mixto) y
+    // `stream_check` lo acepta (`Contract.net_is_stream`).
+    assert_eq!(check(net::TRANSITIONS), Err(CheckError::Mixed));
+    assert!(stream_check(net::TRANSITIONS, net::START));
+}
+
+/// `stream_check` (Rust) da lo mismo que `Contract.streamB` (Lean) en los
+/// mismos contratos de las líneas `C`.
+#[test]
+fn stream_check_agrees_with_model() {
+    let mut n = 0;
+    let mut yes = 0;
+    for line in TRACE.lines().filter(|l| l.starts_with("F ")) {
+        let (lhs, want) = line.split_once(" => ").unwrap();
+        let words: Vec<&str> = lhs.split_whitespace().collect();
+        let start: u16 = words[1].parse().unwrap();
+        let table = parse_table(&words[2..]);
+        let got = stream_check(&table, start);
+        assert_eq!(got.to_string(), want, "línea: {line}");
+        yes += got as usize;
+        n += 1;
+    }
+    assert!(n >= 400 && yes >= 50, "{n} contratos, {yes} flujos");
 }
 
 /// Los contratos del almacén usan las etiquetas de `nsos_store::proto`, que
