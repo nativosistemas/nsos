@@ -334,6 +334,7 @@ fn store_reading_decode_any() {
 /// se soltó también, y el canal se cerró. Nunca queda una capacidad
 /// ocupando un slot.
 #[kani::proof]
+#[kani::unwind(230)]
 fn try_send_any() {
     let msg = Message::default();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
