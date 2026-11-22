@@ -1,9 +1,10 @@
 # Contratos de canal tipados
 
-Estado: **etapa 1** (crate `nsos-contract`, modelo en Lean, `ping`/`pong`
-migrados). La fuente de verdad ejecutable es
-[`crates/contract`](../crates/contract), y el modelo,
-[`verification/lean/Nsos/Contract.lean`](../verification/lean/Nsos/Contract.lean).
+Estado: **etapa 2** (crate `nsos-contract`, modelo en Lean, `ping`/`pong`
+y la actualización en vivo migrados). La fuente de verdad ejecutable es
+[`crates/contract`](../crates/contract), y los modelos,
+[`verification/lean/Nsos/Contract.lean`](../verification/lean/Nsos/Contract.lean)
+y [`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean).
 
 ## Qué son
 
@@ -126,19 +127,67 @@ contrato no prevé.
   dé el mismo veredicto y la misma cota en todos, y que las tablas que
   genera la macro sean las del modelo. La CI regenera la traza y falla si
   cambió.
-* Kani (`crates/contract/src/proofs.rs`): `decode_any`, `roundtrip_echo`,
-  `roundtrip_endpoint`, `check_any`.
+* Kani (`crates/contract/src/proofs.rs`): `decode_any`, `restore_decode_any`,
+  `roundtrip_echo`, `roundtrip_endpoint`, `check_any`.
 
 La macro numera los estados como el modelo: primero los estados `client`,
 después los `server` y al final los `end`, cada grupo en el orden en que se
 declaró.
 
+## La actualización en vivo (etapa 2)
+
+El protocolo de la sección 8 de [`abi-ipc-capacidades.md`](abi-ipc-capacidades.md)
+son tres contratos (`nsos_contract::protocols`):
+
+| Contrato | Cliente ↔ servidor | Tabla | Cota |
+|---|---|---|---|
+| `counter` | `cliente` ↔ contador | `Serving: Inc → Waiting`; `Waiting: Count → Serving` | 1 |
+| `handover` | supervisor ↔ versión vieja | `Serving: Prepare → Handing`; `Handing: State → Deciding`; `Deciding: Commit → End`, `Rollback → Serving` | 2 |
+| `restore` | supervisor ↔ versión nueva | `Start: Restore → Deciding`; `Deciding: Accept → End`, `Reject → Start` | 1 |
+
+`restore` vuelve a `Start` tras un rechazo porque en la migración
+`origen` → `enlace` y `enlace` → `destino` usan el mismo canal para varios
+intentos. Las etiquetas y el formato son los de siempre
+(`abi::msg::labels`), así que `enlace`, que todavía no usa contratos,
+habla con los supervisores tipados.
+
+**Lo que garantiza el tipo.**
+* `State` y `Rollback` llevan `Endpoint<counter::server::Serving>`: la
+  versión vieja no puede entregar el extremo del cliente a mitad de un
+  pedido (con una respuesta debida).
+* `Restore` y `Reject` llevan `Mem<RO>`: una capacidad `Memory` con `READ`
+  y **sin** `WRITE`. Un `Mem<RO>` solo se obtiene con `Mem::read_only`
+  (`cap_dup` sin `WRITE`) o recibiéndolo, y al recibirlo se comprueba. Así
+  ningún supervisor tipado le puede pasar a la versión nueva el estado
+  escribible por error, y ninguna versión nueva tipada acepta uno: lo
+  descarta como violación (Kani: `restore_decode_any`; test
+  `restore_rejects_a_writable_state`). Es la condición de
+  `Upgrade.restoring_mem_at_sup`, que antes dependía de que `init` hiciera
+  bien el `cap_dup`.
+
+**Lo que demuestra el modelo** (`Nsos/UpgradeContract.lean`). A cada fase
+del modelo de `Upgrade.lean` le corresponde una configuración de cada
+canal de control, y cada paso del modelo es cero, uno o dos pasos de cada
+contrato (`handover_follows`, `restore_follows`). La única excepción es la
+caída de la versión nueva: su canal muere y el próximo intento usa uno
+nuevo. Por eso en todo estado alcanzable de la actualización los dos
+canales están en configuraciones alcanzables de sus contratos
+(`handover_reachable`, `restore_reachable`) y valen los teoremas de
+`Contract.lean` (`upgrade_contract_safe`). Si el modelo hiciera algo que el
+contrato no permite, la demostración falla: se probó con tres mutaciones
+del modelo (mandar `Commit` antes del `Accept`, reenviar sin haber recibido
+el estado, retomar sin `Rollback`) y cinco de los contratos.
+
+`init`, `contador-v1`, `contador-v2`, `contador-roto`, `cliente`, `origen`
+y `destino` usan los contratos; `enlace` sigue sin tipos (etapa 4), pero
+ahora le pasa a `destino` el estado de solo lectura, como exige `restore`.
+
 ## Etapas
 
 1. **(hecha)** Crate, modelo, `ping`/`pong`.
-2. Protocolo de actualización en vivo (`init`, `contador-*`), con un campo
-   `Memory` tipado. Su modelo (`Upgrade.lean`) pasa a usar el autómata como
-   especificación de los pasos.
+2. **(hecha)** Protocolo de actualización en vivo (`init`, `contador-*`,
+   `cliente`, `origen`, `destino`), con `Mem<RW>`/`Mem<RO>` y `call`. El
+   modelo `Upgrade.lean` sigue los contratos (`UpgradeContract.lean`).
 3. Protocolo del almacén (`nsos_store::proto`).
 4. Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de migración.
 5. Opcional: un `contract_id` fijo en cada canal, que el kernel informe en

@@ -9,7 +9,7 @@
 //! * que las tablas que genera `contract!` sean las del modelo, que ya
 //!   demostró `echo_check` y `note_check`.
 
-use nsos_contract::protocols::{echo, note};
+use nsos_contract::protocols::{counter, echo, handover, note, restore};
 use nsos_contract::{check, Dir, Transition};
 
 const TRACE: &str = include_str!("data/contract_model.trace");
@@ -85,6 +85,9 @@ fn protocol_tables_are_the_model_ones() {
     for (name, start, table) in [
         ("echo", echo::START, echo::TRANSITIONS),
         ("note", note::START, note::TRANSITIONS),
+        ("counter", counter::START, counter::TRANSITIONS),
+        ("handover", handover::START, handover::TRANSITIONS),
+        ("restore", restore::START, restore::TRANSITIONS),
     ] {
         let (mstart, mtable) = model_table(name);
         assert_eq!(start, mstart, "{name}: estado inicial");
@@ -92,4 +95,7 @@ fn protocol_tables_are_the_model_ones() {
     }
     assert_eq!(echo::BOUND, 1);
     assert_eq!(note::BOUND, 1);
+    assert_eq!(counter::BOUND, 1);
+    assert_eq!(handover::BOUND, 2);
+    assert_eq!(restore::BOUND, 1);
 }

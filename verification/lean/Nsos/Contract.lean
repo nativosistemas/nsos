@@ -97,6 +97,17 @@ inductive Reachable : Cfg → Prop where
   | init : Reachable (init C)
   | step {c d : Cfg} : Reachable c → Step C c d → Reachable d
 
+/-- Cero o más pasos. -/
+inductive Steps : Cfg → Cfg → Prop where
+  | refl (c : Cfg) : Steps c c
+  | step {c d e : Cfg} : Step C c d → Steps d e → Steps c e
+
+theorem reachable_steps {c d : Cfg} (h : Reachable C c) (hs : Steps C c d) :
+    Reachable C d := by
+  induction hs with
+  | refl => exact h
+  | step st _ ih => exact ih (Reachable.step h st)
+
 /-- Un estado sin transiciones salientes. -/
 def Terminal (s : Nat) : Prop := ∀ t ∈ C.trans, t.src ≠ s
 
@@ -491,5 +502,40 @@ def echoOld : Contract :=
   ⟨0, [⟨0, .ab, 1, 1⟩, ⟨0, .ab, 100, 0⟩, ⟨0, .ab, 999, 2⟩, ⟨1, .ba, 2, 0⟩]⟩
 
 theorem echoOld_unbounded : check echoOld = none := by decide
+
+/-! ### Actualización en vivo (etapa 2)
+
+Etiquetas de `nsos_abi::msg::labels`. -/
+
+def systemBase : Nat := 0xFFFF000000000000
+def lPrepare : Nat := systemBase + 1
+def lState : Nat := systemBase + 2
+def lRestore : Nat := systemBase + 3
+def lAccept : Nat := systemBase + 6
+def lReject : Nat := systemBase + 7
+def lCommit : Nat := systemBase + 8
+def lRollback : Nat := systemBase + 9
+
+/-- `counter` (`cliente` ↔ contador). Estados: `Serving` 0, `Waiting` 1.
+Etiquetas: `Inc` 1, `Count` 2. -/
+def counter : Contract := ⟨0, [⟨0, .ab, 1, 1⟩, ⟨1, .ba, 2, 0⟩]⟩
+
+/-- `handover` (supervisor ↔ versión vieja). Estados: `Serving` 0,
+`Deciding` 1 (manda el supervisor), `Handing` 2 (manda la versión vieja),
+`End` 3. -/
+def handover : Contract :=
+  ⟨0, [⟨0, .ab, lPrepare, 2⟩, ⟨1, .ab, lCommit, 3⟩, ⟨1, .ab, lRollback, 0⟩,
+       ⟨2, .ba, lState, 1⟩]⟩
+
+/-- `restore` (supervisor ↔ versión nueva). Estados: `Start` 0, `Deciding` 1,
+`End` 2. Tras un rechazo vuelve a `Start`: `origen` y `destino` usan el
+mismo canal con el enlace para varios intentos. -/
+def restore : Contract :=
+  ⟨0, [⟨0, .ab, lRestore, 1⟩, ⟨1, .ba, lAccept, 2⟩, ⟨1, .ba, lReject, 0⟩]⟩
+
+theorem counter_check : check counter = some 1 := by decide
+/-- Cota 2: el supervisor puede mandar `Rollback` y enseguida otro `Prepare`. -/
+theorem handover_check : check handover = some 2 := by decide
+theorem restore_check : check restore = some 1 := by decide
 
 end Nsos.Contract

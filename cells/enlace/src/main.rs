@@ -40,8 +40,8 @@ use nsos_rt::abi::msg::MAX_DATA;
 use nsos_rt::abi::syscall::flags::NONBLOCK;
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    bootstrap, cap_drop, channel_create, channel_recv, channel_send, clock_ns, mem_create, mem_map,
-    println, random_u64, yield_now,
+    bootstrap, cap_drop, cap_dup, channel_create, channel_recv, channel_send, clock_ns, mem_create,
+    mem_map, println, random_u64, yield_now,
 };
 
 /// Etiquetas del protocolo con `virtnet`.
@@ -349,9 +349,13 @@ fn migrate_in(
         Rights::READ | Rights::WRITE,
     )?;
     state.write_bytes(0, copy);
+    // Al supervisor le llega de solo lectura, como exige el contrato
+    // `restore` (`Mem<RO>`); la escribible se suelta.
+    let mem_ro = cap_dup(mem, Rights::READ | Rights::GRANT)?;
+    cap_drop(mem)?;
     let (proxy_end, srv_end) = channel_create()?;
     let mut r = Message::new(UPGRADE_RESTORE, name)?;
-    r.push_cap(mem)?;
+    r.push_cap(mem_ro)?;
     r.push_cap(srv_end)?;
     channel_send(ctrl, &r, 0)?;
     let mut m = Message::default();

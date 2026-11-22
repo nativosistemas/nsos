@@ -348,8 +348,12 @@ un tipo por estado, y se comprueba al compilar.
   contratos), Kani sobre el decodificador, y `ping`/`pong` migrados con
   una prueba negativa en QEMU. El control encontró que el protocolo viejo
   de `ping`/`pong` no tenía cota.
-* Etapa 2: actualización en vivo. Etapa 3: almacén. Etapa 4: drivers y
-  enlace. Etapa 5 (opcional): `contract_id` en el kernel.
+* Etapa 2 (hecha): actualización en vivo y migración con los contratos
+  `counter`, `handover` y `restore`; el estado viaja a la versión nueva
+  como `Mem<RO>`. Modelo: `UpgradeContract.lean` demuestra que cada paso
+  de `Upgrade.lean` es un paso de los contratos (8 mutaciones lo rompen).
+* Etapa 3: almacén. Etapa 4: drivers y enlace. Etapa 5 (opcional):
+  `contract_id` en el kernel.
 
 ## ARM64 (en curso)
 

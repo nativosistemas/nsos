@@ -268,7 +268,11 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
 
 ## 8. Actualización en vivo (protocolo, no syscall)
 
-Se implementa encima de las primitivas anteriores, por cell:
+Se implementa encima de las primitivas anteriores, por cell. Los mensajes
+son los de los contratos `handover` (supervisor ↔ versión vieja) y
+`restore` (supervisor ↔ versión nueva) de `nsos_contract::protocols`; ver
+[`contratos.md`](contratos.md). En `restore` el estado es un `Mem<RO>`: el
+tipo no admite la capacidad escribible.
 
 1. El supervisor arranca la versión nueva **sin** capacidades de servicio.
 2. Envía `UPGRADE_PREPARE` a la cell vieja por su canal de control.

@@ -20,6 +20,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación. |
 | `Nsos/Store.lean` | Almacén de objetos: consistencia ante caídas (copy-on-write) y aislamiento entre dueños (handles). |
 | `Nsos/Contract.lean` | Contratos de canal tipados (`crates/contract`): autómata, dos puntas con colas FIFO, el control `check` y su corrección. |
+| `Nsos/UpgradeContract.lean` | El protocolo de `Upgrade.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
@@ -132,6 +133,26 @@ cambiados. `check` es el control que corre la macro al compilar.
   correr la cota en uno, generar mal el dual (el servidor recibe en
   transiciones del servidor) y recibir sin mirar la etiqueta.
 
+### La actualización sigue sus contratos (`Nsos/UpgradeContract.lean`)
+
+* `hcfg`, `rcfg`: a cada fase de `Upgrade.lean`, la configuración del canal
+  supervisor ↔ vieja (`handover`) y supervisor ↔ nueva (`restore`).
+* `handover_follows`, `restore_follows`: cada paso del modelo es cero, uno o
+  dos pasos de cada contrato (dos cuando el modelo junta un `recv` y un
+  `send` de la misma cell). Excepción: la caída de la versión nueva, tras la
+  cual el intento siguiente usa un canal nuevo.
+* `handover_reachable`, `restore_reachable`, `upgrade_contract_safe`: en todo
+  estado alcanzable, los dos canales están en configuraciones alcanzables
+  de sus contratos y valen los teoremas de `Contract.lean` (cotas 2 y 1).
+  `done_clean`: al terminar, los dos canales terminaron sin nada en vuelo.
+* `counter_check`, `handover_check`, `restore_check`.
+* Mutaciones que rompen la simulación: en los contratos, que `Reject`
+  termine el canal, que `handover` no tenga `Rollback`, que la vieja
+  termine al entregar o que `Restore` lleve a otro estado; en el modelo
+  (compilado sin sus demostraciones propias, para aislar la simulación),
+  `commit` antes de `accept`, `forward` sin haber recibido el estado y
+  `resume` sin `rollback`.
+
 ### IPC completo (`Nsos/Ipc.lean`)
 
 El modelo sigue cada mensaje con un número propio y registra qué fue de él
@@ -178,9 +199,9 @@ real y exige resultados idénticos: handles, errores, objetos, derechos y
 cantidad de capacidades vivas. La CI regenera la traza y falla si el archivo
 del repo no coincide con lo que produce el modelo.
 
-Para los contratos, `tracegen` evalúa `Contract.check` sobre 406 contratos
-(los contraejemplos y otros al azar) y exporta las tablas de `echo` y
-`note`. `crates/contract/tests/contract_model.rs` exige que la `const fn`
+Para los contratos, `tracegen` evalúa `Contract.check` sobre 409 contratos
+(los contraejemplos y otros al azar) y exporta las tablas de `echo`,
+`note`, `counter`, `handover` y `restore`. `crates/contract/tests/contract_model.rs` exige que la `const fn`
 `nsos_contract::check` dé el mismo veredicto y la misma cota, y que las
 tablas que genera la macro `contract!` sean las del modelo.
 

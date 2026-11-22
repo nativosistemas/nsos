@@ -108,10 +108,12 @@
 
 mod chan;
 mod macros;
+mod mem;
 pub mod protocols;
 mod wire;
 
-pub use chan::{Chan, Endpoint, Receives, RecvError, Sends, State, Transport};
+pub use chan::{Chan, Endpoint, Receives, RecvError, RecvResult, Sends, State, Transport};
+pub use mem::{Access, Mem, RO, RW};
 pub use wire::{Bytes, Field, Msg, Reader, Writer};
 
 #[doc(hidden)]

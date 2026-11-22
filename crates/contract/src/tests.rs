@@ -9,9 +9,10 @@ use std::vec::Vec;
 use nsos_abi::cap::CapInfo;
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::{echo, note};
+use crate::protocols::{counter, echo, handover, note, restore};
 use crate::{
-    check, labels_distinct, Bytes, Chan, CheckError, Dir, RecvError, Transition, Transport,
+    check, labels_distinct, Bytes, Chan, CheckError, Dir, Mem, Msg, RecvError, Transition,
+    Transport, RO, RW,
 };
 
 /// Un objeto del kernel simulado.
@@ -128,6 +129,20 @@ impl Transport for Sim<'_> {
         k.queues.push(VecDeque::new());
         k.queues.push(VecDeque::new());
         Ok((k.insert(Obj::End(e), ALL), k.insert(Obj::End(e + 1), ALL)))
+    }
+
+    fn cap_dup(self, h: CapHandle, mask: Rights) -> Result<CapHandle, Error> {
+        let mut k = self.0.borrow_mut();
+        let &(o, r) = k.caps.get(&h.0).ok_or(Error::BadHandle)?;
+        let r = r.attenuate(mask).ok_or(Error::AccessDenied)?;
+        Ok(k.insert(o, r))
+    }
+
+    /// Un solo hilo: la respuesta tiene que estar ya en la cola (el kernel
+    /// también devuelve el próximo mensaje que llega a `h`).
+    fn call(self, h: CapHandle, m: &mut Message) -> Result<(), Error> {
+        self.send(h, m)?;
+        self.recv(h, m, false)
     }
 }
 
@@ -357,4 +372,176 @@ fn check_rejects_what_the_model_rejects() {
     assert_eq!(check(&[tr(64, true, 1, 0)]), Err(CheckError::TooManyStates));
     assert!(labels_distinct(&[1, 2, 3]));
     assert!(!labels_distinct(&[1, 2, 1]));
+}
+
+fn mem(k: &RefCell<Kernel>, r: Rights) -> CapHandle {
+    k.borrow_mut().insert(Obj::Mem, r)
+}
+
+fn rights(k: &RefCell<Kernel>, h: CapHandle) -> Rights {
+    k.borrow().caps[&h.0].1
+}
+
+#[test]
+fn read_only_is_read_only() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let h = mem(&k, ALL);
+    let rw: Mem<RW> = Mem::open(t, h).unwrap();
+    let ro = rw.read_only(t).unwrap();
+    assert!(!rights(&k, ro.handle()).contains(Rights::WRITE));
+    assert!(rights(&k, ro.handle()).contains(Rights::READ | Rights::GRANT));
+    // Un escribible no pasa por solo lectura, ni al revés.
+    assert_eq!(Mem::<RO>::open(t, h).unwrap_err(), Error::WrongType);
+    assert_eq!(
+        Mem::<RW>::open(t, ro.handle()).unwrap_err(),
+        Error::WrongType
+    );
+    // Un canal no es memoria.
+    let (a, _b) = t.channel_create().unwrap();
+    assert!(Mem::<RO>::open(t, a).is_err());
+}
+
+#[test]
+fn restore_rejects_a_writable_state() {
+    // Alguien sin contrato le manda a la versión nueva el estado
+    // escribible: la versión nueva lo descarta sin quedarse con nada.
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (sup, new) = t.channel_create().unwrap();
+    let new: Chan<_, restore::server::Start> = Chan::open(t, new).unwrap();
+    let state = mem(&k, ALL);
+    let (_c, s) = counter::pair(t).unwrap();
+    raw(
+        t,
+        sup,
+        <restore::Restore as Msg>::LABEL,
+        b"",
+        &[state, s.into_raw()],
+    );
+    let before = k.borrow().caps.len();
+    let Err(RecvError::Violation { chan, .. }) = new.recv() else {
+        panic!("esperaba una violación");
+    };
+    // Las dos capacidades viajaban en la cola: al recibirlas se insertaron
+    // y el decodificador las soltó. No queda ninguna nueva ni la memoria.
+    assert_eq!(k.borrow().caps.len(), before, "soltó las dos capacidades");
+    assert!(!k.borrow().caps.values().any(|(o, _)| *o == Obj::Mem));
+    drop(chan);
+}
+
+/// La actualización completa, con las tres puntas en un hilo: rechazo con
+/// rollback y después aceptación con commit.
+#[test]
+fn upgrade_reject_then_accept() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = counter::pair(t).unwrap();
+    let (sup_old, old) = handover::pair(t).unwrap();
+    let state: Mem<RW> = Mem::open(t, mem(&k, ALL)).unwrap();
+
+    // El cliente deja un pedido encolado: viaja con el extremo.
+    let cli = match cli.send(counter::Inc {}) {
+        Ok(c) => c,
+        Err(e) => panic!("{e:?}"),
+    };
+
+    let mut sup_old = sup_old;
+    let mut old = old;
+    let mut state = state;
+    let mut srv = srv;
+    for accept in [false, true] {
+        // supervisor → vieja: Prepare; vieja → supervisor: State.
+        let sup_h = sup_old.send(handover::Prepare {}).unwrap();
+        let handover::server::recv::Serving::Prepare(old_h, _) = old.recv().unwrap();
+        let old_d = old_h
+            .send(handover::State {
+                state,
+                service: srv.into_endpoint(),
+            })
+            .unwrap();
+        let handover::client::recv::Handing::State(sup_d, st) = sup_h.recv().unwrap();
+
+        // supervisor → nueva: Restore con una copia de solo lectura.
+        let (sup_new, new) = restore::pair(t).unwrap();
+        let ro = st.state.read_only(t).unwrap();
+        let backup = st.service.backup(t).unwrap();
+        let sup_new = sup_new
+            .send(restore::Restore {
+                state: ro,
+                service: st.service,
+                mode: Bytes::new(b"").unwrap(),
+            })
+            .unwrap();
+        let restore::server::recv::Start::Restore(new, r) = new.recv().unwrap();
+        assert!(!rights(&k, r.state.handle()).contains(Rights::WRITE));
+
+        if accept {
+            new.send(restore::Accept {}).unwrap().close();
+            let restore::client::recv::Deciding::Accept(_end, _) = sup_new.recv().unwrap() else {
+                panic!("esperaba Accept");
+            };
+            backup.release(t);
+            st.state.release(t);
+            sup_d.send(handover::Commit {}).unwrap().close();
+            let handover::server::recv::Deciding::Commit(_end, _) = old_d.recv().unwrap() else {
+                panic!("esperaba Commit");
+            };
+            r.state.release(t);
+            // La nueva atiende el pedido que estaba encolado.
+            let srv: Chan<_, counter::server::Serving> = Chan::attach(t, r.service);
+            let counter::server::recv::Serving::Inc(w, _) = srv.recv().unwrap();
+            let _srv = w
+                .send(counter::Count {
+                    count: 1,
+                    version: 2,
+                })
+                .unwrap();
+            let counter::client::recv::Waiting::Count(_cli, c) = cli.recv().unwrap();
+            assert_eq!((c.count, c.version), (1, 2));
+            break;
+        }
+        let _start = new
+            .send(restore::Reject {
+                state: r.state,
+                service: r.service,
+            })
+            .unwrap();
+        let restore::client::recv::Deciding::Reject(_s, back) = sup_new.recv().unwrap() else {
+            panic!("esperaba Reject");
+        };
+        back.state.release(t);
+        backup.release(t);
+        sup_old = sup_d
+            .send(handover::Rollback {
+                state: st.state,
+                service: back.service,
+            })
+            .unwrap();
+        let handover::server::recv::Deciding::Rollback(o, rb) = old_d.recv().unwrap() else {
+            panic!("esperaba Rollback");
+        };
+        old = o;
+        state = rb.state;
+        srv = Chan::attach(t, rb.service);
+    }
+}
+
+#[test]
+fn call_is_send_then_recv() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = t.channel_create().unwrap();
+    let cli: Chan<_, counter::client::Serving> = Chan::open(t, cli).unwrap();
+    // La respuesta ya está en la cola (ver `Sim::call`).
+    let mut d = [0u8; 12];
+    d[..8].copy_from_slice(&7u64.to_le_bytes());
+    d[8..].copy_from_slice(&1u32.to_le_bytes());
+    raw(t, srv, 2, &d, &[]);
+    let counter::client::recv::Waiting::Count(_c, m) = cli.call(counter::Inc {}).unwrap();
+    assert_eq!((m.count, m.version), (7, 1));
+    // Y el pedido llegó.
+    let mut m = Message::default();
+    t.recv(srv, &mut m, true).unwrap();
+    assert_eq!(m.header.label, 1);
 }

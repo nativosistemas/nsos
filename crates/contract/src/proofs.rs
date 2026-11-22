@@ -6,7 +6,7 @@ use nsos_abi::cap::CapInfo;
 use nsos_abi::msg::{MsgHeader, MAX_CAPS, MAX_DATA};
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::echo;
+use crate::protocols::{echo, restore};
 use crate::{check, Bytes, Chan, Dir, Msg, Receives, RecvError, Transition, Transport};
 
 /// Transporte cuyo `recv` entrega un mensaje cualquiera y cuyo `cap_info`
@@ -15,6 +15,21 @@ use crate::{check, Bytes, Chan, Dir, Msg, Receives, RecvError, Transition, Trans
 struct Any<'a> {
     msg: &'a Message,
     drops: &'a Cell<usize>,
+    /// Lo que contestó `cap_info` para cada handle: `(handle, tipo, derechos)`.
+    seen: &'a Cell<[(u32, u32, u32); 4]>,
+    n_seen: &'a Cell<usize>,
+}
+
+impl Any<'_> {
+    /// Lo que se contestó para `h` (`None` si no se preguntó o falló).
+    fn answered(&self, h: CapHandle) -> Option<(u32, u32)> {
+        let seen = self.seen.get();
+        seen[..self.n_seen.get().min(4)]
+            .iter()
+            .rev()
+            .find(|e| e.0 == h.0)
+            .map(|e| (e.1, e.2))
+    }
 }
 
 impl Transport for Any<'_> {
@@ -25,11 +40,19 @@ impl Transport for Any<'_> {
         *m = *self.msg;
         Ok(())
     }
-    fn cap_info(self, _: CapHandle) -> Result<CapInfo, Error> {
+    fn cap_info(self, h: CapHandle) -> Result<CapInfo, Error> {
         if kani::any() {
+            let (object_type, rights): (u32, u32) = (kani::any(), kani::any());
+            let i = self.n_seen.get();
+            if i < 4 {
+                let mut seen = self.seen.get();
+                seen[i] = (h.0, object_type, rights);
+                self.seen.set(seen);
+                self.n_seen.set(i + 1);
+            }
             Ok(CapInfo {
-                object_type: kani::any(),
-                rights: kani::any(),
+                object_type,
+                rights,
                 koid: 0,
             })
         } else {
@@ -41,6 +64,12 @@ impl Transport for Any<'_> {
     }
     fn channel_create(self) -> Result<(CapHandle, CapHandle), Error> {
         Err(Error::NoMemory)
+    }
+    fn cap_dup(self, _: CapHandle, _: Rights) -> Result<CapHandle, Error> {
+        Err(Error::NoMemory)
+    }
+    fn call(self, h: CapHandle, m: &mut Message) -> Result<(), Error> {
+        self.recv(h, m, false)
     }
 }
 
@@ -76,10 +105,12 @@ fn any_valid_message() -> Message {
 #[kani::unwind(230)]
 fn decode_any() {
     let msg = any_valid_message();
-    let drops = Cell::new(0);
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
     let t = Any {
         msg: &msg,
         drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
     };
     let s: Chan<_, echo::server::Ready> = Chan::__from_parts(t, CapHandle(1));
     let n = msg.cap_slice().len();
@@ -130,10 +161,12 @@ fn roundtrip_echo() {
     let mut m = Message::default();
     echo::Echo { data }.encode(&mut m);
     assert!(m.validate().is_ok());
-    let drops = Cell::new(0);
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
     let t = Any {
         msg: &m,
         drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
     };
     let back = echo::Echo::decode(t, &m).unwrap();
     assert_eq!(back.data.as_slice(), &buf[..len]);
@@ -201,4 +234,45 @@ fn check_any() {
             }
         }
     }
+}
+
+/// Con cualquier mensaje que llegue a la versión nueva en `Start` y
+/// cualquier respuesta de `cap_info`: sin pánicos; si acepta `Restore`, el
+/// estado es un objeto `Memory` con `READ` y **sin** `WRITE` y el extremo
+/// es un canal, y se usaron exactamente las dos capacidades; si no, se
+/// soltaron todas y el canal sigue en `Start`. Ninguna versión nueva
+/// tipada recibe el estado escribible.
+#[kani::proof]
+#[kani::unwind(230)]
+fn restore_decode_any() {
+    let msg = any_valid_message();
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let t = Any {
+        msg: &msg,
+        drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
+    };
+    let s: Chan<_, restore::server::Start> = Chan::__from_parts(t, CapHandle(1));
+    let n = msg.cap_slice().len();
+    match s.recv() {
+        Ok(restore::server::recv::Start::Restore(c, r)) => {
+            assert_eq!(msg.header.label, nsos_abi::msg::labels::UPGRADE_RESTORE);
+            assert_eq!(n, 2);
+            assert_eq!(drops.get(), 0);
+            assert!(r.mode.as_slice().len() <= 64);
+            let (ty, rights) = t.answered(r.state.handle()).unwrap();
+            assert_eq!(ty, ObjectType::Memory as u32);
+            assert!(Rights(rights).contains(Rights::READ));
+            assert!(!Rights(rights).contains(Rights::WRITE));
+            let (ty, _) = t.answered(r.service.handle()).unwrap();
+            assert_eq!(ty, ObjectType::Channel as u32);
+            core::mem::forget(c);
+        }
+        Err(RecvError::Violation { chan, .. }) => {
+            assert_eq!(drops.get(), n);
+            core::mem::forget(chan);
+        }
+        Err(_) => unreachable!(),
+    };
 }

@@ -20,6 +20,10 @@ pub trait Transport: Copy {
     fn cap_drop(self, h: CapHandle);
     /// `channel_create`.
     fn channel_create(self) -> Result<(CapHandle, CapHandle), Error>;
+    /// `cap_dup` con derechos atenuados por `mask`.
+    fn cap_dup(self, h: CapHandle, mask: Rights) -> Result<CapHandle, Error>;
+    /// `channel_call` sin plazo: manda `m` y deja en `m` la respuesta.
+    fn call(self, h: CapHandle, m: &mut Message) -> Result<(), Error>;
 }
 
 /// Un estado de un lado de un contrato (lo genera [`contract!`](crate::contract)).
@@ -68,8 +72,25 @@ impl<S: State> Endpoint<S> {
         self.h
     }
 
-    pub(crate) fn into_raw(self) -> CapHandle {
+    /// El handle crudo, para pasarlo a quien no usa contratos (por ejemplo
+    /// como capacidad de arranque de `cell_spawn`).
+    pub fn into_raw(self) -> CapHandle {
         self.h
+    }
+
+    /// Una copia del extremo (todos sus derechos), en el mismo estado.
+    ///
+    /// Rompe la linealidad del *typestate*: hay dos dueños del mismo
+    /// extremo. Es para respaldos que no se usan mientras el original está
+    /// en uso, como el que guarda el supervisor durante una actualización
+    /// por si la versión nueva se cae.
+    pub fn backup<T: Transport>(&self, t: T) -> Result<Endpoint<S>, Error> {
+        Ok(Endpoint::from_raw(t.cap_dup(self.h, Rights::ALL)?))
+    }
+
+    /// Suelta el handle.
+    pub fn release<T: Transport>(self, t: T) {
+        t.cap_drop(self.h);
     }
 }
 
@@ -95,6 +116,10 @@ pub struct Chan<T: Transport, S: State> {
     h: CapHandle,
     _s: PhantomData<S>,
 }
+
+/// Lo que devuelve recibir en el estado `S`: la rama que llegó, o el error
+/// (con el canal, si sigue abierto).
+pub type RecvResult<T, S> = Result<<S as Receives>::Branch<T>, RecvError<Chan<T, S>>>;
 
 /// Error de [`Chan::recv`] y [`Chan::try_recv`].
 pub enum RecvError<C> {
@@ -162,6 +187,12 @@ impl<T: Transport, S: State> Chan<T, S> {
         self.h
     }
 
+    /// El handle crudo, sin cerrarlo (por ejemplo para pasarlo a
+    /// `cell_spawn`, que lo mueve a la cell nueva).
+    pub fn into_raw(self) -> CapHandle {
+        self.into_endpoint().into_raw()
+    }
+
     /// Cierra el canal (lo mismo que destruirlo).
     pub fn close(self) {}
 
@@ -188,6 +219,31 @@ impl<T: Transport, S: State> Chan<T, S> {
     }
 }
 
+impl<T: Transport, S: State> Chan<T, S> {
+    /// Manda `msg` y espera la respuesta en una sola syscall
+    /// (`channel_call`). Es `send` seguido de `recv` en el estado siguiente.
+    ///
+    /// Si falla, el canal se cierra. El kernel no dice si el pedido llegó a
+    /// mandarse, así que las capacidades de `msg` no se sueltan (si no se
+    /// mandaron, ocupan su slot hasta que la cell termina).
+    pub fn call<M: Msg>(self, msg: M) -> RecvResult<T, S::Next>
+    where
+        S: Sends<M>,
+        S::Next: Receives,
+    {
+        let mut m = Message::default();
+        msg.encode(&mut m);
+        let (t, h) = (self.t, self.h);
+        core::mem::forget(self);
+        let next: Chan<T, S::Next> = Chan::__from_parts(t, h);
+        if let Err(e) = t.call(h, &mut m) {
+            drop(next);
+            return Err(RecvError::Failed(e));
+        }
+        next.decode_received(&m)
+    }
+}
+
 impl<T: Transport, S: Receives> Chan<T, S> {
     /// Espera un mensaje y lo decodifica según el estado.
     pub fn recv(self) -> Result<S::Branch<T>, RecvError<Self>> {
@@ -207,13 +263,17 @@ impl<T: Transport, S: Receives> Chan<T, S> {
             Err(Error::WouldBlock) if nonblock => return Err(RecvError::WouldBlock(self)),
             Err(e) => return Err(RecvError::Failed(e)),
         }
-        match S::decode(self.t, self.h, &m) {
+        self.decode_received(&m)
+    }
+
+    fn decode_received(self, m: &Message) -> Result<S::Branch<T>, RecvError<Self>> {
+        match S::decode(self.t, self.h, m) {
             Some(b) => {
                 core::mem::forget(self);
                 Ok(b)
             }
             None => {
-                crate::discard(self.t, &m);
+                crate::discard(self.t, m);
                 Err(RecvError::Violation {
                     label: m.header.label,
                     chan: self,

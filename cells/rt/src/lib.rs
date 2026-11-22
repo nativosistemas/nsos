@@ -54,6 +54,14 @@ impl contract::Transport for Sys {
     fn channel_create(self) -> SysResult<(CapHandle, CapHandle)> {
         channel_create()
     }
+
+    fn cap_dup(self, h: CapHandle, mask: Rights) -> SysResult<CapHandle> {
+        cap_dup(h, mask)
+    }
+
+    fn call(self, h: CapHandle, m: &mut Message) -> SysResult<()> {
+        channel_call(h, m, abi::syscall::WAIT_FOREVER)
+    }
 }
 
 /// Capacidad de arranque número `i` (1-based).
