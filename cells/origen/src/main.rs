@@ -2,7 +2,9 @@
 //! (hito 10, modelo: `verification/lean/Nsos/Migration.lean`).
 //!
 //! Capacidades de arranque:
-//! 1. Canal de control con `enlace` (la red autenticada hacia la otra máquina).
+//! 1. Canal de control con `enlace` (la red autenticada hacia la otra
+//!    máquina); `origen` es el cliente del contrato `restore` y lo usa para
+//!    todos los intentos.
 //! 2. Imagen de `contador-v1`. 3. Imagen de `cliente`.
 //!
 //! Arranca `contador-v1` y su `cliente` y migra el servicio dos veces con el
@@ -13,60 +15,61 @@
 //! 2. pide `contador-v2`, que acepta: commit, la v1 termina y el cliente
 //!    sigue conectado al mismo canal, ahora atendido desde la otra máquina.
 //!
+//! Al enlace le pasa una copia **de solo lectura** del estado (`Mem<RO>`) y
+//! se queda con la escribible: si la otra máquina rechaza, la v1 retoma con
+//! el original, que el enlace no pudo tocar.
+//!
 //! Termina con 0 si la v1 y el cliente terminaron bien.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::msg::labels::{
-    UPGRADE_ACCEPT, UPGRADE_COMMIT, UPGRADE_PREPARE, UPGRADE_REJECT, UPGRADE_RESTORE,
-    UPGRADE_ROLLBACK, UPGRADE_STATE,
-};
 use nsos_rt::abi::syscall::cell_state;
-use nsos_rt::abi::{CapHandle, Error, Message};
-use nsos_rt::{
-    bootstrap, cap_drop, cell_spawn, cell_status, channel_create, channel_recv, channel_send,
-    println,
-};
+use nsos_rt::abi::{CapHandle, Error};
+use nsos_rt::contract::protocols::{counter, handover, restore};
+use nsos_rt::contract::{Bytes, Chan};
+use nsos_rt::{bootstrap, cap_drop, cell_spawn, cell_status, println, Sys};
 
 nsos_rt::entry!(main);
 
-/// Migra el servicio de `ctl_old` a la otra máquina, donde arranca
-/// `remote`. Devuelve si la otra punta aceptó.
-fn try_migrate(ctl_old: CapHandle, link: CapHandle, remote: &str) -> Result<bool, Error> {
+type Old = Chan<Sys, handover::client::Serving>;
+type Link = Chan<Sys, restore::client::Start>;
+
+/// Migra el servicio de `old` a la otra máquina, donde arranca `remote`.
+/// Si la otra punta rechazó, devuelve los dos canales para otro intento.
+fn try_migrate(old: Old, link: Link, remote: &str) -> Result<Option<(Old, Link)>, Error> {
     println!(
         "origen: pido a contador-v1 su estado (para {} en la otra máquina)",
         remote
     );
-    channel_send(ctl_old, &Message::new(UPGRADE_PREPARE, b"")?, 0)?;
-    let mut m = Message::default();
-    channel_recv(ctl_old, &mut m, 0)?;
-    if m.header.label != UPGRADE_STATE || m.cap_slice().len() != 2 {
+    let old = old.send(handover::Prepare {})?;
+    let Ok(handover::client::recv::Handing::State(old, st)) = old.recv() else {
         return Err(Error::BadMessage);
-    }
-    let mut r = Message::new(UPGRADE_RESTORE, remote.as_bytes())?;
-    for &c in m.cap_slice() {
-        r.push_cap(c)?;
-    }
-    channel_send(link, &r, 0)?;
-    channel_recv(link, &mut m, 0)?;
-    match (m.header.label, m.cap_slice().len()) {
-        (UPGRADE_ACCEPT, 0) => {
+    };
+    let link = link.send(restore::Restore {
+        state: st.state.read_only(Sys)?,
+        service: st.service,
+        mode: Bytes::new(remote.as_bytes()).ok_or(Error::InvalidArgs)?,
+    })?;
+    match link.recv() {
+        Ok(restore::client::recv::Deciding::Accept(end, _)) => {
             println!("origen: {} aceptó en la otra máquina; commit", remote);
-            channel_send(ctl_old, &Message::new(UPGRADE_COMMIT, b"")?, 0)?;
-            Ok(true)
+            end.close();
+            st.state.release(Sys);
+            old.send(handover::Commit {})?.close();
+            Ok(None)
         }
-        (UPGRADE_REJECT, 2) => {
+        Ok(restore::client::recv::Deciding::Reject(link, r)) => {
             println!("origen: {} rechazó; rollback a contador-v1", remote);
-            let mut back = Message::new(UPGRADE_ROLLBACK, b"")?;
-            for &c in m.cap_slice() {
-                back.push_cap(c)?;
-            }
-            channel_send(ctl_old, &back, 0)?;
-            Ok(false)
+            r.state.release(Sys);
+            let old = old.send(handover::Rollback {
+                state: st.state,
+                service: r.service,
+            })?;
+            Ok(Some((old, link)))
         }
-        _ => Err(Error::BadMessage),
+        Err(_) => Err(Error::BadMessage),
     }
 }
 
@@ -86,21 +89,19 @@ fn expect_ok(name: &str, h: CapHandle) -> Result<(), Error> {
 }
 
 fn run() -> Result<(), Error> {
-    let link = bootstrap(1);
-    let (srv_end, client_end) = channel_create()?;
-    let (ctl, ctl_child) = channel_create()?;
-    let v1 = cell_spawn(bootstrap(2), &[ctl_child, srv_end])?;
-    let client = cell_spawn(bootstrap(3), &[client_end])?;
-    if try_migrate(ctl, link, "contador-roto")? {
+    let link = Link::open(Sys, bootstrap(1))?;
+    let (client_end, srv_end) = counter::pair(Sys)?;
+    let (ctl, ctl_child) = handover::pair(Sys)?;
+    let v1 = cell_spawn(bootstrap(2), &[ctl_child.into_raw(), srv_end.into_raw()])?;
+    let client = cell_spawn(bootstrap(3), &[client_end.into_raw()])?;
+    let Some((ctl, link)) = try_migrate(ctl, link, "contador-roto")? else {
         return Err(Error::BadMessage);
-    }
-    if !try_migrate(ctl, link, "contador-v2")? {
+    };
+    if try_migrate(ctl, link, "contador-v2")?.is_some() {
         return Err(Error::BadMessage);
     }
     expect_ok("contador-v1", v1)?;
-    expect_ok("cliente", client)?;
-    cap_drop(ctl)?;
-    cap_drop(link)
+    expect_ok("cliente", client)
 }
 
 fn main() -> i32 {

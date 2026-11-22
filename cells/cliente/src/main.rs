@@ -6,20 +6,19 @@
 //! y uno aceptado. Termina con 0 cuando vio al menos `MIN_V1` respuestas de
 //! la versión 1 (antes y después del rollback) y `MIN_V2` de la 2.
 //!
-//! Cada pedido es un `channel_call` (envío y respuesta en una syscall). El
-//! pedido que queda encolado durante la actualización viaja con el extremo
-//! del servidor, así que la respuesta llega igual al mismo `call`.
+//! Habla el contrato `counter` (`nsos_contract::protocols`). Cada pedido es
+//! un `call` (envío y respuesta en una syscall). El pedido que queda
+//! encolado durante la actualización viaja con el extremo del servidor, así
+//! que la respuesta llega igual al mismo `call`.
 
 #![no_std]
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::syscall::WAIT_FOREVER;
-use nsos_rt::abi::Message;
-use nsos_rt::{bootstrap, channel_call, println};
+use nsos_rt::contract::protocols::counter;
+use nsos_rt::contract::Chan;
+use nsos_rt::{bootstrap, println, Sys};
 
-const INC: u64 = 1;
-const COUNT: u64 = 2;
 const MIN_V1: u32 = 10;
 const MIN_V2: u32 = 5;
 const MAX_REQUESTS: u64 = 10_000;
@@ -27,18 +26,25 @@ const MAX_REQUESTS: u64 = 10_000;
 nsos_rt::entry!(main);
 
 fn main() -> i32 {
-    let srv = bootstrap(1);
+    let Ok(mut srv) = Chan::<Sys, counter::client::Serving>::open(Sys, bootstrap(1)) else {
+        println!("cliente: la capacidad de arranque no es un canal");
+        return 1;
+    };
     let mut seen = [0u32; 3];
     let mut last_version = 0;
     for expected in 1..=MAX_REQUESTS {
-        let mut m = Message::new(INC, b"").unwrap();
-        if channel_call(srv, &mut m, WAIT_FOREVER).is_err() || m.header.label != COUNT {
-            println!("cliente: se cortó la conexión en el pedido {}", expected);
-            return 2;
-        }
-        let d = m.payload();
-        let count = u64::from_le_bytes(d[..8].try_into().unwrap());
-        let version = u32::from_le_bytes(d[8..12].try_into().unwrap());
+        let (c, m) = match srv.call(counter::Inc {}) {
+            Ok(counter::client::recv::Waiting::Count(c, m)) => (c, m),
+            Err(e) => {
+                println!(
+                    "cliente: se cortó la conexión en el pedido {}: {:?}",
+                    expected, e
+                );
+                return 2;
+            }
+        };
+        srv = c;
+        let (count, version) = (m.count, m.version);
         if count != expected || !(1..=2).contains(&version) || version < last_version {
             println!(
                 "cliente: respuesta inválida: contador {} (esperaba {}), versión {}",

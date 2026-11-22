@@ -335,6 +335,26 @@ Con esto no queda ninguna syscall del ABI v1 que devuelva `Unsupported`.
 
 Después: *handoff* directo al servidor en `channel_call`, cuotas por cell.
 
+## Contratos de canal tipados (en curso)
+
+Ver [`contratos.md`](contratos.md). Los protocolos dejan de ser constantes
+sueltas: un contrato es un autómata que la macro `contract!` convierte en
+un tipo por estado, y se comprueba al compilar.
+
+* Etapa 1 (hecha): modelo primero (`Nsos/Contract.lean`: sin mensajes
+  inesperados, sin bloqueo de protocolo, nada pendiente al terminar, colas
+  acotadas; 3 contraejemplos y 6 mutaciones), crate `nsos-contract` con el
+  mismo control como `const fn` (comparado con el modelo en 406
+  contratos), Kani sobre el decodificador, y `ping`/`pong` migrados con
+  una prueba negativa en QEMU. El control encontró que el protocolo viejo
+  de `ping`/`pong` no tenía cota.
+* Etapa 2 (hecha): actualización en vivo y migración con los contratos
+  `counter`, `handover` y `restore`; el estado viaja a la versión nueva
+  como `Mem<RO>`. Modelo: `UpgradeContract.lean` demuestra que cada paso
+  de `Upgrade.lean` es un paso de los contratos (8 mutaciones lo rompen).
+* Etapa 3: almacén. Etapa 4: drivers y enlace. Etapa 5 (opcional):
+  `contract_id` en el kernel.
+
 ## ARM64 (en curso)
 
 * Paso 1 (hecho): QEMU `virt` aarch64. Kernel en EL1 y cells en EL0 con la

@@ -19,8 +19,10 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
 | `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación. |
 | `Nsos/Store.lean` | Almacén de objetos: consistencia ante caídas (copy-on-write) y aislamiento entre dueños (handles). |
+| `Nsos/Contract.lean` | Contratos de canal tipados (`crates/contract`): autómata, dos puntas con colas FIFO, el control `check` y su corrección. |
+| `Nsos/UpgradeContract.lean` | El protocolo de `Upgrade.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
-| `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace`. |
+| `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
 ## Teoremas demostrados
 
@@ -103,6 +105,54 @@ hecha o rota, en cualquier orden.
 * Mutaciones que rompen las demostraciones: además de las cuatro de arriba,
   que `DUP_RO` conserve la escritura y que `OPEN` tome el dueño del mensaje.
 
+### Contratos de canal (`Nsos/Contract.lean`)
+
+Un contrato es una tabla de transiciones `(origen, quién manda, etiqueta,
+destino)`; el cliente la sigue tal cual y el servidor con los papeles
+cambiados. `check` es el control que corre la macro al compilar.
+
+* `Contract.contract_safe`: si `check` acepta con cota `k`, en toda
+  ejecución de dos puntas que cumplen: el primero de cada cola lo puede
+  recibir su destinatario (`head_receivable_a/b`), alguien puede avanzar
+  salvo que las dos estén en el mismo estado final sin nada en vuelo
+  (`progress`), una punta terminada no tiene mensajes sin leer
+  (`finished_no_pending_a/b`) y nunca hay más de `k` mensajes en vuelo
+  (`queue_bound`). La clave es el invariante `Inv`: una punta va adelantada
+  por un camino de una sola dirección, los mensajes en vuelo son ese camino
+  y la cola de la que va adelante está vacía.
+* `check_sound`: lo que acepta `check` no mezcla direcciones, es
+  determinista y está acotado.
+* Contraejemplos: `mixed_breaks` (un estado en que mandan las dos puntas),
+  `nondet_breaks` (una etiqueta a dos estados) y `loop_unbounded` (la cola
+  crece sin límite) violan alguna propiedad, y `check` los rechaza.
+* `echo_check`, `note_check`: los contratos de `ping`/`pong` tienen cota 1.
+  `echoOld_unbounded`: el protocolo anterior (`NEW_CHANNEL` sin respuesta)
+  no tenía cota.
+* Mutaciones que rompen las demostraciones: quitar el determinismo o la
+  regla de una sola dirección de `check`, acotar una sola dirección o
+  correr la cota en uno, generar mal el dual (el servidor recibe en
+  transiciones del servidor) y recibir sin mirar la etiqueta.
+
+### La actualización sigue sus contratos (`Nsos/UpgradeContract.lean`)
+
+* `hcfg`, `rcfg`: a cada fase de `Upgrade.lean`, la configuración del canal
+  supervisor ↔ vieja (`handover`) y supervisor ↔ nueva (`restore`).
+* `handover_follows`, `restore_follows`: cada paso del modelo es cero, uno o
+  dos pasos de cada contrato (dos cuando el modelo junta un `recv` y un
+  `send` de la misma cell). Excepción: la caída de la versión nueva, tras la
+  cual el intento siguiente usa un canal nuevo.
+* `handover_reachable`, `restore_reachable`, `upgrade_contract_safe`: en todo
+  estado alcanzable, los dos canales están en configuraciones alcanzables
+  de sus contratos y valen los teoremas de `Contract.lean` (cotas 2 y 1).
+  `done_clean`: al terminar, los dos canales terminaron sin nada en vuelo.
+* `counter_check`, `handover_check`, `restore_check`.
+* Mutaciones que rompen la simulación: en los contratos, que `Reject`
+  termine el canal, que `handover` no tenga `Rollback`, que la vieja
+  termine al entregar o que `Restore` lleve a otro estado; en el modelo
+  (compilado sin sus demostraciones propias, para aislar la simulación),
+  `commit` antes de `accept`, `forward` sin haber recibido el estado y
+  `resume` sin `rollback`.
+
 ### IPC completo (`Nsos/Ipc.lean`)
 
 El modelo sigue cada mensaje con un número propio y registra qué fue de él
@@ -149,6 +199,12 @@ real y exige resultados idénticos: handles, errores, objetos, derechos y
 cantidad de capacidades vivas. La CI regenera la traza y falla si el archivo
 del repo no coincide con lo que produce el modelo.
 
+Para los contratos, `tracegen` evalúa `Contract.check` sobre 409 contratos
+(los contraejemplos y otros al azar) y exporta las tablas de `echo`,
+`note`, `counter`, `handover` y `restore`. `crates/contract/tests/contract_model.rs` exige que la `const fn`
+`nsos_contract::check` dé el mismo veredicto y la misma cota, y que las
+tablas que genera la macro `contract!` sean las del modelo.
+
 El IPC del kernel (`kernel/src/cell.rs`) todavía no tiene este puente porque
 depende del scheduler. Para tenerlo hay que mover la lógica de colas de canal
 a `kcore`.
@@ -189,5 +245,6 @@ fijada en `lean-toolchain`.
 make verify                     # desde la raíz: demostraciones + trazas
 # o, desde verification/lean:
 lake build                      # compila y verifica todas las demostraciones
-lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace
+lake exe tracegen ../../crates/kcore/tests/data/cspace_model.trace \
+    ../../crates/contract/tests/data/contract_model.trace
 ```

@@ -50,6 +50,11 @@ casos borde.
 | `decode_entry_any` | `crates/store/src/layout.rs` | Con cualquier entrada de 128 bytes leída del disco y cualquier tamaño de disco: sin panics ni overflows; si se acepta, el nombre es válido, los datos caen dentro del disco y fuera de las ranuras de superbloque, y codificarla da los mismos bytes. |
 | `find_run_is_free` | `crates/store/src/alloc.rs` | Con cualquier mapa de bloques: el rango que devuelve está entero dentro del límite y libre, y después de marcarlo queda usado. Es la condición `Fresh` del modelo de Lean (`Store.crash_safe`). |
 
+| `decode_any` | `crates/contract/src/proofs.rs` | Con cualquier mensaje que deje pasar el kernel (`validate`) y cualquier respuesta de `cap_info`, el servidor de `echo` en `Ready`: sin pánicos; si acepta, la etiqueta es de un mensaje que el cliente puede mandar ahí y se usaron exactamente sus datos y capacidades; si no, el canal vuelve en el mismo estado y se soltaron **todas** las capacidades recibidas. Quitar el `discard` de la rama de violación la hace fallar. |
+| `restore_decode_any` | `crates/contract/src/proofs.rs` | Con cualquier mensaje y cualquier respuesta de `cap_info`, la versión nueva en `Start`: sin pánicos; si acepta `Restore`, el estado es un objeto `Memory` con `READ` y **sin** `WRITE`, el extremo es un canal y se usaron exactamente las dos capacidades; si no, se soltaron todas. Ninguna versión nueva tipada recibe el estado escribible. Que `Mem<RO>` no prohíba `WRITE` la hace fallar. |
+| `roundtrip_echo`, `roundtrip_endpoint` | `crates/contract/src/proofs.rs` | Un `Echo` con cualquier texto y un `NewChannel` con cualquier handle válido se codifican en un mensaje que el kernel acepta y se decodifican igual (nada se trunca). |
+| `check_any` | `crates/contract/src/proofs.rs` | Con cualquier tabla de hasta tres transiciones, el control de contratos no entra en pánico, y si acepta, ningún estado mezcla direcciones, cada etiqueta lleva a un solo estado y la cota no supera la cantidad de transiciones. |
+
 `check_invariants` (en `cspace.rs`) también corre en los tests unitarios.
 
 ### Mutaciones de ARM64

@@ -195,6 +195,17 @@ hardware del *exchange heap* de Singularity y no depende de que la cell
 emisora sea "buena". Compartir memoria de solo lectura (p. ej. código) se
 logra con `cap_dup` sin `WRITE`.
 
+### 5.4 Contratos
+
+El kernel no interpreta `label` ni `data`: qué mensajes valen en cada
+momento lo dice el **contrato** del protocolo, que se escribe con la macro
+`nsos_contract::contract!` y se comprueba al compilar (estados de una sola
+dirección, determinismo, cota de mensajes en vuelo menor o igual que los 64
+de la cola). Una cell tipada no puede mandar fuera de protocolo, y lo que
+recibe fuera de protocolo lo descarta soltando sus capacidades. El formato
+en el cable es este mismo, así que una cell sin contrato puede hablar con
+una tipada. Ver [`contratos.md`](contratos.md).
+
 ## 6. Espera y async
 
 `wait(items, n, timeout_ns) -> n_listos` recibe un arreglo de `n` (1 a 16)
@@ -257,7 +268,11 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
 
 ## 8. Actualización en vivo (protocolo, no syscall)
 
-Se implementa encima de las primitivas anteriores, por cell:
+Se implementa encima de las primitivas anteriores, por cell. Los mensajes
+son los de los contratos `handover` (supervisor ↔ versión vieja) y
+`restore` (supervisor ↔ versión nueva) de `nsos_contract::protocols`; ver
+[`contratos.md`](contratos.md). En `restore` el estado es un `Mem<RO>`: el
+tipo no admite la capacidad escribible.
 
 1. El supervisor arranca la versión nueva **sin** capacidades de servicio.
 2. Envía `UPGRADE_PREPARE` a la cell vieja por su canal de control.

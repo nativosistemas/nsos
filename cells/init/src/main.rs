@@ -27,10 +27,10 @@
 //! y `init` hace rollback igual. Por último actualiza a `contador-v2`, que
 //! acepta: commit y la v1 termina. En cada intento la versión nueva arranca
 //! sin capacidades de servicio, la v1 entrega estado y extremo del cliente
-//! (`UPGRADE_PREPARE` → `UPGRADE_STATE`) y `init` le pasa a la nueva el
-//! extremo y una copia **de solo lectura** del estado (`UPGRADE_RESTORE`),
-//! quedándose con el estado escribible y una copia del extremo hasta que la
-//! nueva decide. El cliente nunca deja de estar conectado y verifica que el
+//! (contrato `handover`: `Prepare` → `State`) y `init` le pasa a la nueva el
+//! extremo y una copia **de solo lectura** del estado (contrato `restore`:
+//! `Restore`, cuyo campo `Mem<RO>` no admite otra cosa), quedándose con el
+//! estado escribible y una copia del extremo hasta que la nueva decide. El cliente nunca deja de estar conectado y verifica que el
 //! contador no pierde ni repite valores.
 //!
 //! Termina con 0 si todo salió como se esperaba.
@@ -40,15 +40,13 @@
 #![deny(unsafe_code)]
 
 use nsos_rt::abi::cap::signals;
-use nsos_rt::abi::msg::labels::{
-    UPGRADE_ACCEPT, UPGRADE_COMMIT, UPGRADE_PREPARE, UPGRADE_REJECT, UPGRADE_RESTORE,
-    UPGRADE_ROLLBACK, UPGRADE_STATE,
-};
 use nsos_rt::abi::syscall::{cell_state, flags, CellStatus, WAIT_FOREVER};
-use nsos_rt::abi::{CapHandle, Error, Message, Rights};
+use nsos_rt::abi::{CapHandle, Error, Message};
+use nsos_rt::contract::protocols::{counter, handover, restore};
+use nsos_rt::contract::{Bytes, Chan, RecvError};
 use nsos_rt::{
-    bootstrap, cap_drop, cap_dup, cell_kill, cell_spawn, cell_status, channel_create, channel_recv,
-    channel_send, println, wait, wait_item, yield_now,
+    bootstrap, cap_drop, cell_kill, cell_spawn, cell_status, channel_create, channel_recv,
+    channel_send, println, wait, wait_item, yield_now, Sys,
 };
 
 const ATTEMPT: u64 = 1;
@@ -187,83 +185,91 @@ enum Outcome {
     Crashed,
 }
 
-/// Envía `UPGRADE_ROLLBACK [mem, ep]` a la versión vieja.
-fn rollback(ctl_old: CapHandle, mem: CapHandle, ep: CapHandle) -> Result<(), Error> {
-    let mut back = Message::new(UPGRADE_ROLLBACK, b"").unwrap();
-    back.push_cap(mem)?;
-    back.push_cap(ep)?;
-    channel_send(ctl_old, &back, 0)
+type Old = Chan<Sys, handover::client::Serving>;
+
+/// Lo que vuelve de un intento: cómo terminó, la cell nueva y, si no hubo
+/// commit, el canal con la versión vieja (otra vez en `Serving`).
+struct Attempt {
+    outcome: Outcome,
+    new: CapHandle,
+    old: Option<Old>,
 }
 
-/// Intenta actualizar el servicio de `ctl_old` a la imagen `img` (con
-/// `mode` como datos de `UPGRADE_RESTORE`). Devuelve cómo terminó y la
-/// capacidad a la cell nueva.
-fn try_upgrade(
-    ctl_old: CapHandle,
-    img: CapHandle,
-    name: &str,
-    mode: &[u8],
-) -> Result<(Outcome, CapHandle), Error> {
+/// Intenta actualizar el servicio de `old` a la imagen `img` (con `mode`
+/// como modo de `Restore`).
+fn try_upgrade(old: Old, img: CapHandle, name: &str, mode: &[u8]) -> Result<Attempt, Error> {
     // La versión nueva arranca sin capacidades de servicio.
-    let (ctl_new, ctl_child) = channel_create()?;
-    let new = cell_spawn(img, &[ctl_child])?;
+    let (ctl_new, ctl_child) = restore::pair(Sys)?;
+    let new = cell_spawn(img, &[ctl_child.into_raw()])?;
 
     println!(
         "init: pido a contador-v1 que entregue su estado (para {})",
         name
     );
-    channel_send(ctl_old, &Message::new(UPGRADE_PREPARE, b"").unwrap(), 0)?;
-    let mut m = Message::default();
-    channel_recv(ctl_old, &mut m, 0)?;
-    let [mem, ep] = *m.cap_slice() else {
-        println!("init: respuesta inesperada de contador-v1");
-        return Err(Error::BadMessage);
-    };
-    if m.header.label != UPGRADE_STATE {
-        println!("init: respuesta inesperada de contador-v1");
-        return Err(Error::BadMessage);
-    }
-    // Respaldo hasta que la nueva decida: el estado escribible se queda
-    // aquí (la nueva recibe una copia de solo lectura: el kernel no la deja
-    // escribirlo) y una copia del extremo mantiene abierto el canal del
-    // cliente aunque la nueva se caiga.
-    let mem_ro = cap_dup(mem, Rights::READ | Rights::GRANT)?;
-    let ep_backup = cap_dup(ep, Rights::ALL)?;
-    let mut r = Message::new(UPGRADE_RESTORE, mode).unwrap();
-    r.push_cap(mem_ro)?;
-    r.push_cap(ep)?;
-    channel_send(ctl_new, &r, 0)?;
-    let outcome = match channel_recv(ctl_new, &mut m, 0) {
-        Ok(()) => match (m.header.label, m.cap_slice()) {
-            (UPGRADE_ACCEPT, []) => {
-                println!("init: {} aceptó; commit", name);
-                channel_send(ctl_old, &Message::new(UPGRADE_COMMIT, b"").unwrap(), 0)?;
-                cap_drop(mem)?;
-                cap_drop(ep_backup)?;
-                Outcome::Accepted
-            }
-            (UPGRADE_REJECT, &[mem_back, ep_back]) => {
-                println!("init: {} rechazó el estado; rollback a contador-v1", name);
-                cap_drop(mem_back)?;
-                cap_drop(ep_backup)?;
-                rollback(ctl_old, mem, ep_back)?;
-                Outcome::Rejected
-            }
-            _ => {
-                println!("init: respuesta inesperada de {}", name);
-                return Err(Error::BadMessage);
-            }
-        },
-        // La nueva se cayó antes de decidir: su extremo de control se cerró.
-        Err(Error::PeerClosed) => {
-            println!("init: {} se cayó; rollback a contador-v1", name);
-            rollback(ctl_old, mem, ep_backup)?;
-            Outcome::Crashed
+    let old = old.send(handover::Prepare {})?;
+    let (old, st) = match old.recv() {
+        Ok(handover::client::recv::Handing::State(old, st)) => (old, st),
+        Err(_) => {
+            println!("init: respuesta inesperada de contador-v1");
+            return Err(Error::BadMessage);
         }
-        Err(e) => return Err(e),
     };
-    cap_drop(ctl_new)?;
-    Ok((outcome, new))
+    // Respaldo hasta que la nueva decida: el estado escribible se queda
+    // aquí (la nueva recibe una copia de solo lectura: el tipo `Mem<RO>` de
+    // `Restore` no admite otra) y una copia del extremo mantiene abierto el
+    // canal del cliente aunque la nueva se caiga.
+    let ro = st.state.read_only(Sys)?;
+    let backup = st.service.backup(Sys)?;
+    let ctl_new = ctl_new.send(restore::Restore {
+        state: ro,
+        service: st.service,
+        mode: Bytes::new(mode).ok_or(Error::InvalidArgs)?,
+    })?;
+    let (outcome, service) = match ctl_new.recv() {
+        Ok(restore::client::recv::Deciding::Accept(end, _)) => {
+            println!("init: {} aceptó; commit", name);
+            end.close();
+            old.send(handover::Commit {})?.close();
+            st.state.release(Sys);
+            backup.release(Sys);
+            return Ok(Attempt {
+                outcome: Outcome::Accepted,
+                new,
+                old: None,
+            });
+        }
+        Ok(restore::client::recv::Deciding::Reject(_start, r)) => {
+            println!("init: {} rechazó el estado; rollback a contador-v1", name);
+            r.state.release(Sys);
+            backup.release(Sys);
+            (Outcome::Rejected, r.service)
+        }
+        // La nueva se cayó antes de decidir: su extremo de control se cerró.
+        Err(RecvError::Failed(Error::PeerClosed)) => {
+            println!("init: {} se cayó; rollback a contador-v1", name);
+            (Outcome::Crashed, backup)
+        }
+        // Mandó algo fuera de protocolo: no se le cree nada; se la termina y
+        // se vuelve a la versión vieja con el respaldo.
+        Err(RecvError::Violation { label, .. }) => {
+            println!(
+                "init: {} mandó algo fuera de protocolo ({}); la termino",
+                name, label
+            );
+            let _ = cell_kill(new);
+            (Outcome::Crashed, backup)
+        }
+        Err(_) => return Err(Error::BadMessage),
+    };
+    let old = old.send(handover::Rollback {
+        state: st.state,
+        service,
+    })?;
+    Ok(Attempt {
+        outcome,
+        new,
+        old: Some(old),
+    })
 }
 
 fn expect_faulted(name: &str, h: CapHandle) -> Result<(), Error> {
@@ -283,31 +289,32 @@ fn upgrade_phase(
     broken_img: CapHandle,
     client_img: CapHandle,
 ) -> Result<(), Error> {
-    let (srv_end, client_end) = channel_create()?;
-    let (ctl1, ctl1_child) = channel_create()?;
-    let v1 = cell_spawn(v1_img, &[ctl1_child, srv_end])?;
-    let client = cell_spawn(client_img, &[client_end])?;
+    let (client_end, srv_end) = counter::pair(Sys)?;
+    let (ctl1, ctl1_child) = handover::pair(Sys)?;
+    let v1 = cell_spawn(v1_img, &[ctl1_child.into_raw(), srv_end.into_raw()])?;
+    let client = cell_spawn(client_img, &[client_end.into_raw()])?;
 
-    let (outcome, broken) = try_upgrade(ctl1, broken_img, "contador-roto", b"")?;
-    if outcome != Outcome::Rejected {
+    let a = try_upgrade(ctl1, broken_img, "contador-roto", b"")?;
+    if a.outcome != Outcome::Rejected {
         return Err(Error::BadMessage);
     }
-    expect_ok("contador-roto", broken)?;
+    expect_ok("contador-roto", a.new)?;
+    let ctl1 = a.old.ok_or(Error::BadMessage)?;
 
-    let (outcome, crashing) = try_upgrade(ctl1, broken_img, "contador-roto (caer)", b"caer")?;
-    if outcome != Outcome::Crashed {
+    let a = try_upgrade(ctl1, broken_img, "contador-roto (caer)", b"caer")?;
+    if a.outcome != Outcome::Crashed {
         return Err(Error::BadMessage);
     }
-    expect_faulted("contador-roto (caer)", crashing)?;
+    expect_faulted("contador-roto (caer)", a.new)?;
+    let ctl1 = a.old.ok_or(Error::BadMessage)?;
 
-    let (outcome, v2) = try_upgrade(ctl1, v2_img, "contador-v2", b"")?;
-    if outcome != Outcome::Accepted {
+    let a = try_upgrade(ctl1, v2_img, "contador-v2", b"")?;
+    if a.outcome != Outcome::Accepted {
         return Err(Error::BadMessage);
     }
     expect_ok("contador-v1", v1)?;
     expect_ok("cliente", client)?;
-    expect_ok("contador-v2", v2)?;
-    cap_drop(ctl1)
+    expect_ok("contador-v2", a.new)
 }
 
 fn main() -> i32 {
