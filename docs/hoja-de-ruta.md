@@ -16,6 +16,7 @@ Cada hito se entrega como un PR con tests y documentación.
 | 10 | Fase 2: migración de cells entre dos instancias QEMU | ✅ `contador` se muda de A a B sin cortar al `cliente`, con rollback (ahora por un enlace autenticado sobre virtio-net) |
 | 11 | Almacenamiento propio: driver virtio-blk y almacén de objetos con copy-on-write y capacidades | ✅ `virtblk`, `almacen`, `crates/store`; ver [almacenamiento.md](almacenamiento.md) |
 | 12 | `wait` multi-handle e interrupciones para drivers | ✅ `wait` (modelo `Wait.lean`, `espera`), `Irq`/`irq_ack` (modelo `Irq.lean`); `virtcon`, `virtblk` y `virtnet` duermen en `IRQ_PENDING` |
+| 13 | `channel_call` y `mem_unmap`: el ABI v1 completo | ✅ `Sys.call_inv`, `Mem.unmap_removes`; `cliente` y `bench` usan `channel_call`; `desmapeo` |
 
 ## Criterios de aceptación del MVP
 
@@ -64,7 +65,7 @@ Cada hito se entrega como un PR con tests y documentación.
 * Cells de ejemplo: `ping`, `pong` (eco, transferencia de canal, benchmark)
   e `intruso` (8 abusos bloqueados y lectura del kernel atrapada por la MMU).
 
-Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
+Pendiente, para hitos siguientes: `wait` multi-handle (hito 12), `channel_call` (hito 13),
 `mem_create` (zero-copy entre cells; hecho en el hito 7), `cell_spawn` desde una cell
 (supervisor), `Irq` para drivers.
 
@@ -136,8 +137,8 @@ Pendiente, para hitos siguientes: `wait` multi-handle, `channel_call`,
     caída de la versión nueva antes de decidir. Una caída después de
     aceptar sigue cerrando el extremo del cliente.
   * Mover una capacidad `Memory` ya revoca los mapeos de quien la tenía
-    (`Mem.step_iso`); la v1 vuelve a mapear el estado al retomar. Falta
-    `mem_unmap`.
+    (`Mem.step_iso`); la v1 vuelve a mapear el estado al retomar.
+    (`mem_unmap` llegó en el hito 13.)
   * La v1 sondea dos canales porque todavía no hay `wait` multi-handle.
 
 ## Hito 8 (hecho)
@@ -305,7 +306,34 @@ Segunda parte (hecha): capacidad `Irq` e `irq_ack`.
   (en x86_64 y en ARM64); `intruso` suma 4 abusos de `irq_ack` y `wait`
   (42 en total).
 
-Después: `channel_call` y `mem_unmap`.
+## Hito 13: `channel_call` y `mem_unmap` (hecho)
+
+Con esto no queda ninguna syscall del ABI v1 que devuelva `Unsupported`.
+
+* Verificación: `mem_unmap` es una sucesión de pasos `unmap` que el modelo
+  de memoria ya tenía (y cubre `Mem.step_iso`); se agregan
+  `Mem.unmap_removes` (no queda ningún mapeo en esa página) y
+  `Mem.unmap_only_shrinks` (no agrega mapeos ni toca capacidades, otras
+  cells ni marcos). Dos mutaciones las rompen: invertir el filtro (quitar
+  todo menos esa página) y que `unmap` además vacíe las capacidades.
+  `channel_call` no agrega pasos: es un `send` seguido de un `recv` en el
+  mismo extremo (`Sys.call_inv`, a partir de `run_inv`); no hay paso nuevo
+  que mutar. En el código, `nsos_kcore::paging::unmap_target` elige el
+  mapeo (Kani: `unmap_target_exact`; aceptar un objeto más grande que el
+  rango la rompe).
+* Kernel: `Cell::unmap_memory` (primero las tablas, después suelta el
+  objeto); `channel_send` y `channel_recv` ahora comparten `send_msg` y
+  `recv_msg` con plazo, y `channel_call` los compone. Al implementarla
+  apareció un caso: adjuntar el propio extremo al pedido lo sacaba del
+  CSpace mientras el kernel seguía esperando la respuesta en él; se rechaza.
+* Cells: `cliente` hace cada pedido con `channel_call`; `bench` mide
+  `ipc_call_ns` (en este contenedor, 50 µs contra 53 µs de `send` + `recv`)
+  y desmapea en vez de usar una dirección nueva por vuelta; `espera` prueba
+  la semántica de `channel_call`; la cell nueva `desmapeo` prueba
+  `mem_unmap` y termina con #PF al leer la página desmapeada; `intruso` suma
+  3 abusos de `channel_call` (45 en total).
+
+Después: *handoff* directo al servidor en `channel_call`, cuotas por cell.
 
 ## Contratos de canal tipados (en curso)
 

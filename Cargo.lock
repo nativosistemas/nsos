@@ -61,6 +61,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-desmapeo"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-destino"
 version = "0.1.0"
 dependencies = [

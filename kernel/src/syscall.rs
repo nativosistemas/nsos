@@ -78,9 +78,11 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::ChannelCreate => channel_create(cell, a0),
         Syscall::ChannelSend => channel_send(cell, h(a0), a1, a2),
         Syscall::ChannelRecv => channel_recv(cell, h(a0), a1, a2),
+        Syscall::ChannelCall => channel_call(cell, h(a0), a1, a2),
         Syscall::Wait => wait(cell, a0, a1, a2),
         Syscall::MemCreate => mem_create(cell, a0, a1),
         Syscall::MemMap => mem_map(cell, h(a0), a1, a2),
+        Syscall::MemUnmap => cell.unmap_memory(a0, a1).map(|_| 0),
         Syscall::MemInfo => mem_info(cell, h(a0), a1),
         Syscall::CellSpawn => cell_spawn(cell, h(a0), a1, a2),
         Syscall::CellKill => cell_kill(cell, h(a0)),
@@ -378,15 +380,54 @@ fn port_access(base: u64, len: u64, off: u64, width: u64, value: Option<u64>) ->
     crate::pci::pio_access(base, len, off, width, value).ok_or(Error::InvalidArgs)
 }
 
-fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64> {
+/// Espera de una operación de canal: qué hacer con `WouldBlock`.
+/// `Poll`: devolverlo; `Never`: dormir; `At(d)`: dormir hasta `d` y después
+/// `TimedOut`. El hilo ya quedó registrado y marcado bloqueado por
+/// `send_with`/`try_recv`.
+fn block_until(cell: &Cell, deadline: nsos_kcore::wait::Deadline) -> SysResult<()> {
+    use nsos_kcore::wait::{expired, Deadline};
+    if expired(deadline, crate::arch::time::now_ns()) {
+        sched::wake(sched::current()); // no dormir: se venció el plazo
+        return Err(Error::TimedOut);
+    }
+    if let Deadline::At(d) = deadline {
+        sched::wake_at(d);
+    }
+    sleep(cell)
+}
+
+/// Plazo de `channel_send`/`channel_recv` según sus flags.
+fn flags_deadline(fl: u64) -> SysResult<nsos_kcore::wait::Deadline> {
+    use nsos_kcore::wait::Deadline;
     if fl & !flags::NONBLOCK != 0 {
         return Err(Error::InvalidArgs);
     }
+    Ok(if fl & flags::NONBLOCK != 0 {
+        Deadline::Poll
+    } else {
+        Deadline::Never
+    })
+}
+
+fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64> {
+    let deadline = flags_deadline(fl)?;
     let mut raw = [0u8; MSG_SIZE];
     copy_from_user(cell, uptr, &mut raw)?;
     let msg = Message::from_bytes(&raw)?;
-    let wait = fl & flags::NONBLOCK == 0;
-    loop {
+    send_msg(cell, h, &msg, deadline).map(|_| 0)
+}
+
+/// Envía `msg` por `h` (requiere `SEND`; cada capacidad adjunta, `GRANT`),
+/// esperando lugar en la cola hasta `deadline`. Atómico: si falla, el emisor
+/// no perdió nada.
+fn send_msg(
+    cell: &Cell,
+    h: CapHandle,
+    msg: &Message,
+    deadline: nsos_kcore::wait::Deadline,
+) -> SysResult<()> {
+    let wait = deadline != nsos_kcore::wait::Deadline::Poll;
+    let r = loop {
         let r = {
             let mut cs = cell.cspace.lock();
             let ep = match &cs.get_with(h, Rights::SEND)?.object {
@@ -399,43 +440,69 @@ fn channel_send(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
             })
         };
         match r {
-            Err(Error::WouldBlock) if wait => sleep(cell)?,
+            Err(Error::WouldBlock) if wait => {
+                if let Err(e) = block_until(cell, deadline) {
+                    break Err(e);
+                }
+            }
             Ok(()) if !msg.cap_slice().is_empty() => {
                 // Las capacidades de memoria enviadas ya no se ven.
                 cell.revoke_mappings();
                 // Mover extremos puede dejar un ciclo inalcanzable.
                 cell::ipc_gc();
-                return Ok(0);
+                break Ok(());
             }
-            r => return r.map(|_| 0),
+            r => break r,
         }
+    };
+    if matches!(deadline, nsos_kcore::wait::Deadline::At(_)) {
+        sched::cancel_wake_at();
     }
+    r
 }
 
 fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64> {
-    if fl & !flags::NONBLOCK != 0 {
-        return Err(Error::InvalidArgs);
-    }
+    let deadline = flags_deadline(fl)?;
     copy_to_user(cell, uptr, &[0u8; MSG_SIZE])?; // el búfer debe ser escribible
-    let wait = fl & flags::NONBLOCK == 0;
     let ep = endpoint(cell, h, Rights::RECV)?;
-    let (q, handles) = loop {
+    recv_msg(cell, &ep, uptr, deadline).map(|_| 0)
+}
+
+/// Recibe en `ep` hasta `deadline` y escribe el mensaje en `uptr` (ya
+/// comprobado escribible). Las capacidades entran al CSpace o, si no caben,
+/// el mensaje vuelve a la cola entero.
+fn recv_msg(
+    cell: &Cell,
+    ep: &cell::Endpoint,
+    uptr: u64,
+    deadline: nsos_kcore::wait::Deadline,
+) -> SysResult<()> {
+    let wait = deadline != nsos_kcore::wait::Deadline::Poll;
+    let r = loop {
         match ep.try_recv(wait) {
             Ok(mut q) => {
                 let caps = q.take_caps();
                 match cell.cspace.lock().insert_all(caps) {
-                    Ok(hs) => break (q, hs),
+                    Ok(hs) => break Ok((q, hs)),
                     Err((e, caps)) => {
                         q.put_caps(caps);
                         ep.unrecv(q);
-                        return Err(e);
+                        break Err(e);
                     }
                 }
             }
-            Err(Error::WouldBlock) if wait => sleep(cell)?,
-            Err(e) => return Err(e),
+            Err(Error::WouldBlock) if wait => {
+                if let Err(e) = block_until(cell, deadline) {
+                    break Err(e);
+                }
+            }
+            Err(e) => break Err(e),
         }
     };
+    if matches!(deadline, nsos_kcore::wait::Deadline::At(_)) {
+        sched::cancel_wake_at();
+    }
+    let (q, handles) = r?;
     let mut m = Message {
         header: q.header,
         data: q.data,
@@ -444,7 +511,34 @@ fn channel_recv(cell: &Cell, h: CapHandle, uptr: u64, fl: u64) -> SysResult<u64>
     m.header.cap_count = handles.len() as u8;
     m.caps[..handles.len()].copy_from_slice(&handles);
     copy_to_user(cell, uptr, &m.to_bytes())?;
-    Ok(0)
+    Ok(())
+}
+
+/// `channel_call(h, msg, timeout_ns)`: envía `msg` por `h` y espera la
+/// respuesta en el mismo extremo, que se escribe sobre `msg`. Requiere
+/// `SEND` y `RECV` (se comprueban antes de enviar). El plazo cubre las dos
+/// mitades: `0` no espera nunca, `WAIT_FOREVER` no vence.
+///
+/// No agrega pasos al modelo de IPC: es un `send` seguido de un `recv` en el
+/// mismo extremo (`Sys.call_inv`). Si el envío falla, no se mandó nada; si
+/// falla la espera de la respuesta (`TimedOut`, `PeerClosed`, cell muerta), el
+/// pedido **ya** se mandó. La respuesta es el próximo mensaje que llegue a
+/// `h`: quien quiera emparejar pedidos y respuestas lo hace en el protocolo.
+/// No se puede adjuntar el propio `h` (`InvalidArgs`).
+fn channel_call(cell: &Cell, h: CapHandle, uptr: u64, timeout: u64) -> SysResult<u64> {
+    let deadline = nsos_kcore::wait::deadline(crate::arch::time::now_ns(), timeout);
+    let mut raw = [0u8; MSG_SIZE];
+    copy_from_user(cell, uptr, &mut raw)?;
+    copy_to_user(cell, uptr, &raw)?; // la respuesta va al mismo búfer
+    let msg = Message::from_bytes(&raw)?;
+    // Mandar el propio extremo lo sacaría del CSpace: esperar la respuesta en
+    // él sería usar una capacidad que la cell ya no tiene.
+    if msg.cap_slice().contains(&h) {
+        return Err(Error::InvalidArgs);
+    }
+    let ep = endpoint(cell, h, Rights::SEND | Rights::RECV)?;
+    send_msg(cell, h, &msg, deadline)?;
+    recv_msg(cell, &ep, uptr, deadline).map(|_| 0)
 }
 
 /// Objeto que se puede esperar con `wait`.

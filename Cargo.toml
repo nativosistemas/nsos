@@ -22,6 +22,7 @@ members = [
     "cells/contador-roto",
     "cells/caos",
     "cells/espera",
+    "cells/desmapeo",
     "cells/bench",
     "cells/enlace",
     "cells/origen",

@@ -26,6 +26,7 @@ casos borde.
 | `map_then_translate` | `crates/kcore/src/paging.rs` | Mapear cualquier página de la mitad baja: después se traduce a esa física con exactamente los permisos pedidos (USER, WRITABLE, NX), y no se escribe nada en la mitad alta del PML4 ni en las tablas del kernel. |
 | `unmap_only_that_page` | `crates/kcore/src/paging.rs` | Con dos páginas mapeadas, `unmap` de cualquier dirección quita solo la página pedida. |
 | `parse_data_any`, `parse_hello_any` | `crates/link/src/lib.rs` | Con cualquier trama de hasta 40 bytes, el parser del enlace no entra en pánico; si acepta, la cabecera, los datos y la etiqueta cubren la trama exactamente (sin bytes de más ni de menos). |
+| `unmap_target_exact` | `crates/kcore/src/paging.rs` | `mem_unmap` elige un mapeo solo si coincide exactamente en dirección y tamaño (alineado y no vacío), el primero que coincide; si ninguno coincide, no elige nada. |
 | `user_range_stays_low` | `crates/kcore/src/paging.rs` | Un rango que acepta `user_range_ok` (lo que exige `mem_map`) no desborda y queda entero en la mitad baja. |
 | `codec_roundtrip` | `crates/kcore/src/paging_arm64.rs` | Toda entrada neutra presente se codifica como descriptor ARM64 y se decodifica igual; una no presente queda inválida. |
 | `hw_agrees_with_view` | `crates/kcore/src/paging_arm64.rs` | Con tablas cualesquiera escritas por el codec (una entrada arbitraria por nivel), un modelo de la MMU de ARM64 escrito desde el manual y la vista del kernel (`translate_with_flags`) coinciden: misma física, y EL0 lee, escribe y ejecuta exactamente cuando la vista lo permite. EL1 nunca ejecuta una página de cell (PXN, como SMEP), no escribe lo que la vista marca de solo lectura y con PAN no toca páginas de cells. |
@@ -67,6 +68,12 @@ solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
 
 Activar `WRITABLE` aunque el peer esté cerrado (cambiar el `else if` de
 `channel_signals` por un `if`) hace fallar `channel_signals_any`.
+
+### Mutación de `mem_unmap`
+
+Aceptar un mapeo más grande que el rango pedido (`l >= len` en vez de
+`l == len`, o sea desmapear un objeto entero cuando se pidió una parte) hace
+fallar `unmap_target_exact`.
 
 ### Mutaciones de las interrupciones
 

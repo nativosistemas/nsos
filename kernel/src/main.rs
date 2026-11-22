@@ -239,6 +239,8 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("caos", caos, alloc::vec![]).map_err(report)?;
     let espera = module("espera").ok_or("falta el módulo espera")?;
     cell::spawn("espera", espera, alloc::vec![]).map_err(report)?;
+    let desmapeo = module("desmapeo").ok_or("falta el módulo desmapeo")?;
+    cell::spawn("desmapeo", desmapeo, alloc::vec![]).map_err(report)?;
     boot_supervisor(report)?;
     boot_virtio_console(report)
 }

@@ -23,7 +23,7 @@ físico.
 
 | Propiedad | Mecanismo | Evidencia |
 |---|---|---|
-| Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells | `intruso` (lectura del kernel → #PF), `fragil`; ktest de W^X; Lean: `Mem.step_iso`, `Mem.never_maps_foreign`; Kani: `map_then_translate`, `user_range_stays_low` |
+| Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells; `mem_unmap` solo quita un objeto entero mapeado por la cell | `intruso` (lectura del kernel → #PF), `fragil`, `desmapeo` (página desmapeada → #PF, y 9 rangos rechazados); ktest de W^X; Lean: `Mem.step_iso`, `Mem.never_maps_foreign`, `Mem.unmap_removes`, `Mem.unmap_only_shrinks`; Kani: `map_then_translate`, `user_range_stays_low`, `unmap_target_exact` |
 | El kernel no puede ser engañado para tocar memoria ajena en nombre de una cell | `usercopy` traduce cada página con las tablas de la cell y exige USER (y WRITABLE); nunca desreferencia punteros de usuario | `intruso`: punteros al kernel y a código propio; `caos`: 50 000 syscalls al azar |
 | …y eso lo hace cumplir la CPU | **SMAP**: el kernel no puede acceder a páginas de usuario; **SMEP**: no puede ejecutarlas. `AC` se limpia en cada entrada (SFMASK y `clac`). En ARM64: **PAN** (se repone en cada excepción) y **PXN** en toda página de cell | `test-smap-fault`: una lectura directa del kernel a una página de usuario termina en #PF (en ARM64, en un permission fault) |
 | En ARM64, lo que ve el kernel es lo que hace cumplir la MMU | Codec entre entradas neutras y descriptores ARM64 (`kcore::paging_arm64`); `TCR_EL1` con permisos jerárquicos y sin PBHA; `SCTLR_EL1.WXN` | Kani: `codec_roundtrip`, `hw_agrees_with_view`, `map_then_hw` contra un modelo de la MMU escrito desde el manual (4 mutaciones las rompen); `intruso`, `fragil` y `test-wx-fault` en QEMU `virt` |
@@ -67,8 +67,9 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    un mapeo vale mientras la cell tenga una capacidad al objeto con los
    derechos del mapeo. Al enviarla, pasarla a una cell hija o soltarla, el
    kernel quita el mapeo (`Cell::revoke_mappings`). Demostrado en
-   `Mem.step_iso` y `Mem.send_revokes` (verification/lean). Falta
-   `mem_unmap` para soltar un mapeo sin soltar la capacidad.
+   `Mem.step_iso` y `Mem.send_revokes` (verification/lean). Desde el hito
+   13, `mem_unmap` suelta un mapeo sin soltar la capacidad (`Mem.unmap_removes`;
+   la cell `desmapeo` comprueba que leer la página desmapeada es un #PF).
 4. **Agotamiento de recursos (DoS).** No hay cuotas: una cell puede llenar
    su CSpace (1024 entradas) de objetos `Memory` de hasta 1 MiB, o crear
    cells sin límite si tiene una imagen, y así dejar sin memoria al resto.
