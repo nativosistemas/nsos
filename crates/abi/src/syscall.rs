@@ -31,7 +31,10 @@ pub enum Syscall {
     CapInfo = 12,
 
     // ---- Canales IPC (2x) ----
-    /// `channel_create(out: *mut [CapHandle; 2])`: par de extremos conectados.
+    /// `channel_create(out: *mut [CapHandle; 2], contract)`: par de extremos
+    /// conectados. `contract` es el contrato que declara quien lo crea (0 =
+    /// sin contrato; menor que 2^63, si no `InvalidArgs`); lo comparten los
+    /// dos extremos y no cambia nunca.
     ChannelCreate = 20,
     /// `channel_send(h, msg: *const Message, flags)`.
     ChannelSend = 21,
@@ -42,6 +45,10 @@ pub enum Syscall {
     /// sobre `msg`. Requiere `SEND` y `RECV`; `msg` no puede adjuntar `h`.
     /// `timeout_ns` como en `wait`.
     ChannelCall = 23,
+    /// `channel_contract(h) -> contract`: el contrato que se declaró al crear
+    /// el canal de `h` (0 = sin contrato). No pide derechos: como
+    /// `cap_info`, solo describe la capacidad.
+    ChannelContract = 24,
 
     // ---- Espera (3x) ----
     /// `wait(items: *mut WaitItem, n, timeout_ns) -> n_ready`: espera a que
@@ -100,6 +107,7 @@ impl Syscall {
             21 => ChannelSend,
             22 => ChannelRecv,
             23 => ChannelCall,
+            24 => ChannelContract,
             30 => Wait,
             40 => MemCreate,
             41 => MemMap,

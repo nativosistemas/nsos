@@ -360,7 +360,11 @@ un tipo por estado, y se comprueba al compilar.
   `net` (forma `stream` de la macro, `try_send`); el modelo de flujos
   mostró un bloqueo mutuo posible entre `virtnet` y `enlace`, que se
   corrigió. Modelo: `MigrationContract.lean`.
-* Etapa 5 (opcional): `contract_id` en el kernel.
+* Etapa 5 (hecha): el kernel guarda el contrato de cada canal
+  (`channel_create(out, contrato)`, `channel_contract`) y no lo deja
+  cambiar (`ContractId.lean`, 2 mutaciones); `open` y `Endpoint` lo
+  exigen. `intruso` suma 3 abusos y `ping` le manda a `pong` un canal de
+  otro contrato.
 
 ## ARM64 (en curso)
 

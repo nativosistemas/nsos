@@ -3,10 +3,11 @@
 //!
 //! Capacidad de arranque 1: extremo de canal hacia `pong`.
 //! 0. Prueba negativa del contrato: con la API cruda (sin contrato) le
-//!    manda a `pong` cuatro mensajes fuera de protocolo. `pong` tiene que
+//!    manda a `pong` cinco mensajes fuera de protocolo, uno de ellos un
+//!    `NewChannel` con un canal creado para otro contrato. `pong` tiene que
 //!    descartarlos sin cambiar de estado (el eco siguiente sale bien y no
-//!    llega ninguna respuesta de más) y soltar la capacidad que venía en uno
-//!    (la otra punta de ese canal ve `PEER_CLOSED`).
+//!    llega ninguna respuesta de más) y soltar las capacidades que venían
+//!    (la otra punta de esos canales ve `PEER_CLOSED`).
 //! 1. Diez ecos con verificación de contenido.
 //! 2. Crea un canal `note` y le *mueve* un extremo a `pong`; comprueba que
 //!    perdió ese handle y conversa por el canal nuevo.
@@ -21,10 +22,11 @@ use core::fmt::Write;
 use nsos_rt::abi::cap::signals::PEER_CLOSED;
 use nsos_rt::abi::syscall::Syscall;
 use nsos_rt::abi::{CapHandle, Error, Message};
-use nsos_rt::contract::protocols::{echo, note};
+use nsos_rt::contract::protocols::{echo, note, store_obj};
 use nsos_rt::contract::{Bytes, Chan};
 use nsos_rt::{
-    bootstrap, cap_info, channel_create, channel_send, println, raw_syscall, wait, wait_item, Sys,
+    bootstrap, cap_info, channel_create, channel_create_for, channel_send, println, raw_syscall,
+    wait, wait_item, Sys,
 };
 
 const BENCH_ROUNDS: u64 = 2000;
@@ -75,29 +77,37 @@ fn raw(h: CapHandle, label: u64, cap: Option<CapHandle>) -> Result<(), Error> {
 fn violations(ch: Ready) -> Result<Ready, i32> {
     let h = ch.handle();
     let (mine, theirs) = channel_create().map_err(|_| 20)?;
+    // Un canal creado para otro protocolo (el de los handles del almacén):
+    // no puede pasar por el canal `note` que espera `NewChannel`.
+    let (alien_mine, alien) = channel_create_for(store_obj::ID).map_err(|_| 20)?;
     // `EchoReply` es del contrato pero lo manda el servidor; 777 no existe;
-    // `Echo` no lleva capacidades; `NewChannel` sin extremo.
+    // `Echo` no lleva capacidades; `NewChannel` sin extremo, y con un
+    // extremo de otro contrato (`channel_contract` lo delata).
     let sent = raw(h, 2, None)
         .and_then(|_| raw(h, 777, None))
         .and_then(|_| raw(h, 1, Some(theirs)))
-        .and_then(|_| raw(h, 100, None));
+        .and_then(|_| raw(h, 100, None))
+        .and_then(|_| raw(h, 100, Some(alien)));
     if sent.is_err() {
         return Err(21);
     }
     // `pong` procesa en orden: cuando contesta este eco ya descartó los
-    // cuatro. Si hubiera contestado alguno, esta respuesta sería otra.
+    // cinco. Si hubiera contestado alguno, esta respuesta sería otra.
     let (ch, r) = echo(ch, b"despues de los intrusos").map_err(|_| 22)?;
     if r.as_slice() != b"despues de los intrusos" {
         println!("ping: ERROR, pong contestó un mensaje fuera de protocolo");
         return Err(23);
     }
-    let mut items = [wait_item(mine, PEER_CLOSED)];
-    if wait(&mut items, 0) != Ok(1) {
-        println!("ping: ERROR, pong no soltó la capacidad del mensaje descartado");
+    let mut items = [
+        wait_item(mine, PEER_CLOSED),
+        wait_item(alien_mine, PEER_CLOSED),
+    ];
+    if wait(&mut items, 0) != Ok(2) {
+        println!("ping: ERROR, pong no soltó las capacidades de los mensajes descartados");
         return Err(24);
     }
     println!(
-        "ping: 4 mensajes fuera de protocolo: pong los descartó, soltó la capacidad y sigue en Ready"
+        "ping: 5 mensajes fuera de protocolo (uno con un canal de otro contrato): pong los descartó, soltó las capacidades y sigue en Ready"
     );
     Ok(ch)
 }

@@ -15,7 +15,7 @@ def empty (n : Nat) : Sys :=
   { cells := List.replicate n (CSpace.new CSPACE_LIMIT), queue := fun _ => [],
     closed := fun _ => false, nextPair := 0, recvWaiters := fun _ => [],
     sendWaiters := fun _ => [], blocked := fun _ => none, nextMsg := 0,
-    fate := fun _ => .unsent }
+    fate := fun _ => .unsent, contract := fun _ => 0 }
 
 /-- Ejecuta una lista de syscalls; devuelve el estado y el resultado de cada una. -/
 def runAll (s : Sys) : List (Nat × Op) → Sys × List (Except Err (List Nat))
@@ -41,7 +41,7 @@ todavía no tiene nada, simulamos el arranque: el kernel le dio el extremo 2
 del primer canal, que es lo que hace `init` con `cell_spawn`. -/
 
 def boot : Sys :=
-  let s := (runAll (empty 2) [(0, .create)]).1
+  let s := (runAll (empty 2) [(0, .create 0)]).1
   -- mover a mano el extremo `endpoint 0 true` de la cell 0 a la cell 1
   match s.cells[0]?, s.cells[1]? with
   | some c0, some c1 =>
@@ -52,7 +52,7 @@ def boot : Sys :=
 
 def passing : Sys × List (Except Err (List Nat)) :=
   runAll boot [
-    (0, .create),                 -- [0] la cell 0 crea el canal 1: handles 2 y 3
+    (0, .create 0),                 -- [0] la cell 0 crea el canal 1: handles 2 y 3
     (1, .recv h1),                -- [1] nada todavía: WouldBlock
     (0, .send h1 7 [h3]),         -- [2] envía el extremo `endpoint 1 true`
     (0, .send h1 8 [h3]),         -- [3] ya no lo tiene: BadHandle
@@ -79,7 +79,7 @@ recolección por alcanzabilidad lo cierra y vacía su cola. -/
 
 def selfLoop : Sys × List (Except Err (List Nat)) :=
   runAll (empty 1) [
-    (0, .create),              -- handles 1 (lado 0) y 2 (lado 1)
+    (0, .create 0),              -- handles 1 (lado 0) y 2 (lado 1)
     (0, .send h1 0 [h2]),      -- el lado 1 viaja en la cola del lado 1
     (0, .send h1 1 [])         -- el lado 1 ya es inalcanzable: PeerClosed
   ]
@@ -93,8 +93,8 @@ def selfLoop : Sys × List (Except Err (List Nat)) :=
 del otro. Ninguna comprobación local lo detecta; la recolección sí. -/
 def twoCycle : Sys × List (Except Err (List Nat)) :=
   runAll (empty 1) [
-    (0, .create),              -- canal A: handles 1 y 2
-    (0, .create),              -- canal B: handles 3 y 4
+    (0, .create 0),              -- canal A: handles 1 y 2
+    (0, .create 0),              -- canal B: handles 3 y 4
     (0, .send h1 0 [4]),       -- B.1 viaja hacia A.1
     (0, .send h3 0 [h2]),      -- A.1 viaja hacia B.1: ciclo, ya inalcanzables
     (0, .drop h1),
@@ -115,7 +115,7 @@ por extremo, la segunda espera pisaría a la primera y esa cell no se
 despertaría nunca (el bug que encontró este modelo). -/
 
 def twoWaiters : Sys :=
-  let s := (runAll (empty 3) [(0, .create)]).1
+  let s := (runAll (empty 3) [(0, .create 0)]).1
   let give (cs : CSpace Obj) : CSpace Obj :=
     match cs.insert ⟨.endpoint 0 true, ENDPOINT_RIGHTS⟩ with
     | .ok (cs', _) => cs'

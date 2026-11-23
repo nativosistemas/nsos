@@ -150,15 +150,20 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    mandar cualquier cosa por un canal. La cell tipada lo descarta y sigue,
    pero los teoremas de `Contract.lean` suponen que las dos puntas cumplen:
    una punta que no lee puede llenar la cola de la otra y bloquear su
-   `send` (negación de servicio para ese canal, nunca acceso). Un extremo
-   recibido en un mensaje se comprueba que sea un canal con `SEND` y
-   `RECV`, no que su otra punta siga el contrato esperado: un emisor
-   malicioso puede pasar un canal de otro protocolo, y del otro lado todo
-   llega como violación. Lo mismo para la capacidad de arranque
-   (`Chan::open`): el contrato lo garantiza quien reparte el canal.
-   *Mitigación futura*: un `contract_id` fijo por canal que el kernel
-   informe en `cap_info` (etapa 5 de [`contratos.md`](contratos.md)), y
-   `send` con plazo.
+   `send` (negación de servicio para ese canal, nunca acceso).
+   **Reetiquetar un canal ya no se puede** (etapa 5): cada canal guarda el
+   contrato que declaró quien lo creó (`channel_create(out, contrato)`) y
+   ninguna syscall lo cambia (`Sys.step_contract_fixed`, `run_contract_fixed`
+   en `ContractId.lean`), así que un extremo que se recibe como contrato X
+   (`Chan::open`, o un `Endpoint` dentro de un mensaje) fue creado
+   declarando X: nadie puede hacer pasar un handle del almacén por un canal
+   de `note`. Lo que queda: quien crea un canal declara el contrato que
+   quiera y puede después hablarlo mal (el número identifica, no
+   autentica), y el estado de un extremo recibido no se comprueba (se
+   confía en que viaja en el estado del tipo). El identificador es un hash
+   de 63 bits del nombre y la tabla del contrato: dos contratos distintos
+   solo se confunden si el hash choca. *Mitigación futura*: `send` con
+   plazo.
 
 15. **Inundar la red ya no bloquea a `virtnet`** (*resuelto*). Entregaba
    cada trama al enlace con un `send` bloqueante y el enlace le mandaba

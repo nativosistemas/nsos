@@ -220,7 +220,7 @@ pub fn module(name: &str) -> Option<&'static [u8]> {
 /// Arranca `ping` y `pong` conectados por un canal, y la cell `intruso`.
 pub fn boot_demo_cells() -> Result<(), &'static str> {
     use nsos_kcore::cspace::Cap;
-    let (a, b) = cell::channel_create();
+    let (a, b) = cell::channel_create(nsos_contract::protocols::echo::ID);
     let cap = |e| Cap {
         object: cell::KObject::Channel(e),
         rights: cell::ENDPOINT_RIGHTS,
@@ -315,7 +315,7 @@ fn boot_virtio_console(
     };
     let ring = dma(8)?;
     let buf = dma(1)?;
-    let (a, b) = cell::channel_create();
+    let (a, b) = cell::channel_create(nsos_contract::protocols::console::ID);
     let chan = |e| Cap {
         object: cell::KObject::Channel(e),
         rights: cell::ENDPOINT_RIGHTS,

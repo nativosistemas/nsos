@@ -106,6 +106,10 @@ macro_rules! contract {
             /// Estado inicial.
             pub const START: u16 = StateId::$start as u16;
 
+            /// Identificador del contrato (el que se declara al crear el
+            /// canal y se exige al abrirlo o recibirlo).
+            pub const ID: u64 = $crate::__contract_id(stringify!($name), TRANSITIONS);
+
             /// Etiquetas de todos los mensajes.
             pub const LABELS: &[u64] = &[ $( $label, )* ];
 
@@ -121,7 +125,7 @@ macro_rules! contract {
                 ($crate::Chan<T, client::$start>, $crate::Chan<T, server::$start>),
                 $crate::abi::Error,
             > {
-                let (a, b) = $crate::Transport::channel_create(t)?;
+                let (a, b) = $crate::Transport::channel_create(t, ID)?;
                 ::core::result::Result::Ok((
                     $crate::Chan::__from_parts(t, a),
                     $crate::Chan::__from_parts(t, b),
@@ -189,6 +193,9 @@ macro_rules! contract {
             /// Estado inicial (el único).
             pub const START: u16 = 0;
 
+            /// Identificador del contrato.
+            pub const ID: u64 = $crate::__contract_id(stringify!($name), TRANSITIONS);
+
             const _: () = $crate::__assert_stream(TRANSITIONS);
 
             /// Crea un canal con un extremo de cada lado.
@@ -198,7 +205,7 @@ macro_rules! contract {
                 ($crate::Chan<T, client::Open>, $crate::Chan<T, server::Open>),
                 $crate::abi::Error,
             > {
-                let (a, b) = $crate::Transport::channel_create(t)?;
+                let (a, b) = $crate::Transport::channel_create(t, ID)?;
                 ::core::result::Result::Ok((
                     $crate::Chan::__from_parts(t, a),
                     $crate::Chan::__from_parts(t, b),
@@ -296,6 +303,7 @@ macro_rules! __stream_side {
             pub struct Open;
             impl $crate::State for Open {
                 const ID: u16 = 0;
+                const CONTRACT: u64 = super::ID;
             }
             $( impl $crate::Sends<super::$smsg> for Open {
                 type Next = Open;
@@ -371,6 +379,7 @@ macro_rules! __contract_side {
                 pub struct $s;
                 impl $crate::State for $s {
                     const ID: u16 = StateId::$s as u16;
+                    const CONTRACT: u64 = super::ID;
                 }
                 $( impl $crate::Sends<super::$smsg> for $s {
                     type Next = $sdst;
@@ -383,6 +392,7 @@ macro_rules! __contract_side {
                 pub struct $r;
                 impl $crate::State for $r {
                     const ID: u16 = StateId::$r as u16;
+                    const CONTRACT: u64 = super::ID;
                 }
                 impl $crate::Receives for $r {
                     type Branch<T: $crate::Transport> = recv::$r<T>;
@@ -413,6 +423,7 @@ macro_rules! __contract_side {
                 pub struct $e;
                 impl $crate::State for $e {
                     const ID: u16 = StateId::$e as u16;
+                    const CONTRACT: u64 = super::ID;
                 }
             )*
 

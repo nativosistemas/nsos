@@ -18,6 +18,8 @@ struct Any<'a> {
     /// Lo que contestó `cap_info` para cada handle: `(handle, tipo, derechos)`.
     seen: &'a Cell<[(u32, u32, u32); 4]>,
     n_seen: &'a Cell<usize>,
+    /// Lo último que contestó `channel_contract`: `(handle, contrato)`.
+    ctr: &'a Cell<(u32, u64)>,
 }
 
 impl Any<'_> {
@@ -69,8 +71,13 @@ impl Transport for Any<'_> {
     fn cap_drop(self, _: CapHandle) {
         self.drops.set(self.drops.get() + 1);
     }
-    fn channel_create(self) -> Result<(CapHandle, CapHandle), Error> {
+    fn channel_create(self, _: u64) -> Result<(CapHandle, CapHandle), Error> {
         Err(Error::NoMemory)
+    }
+    fn channel_contract(self, h: CapHandle) -> Result<u64, Error> {
+        let c: u64 = kani::any();
+        self.ctr.set((h.0, c));
+        Ok(c)
     }
     fn cap_dup(self, _: CapHandle, _: Rights) -> Result<CapHandle, Error> {
         Err(Error::NoMemory)
@@ -113,11 +120,13 @@ fn any_valid_message() -> Message {
 fn decode_any() {
     let msg = any_valid_message();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &msg,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let s: Chan<_, echo::server::Ready> = Chan::__from_parts(t, CapHandle(1));
     let n = msg.cap_slice().len();
@@ -136,6 +145,8 @@ fn decode_any() {
                     assert_eq!(n, 1);
                     assert!(msg.payload().is_empty());
                     assert_eq!(m.side.handle(), msg.caps[0]);
+                    // El extremo aceptado fue creado para `note`.
+                    assert_eq!(ctr.get(), (msg.caps[0].0, crate::protocols::note::ID));
                     core::mem::forget(c);
                 }
                 echo::server::recv::Ready::Bye(c, _) => {
@@ -169,11 +180,13 @@ fn roundtrip_echo() {
     echo::Echo { data }.encode(&mut m);
     assert!(m.validate().is_ok());
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &m,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let back = echo::Echo::decode(t, &m).unwrap();
     assert_eq!(back.data.as_slice(), &buf[..len]);
@@ -254,11 +267,13 @@ fn check_any() {
 fn restore_decode_any() {
     let msg = any_valid_message();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &msg,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let s: Chan<_, restore::server::Start> = Chan::__from_parts(t, CapHandle(1));
     let n = msg.cap_slice().len();
@@ -294,11 +309,13 @@ fn restore_decode_any() {
 fn store_reading_decode_any() {
     let msg = any_valid_message();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &msg,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let c: Chan<_, store_obj::client::Reading> = Chan::__from_parts(t, CapHandle(1));
     let n = msg.cap_slice().len();
@@ -338,11 +355,13 @@ fn store_reading_decode_any() {
 fn try_send_any() {
     let msg = Message::default();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &msg,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let h = CapHandle(kani::any());
     kani::assume(h.is_valid());

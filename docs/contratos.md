@@ -1,13 +1,14 @@
 # Contratos de canal tipados
 
-Estado: **etapa 4** (crate `nsos-contract`, modelo en Lean; todos los
-protocolos entre cells del sistema migrados, salvo los ad hoc de las
-pruebas del supervisor). La fuente de verdad ejecutable es
+Estado: **etapa 5** (todos los protocolos entre cells del sistema
+migrados, salvo los ad hoc de las pruebas del supervisor, y el contrato de
+cada canal guardado en el kernel). La fuente de verdad ejecutable es
 [`crates/contract`](../crates/contract), y los modelos,
 [`Contract.lean`](../verification/lean/Nsos/Contract.lean),
 [`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean),
-[`StoreContract.lean`](../verification/lean/Nsos/StoreContract.lean) y
-[`MigrationContract.lean`](../verification/lean/Nsos/MigrationContract.lean).
+[`StoreContract.lean`](../verification/lean/Nsos/StoreContract.lean),
+[`MigrationContract.lean`](../verification/lean/Nsos/MigrationContract.lean)
+y [`ContractId.lean`](../verification/lean/Nsos/ContractId.lean).
 
 ## Qué son
 
@@ -273,6 +274,37 @@ alcanzable valen los teoremas de `Contract.lean`
 cerraba hasta corregirlo. Tres mutaciones del modelo y tres de las tablas y
 de la teoría de flujos lo rompen.
 
+## El contrato de cada canal, en el kernel (etapa 5)
+
+Hasta la etapa 4, al abrir un canal o recibir un extremo en un mensaje solo
+se comprobaba que fuera un canal con `SEND` y `RECV`. Un emisor podía pasar
+un canal de otro protocolo (por ejemplo un handle del almacén donde se
+espera un canal `note`) y del otro lado todo llegaba como violación.
+
+Ahora cada canal guarda el contrato que declaró quien lo creó:
+
+* `channel_create(out, contrato)`: el segundo argumento, que antes se
+  ignoraba, es el identificador del contrato (0 = sin contrato; menor que
+  2^63, porque `channel_contract` lo devuelve como resultado de syscall).
+  Las llamadas viejas siguen valiendo y crean canales sin contrato.
+* `channel_contract(h)`: lo devuelve. No pide derechos (como `cap_info`).
+* Los dos extremos lo comparten y **ninguna syscall lo cambia**
+  (`Sys.step_contract_fixed`, `run_contract_fixed`; `cap_dup` o `create`
+  que reetiquetaran rompen la demostración).
+
+La macro le da a cada contrato un `ID` (FNV-1a de 63 bits sobre el nombre y
+la tabla; un test comprueba que los del sistema son distintos), `pair` crea
+el canal con ese `ID`, y `Chan::open` y el decodificador de `Endpoint<S>`
+exigen que el canal tenga el `ID` del contrato de `S`. El kernel etiqueta
+también los canales que reparte al arrancar (`echo`, `console`, `net`,
+`restore`, `block`, `store_root`, `store_share`).
+
+El número **identifica, no autentica**: quien crea un canal puede declarar
+el contrato que quiera y después hablarlo mal. Lo que cierra es el
+reetiquetado: un canal creado para un protocolo no se puede hacer pasar
+por otro. En QEMU, `ping` le manda a `pong` un `NewChannel` con un canal
+creado para `store_obj`, y `pong` lo descarta y lo suelta.
+
 ## Etapas
 
 1. **(hecha)** Crate, modelo, `ping`/`pong`.
@@ -284,7 +316,6 @@ de la teoría de flujos lo rompen.
 4. **(hecha)** Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de
    migración: `console`, `block`, el flujo `net` y `restore`/`counter` en
    `enlace` (`MigrationContract.lean`).
-5. Opcional: un `contract_id` fijo en cada canal, que el kernel informe en
-   `cap_info`, para que la identidad del contrato de un extremo recibido la
-   garantice el kernel (hoy se comprueba solo que sea un canal con `SEND` y
-   `RECV`). Cambia la ABI: modelo primero.
+5. **(hecha)** El contrato de cada canal lo guarda el kernel
+   (`channel_create(out, contrato)`, `channel_contract(h)`) y no cambia
+   nunca (`ContractId.lean`).

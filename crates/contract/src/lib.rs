@@ -308,6 +308,61 @@ pub const fn stream_check(table: &[Transition], start: u16) -> bool {
     true
 }
 
+/// Identificador de un contrato: FNV-1a de 64 bits sobre el nombre y la
+/// tabla, en 63 bits. Es lo que se declara al crear el canal (`channel_create(out,
+/// id)`) y lo que se exige al abrir uno o al recibirlo en un mensaje. Nunca
+/// es 0 (0 es "sin contrato"). Dos contratos distintos chocan solo si el
+/// hash choca: el número identifica, no autentica (ver
+/// `docs/contratos.md`).
+#[doc(hidden)]
+pub const fn __contract_id(name: &str, table: &[Transition]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+    let b = name.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        h = (h ^ b[i] as u64).wrapping_mul(PRIME);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < table.len() {
+        let t = &table[i];
+        let mut word = [0u8; 13];
+        let src = t.src.to_le_bytes();
+        let label = t.label.to_le_bytes();
+        let dst = t.dst.to_le_bytes();
+        word[0] = src[0];
+        word[1] = src[1];
+        word[2] = if dir_eq(t.dir, Dir::ClientToServer) {
+            0
+        } else {
+            1
+        };
+        let mut j = 0;
+        while j < 8 {
+            word[3 + j] = label[j];
+            j += 1;
+        }
+        word[11] = dst[0];
+        word[12] = dst[1];
+        let mut j = 0;
+        while j < word.len() {
+            h = (h ^ word[j] as u64).wrapping_mul(PRIME);
+            j += 1;
+        }
+        i += 1;
+    }
+    // 63 bits: las syscalls devuelven el resultado como `i64` y un valor
+    // negativo es un error, así que `channel_contract` solo puede contestar
+    // contratos menores que 2^63 (el kernel rechaza los demás al crear).
+    let h = h & (u64::MAX >> 1);
+    if h == 0 {
+        1
+    } else {
+        h
+    }
+}
+
 /// El control de un flujo que corre la macro al compilar.
 #[doc(hidden)]
 pub const fn __assert_stream(table: &[Transition]) {

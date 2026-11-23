@@ -23,6 +23,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/UpgradeContract.lean` | El protocolo de `Upgrade.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/StoreContract.lean` | El almacén de `Store.lean` sigue los contratos `store_root` y `store_obj`. |
 | `Nsos/MigrationContract.lean` | La migración de `Migration.lean` sigue los contratos `handover` y `restore`. |
+| `Nsos/ContractId.lean` | El contrato de cada canal (`Sys.contract`) no cambia. |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
@@ -200,6 +201,20 @@ cambiados. `check` es el control que corre la macro al compilar.
   como en `UpgradeContract`) que el enlace tome los recursos sin
   `MIGRATE`, que `origen` haga commit sin que el enlace le pase el
   `ACCEPT` y que haga rollback sin que el enlace le devuelva los recursos.
+
+### El contrato de cada canal (`Nsos/ContractId.lean`)
+
+`Sys.contract` guarda, por par, el contrato que declaró `channel_create`
+(`Op.create cid`).
+
+* `step_contract_fixed`, `run_contract_fixed`: ninguna syscall cambia el
+  contrato de un canal que ya existe (tampoco el recolector).
+* `step_create_contract`: el canal nuevo tiene el contrato que se pidió.
+* `peer_contract`: los dos extremos lo comparten.
+* `held_contract`: un extremo que una cell tiene al final y ya existía al
+  principio conserva su contrato.
+* Mutaciones: que `cap_dup` reetiquete el canal y que `create` le cambie el
+  contrato a todos.
 
 ### IPC completo (`Nsos/Ipc.lean`)
 

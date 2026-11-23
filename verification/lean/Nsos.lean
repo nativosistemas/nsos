@@ -16,3 +16,4 @@ import Nsos.Contract
 import Nsos.UpgradeContract
 import Nsos.StoreContract
 import Nsos.MigrationContract
+import Nsos.ContractId

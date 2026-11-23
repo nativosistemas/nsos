@@ -19,8 +19,8 @@
 use nsos_rt::abi::syscall::Syscall;
 use nsos_rt::abi::{CapHandle, Error, Message, Rights};
 use nsos_rt::{
-    bootstrap, cap_drop, cell_spawn, cell_status, channel_call, channel_create, channel_recv,
-    channel_send, mem_create, mem_map, mem_unmap, println, raw_syscall,
+    bootstrap, cap_drop, cell_spawn, cell_status, channel_call, channel_create, channel_create_for,
+    channel_recv, channel_send, mem_create, mem_map, mem_unmap, println, raw_syscall,
 };
 
 const ECHO: u64 = 1;
@@ -39,7 +39,9 @@ fn now_ns() -> u64 {
 
 /// Ida y vuelta a `pong`: con `send` + `recv`, o con `channel_call`.
 fn ipc(pong: CapHandle, call: bool) -> Result<u64, Error> {
-    let (mine, theirs) = channel_create()?;
+    // `pong` exige que el canal se haya creado para el contrato `echo`
+    // (`channel_contract`); `bench` le habla sin tipos, con el mismo formato.
+    let (mine, theirs) = channel_create_for(nsos_rt::contract::protocols::echo::ID)?;
     let child = cell_spawn(pong, &[theirs])?;
     let msg = Message::new(ECHO, b"x").unwrap();
     let mut r = Message::default();

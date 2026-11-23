@@ -20,8 +20,10 @@ pub trait Transport: Copy {
     fn cap_info(self, h: CapHandle) -> Result<CapInfo, Error>;
     /// `cap_drop` (los errores se ignoran: el handle deja de usarse igual).
     fn cap_drop(self, h: CapHandle);
-    /// `channel_create`.
-    fn channel_create(self) -> Result<(CapHandle, CapHandle), Error>;
+    /// `channel_create` con el contrato `contract` (0 = sin contrato).
+    fn channel_create(self, contract: u64) -> Result<(CapHandle, CapHandle), Error>;
+    /// `channel_contract`: el contrato que se declaró al crear el canal.
+    fn channel_contract(self, h: CapHandle) -> Result<u64, Error>;
     /// `cap_dup` con derechos atenuados por `mask`.
     fn cap_dup(self, h: CapHandle, mask: Rights) -> Result<CapHandle, Error>;
     /// `channel_call` sin plazo: manda `m` y deja en `m` la respuesta.
@@ -32,6 +34,8 @@ pub trait Transport: Copy {
 pub trait State: Sized {
     /// Número del estado en la tabla del contrato.
     const ID: u16;
+    /// Identificador del contrato al que pertenece (el de `channel_create`).
+    const CONTRACT: u64;
 }
 
 /// En este estado se puede mandar `M`, y se pasa a `Next`.
@@ -99,14 +103,18 @@ impl<S: State> Endpoint<S> {
 /// Derechos que tiene que tener un extremo para seguir un contrato.
 pub(crate) const CHAN_RIGHTS: Rights = Rights(Rights::SEND.0 | Rights::RECV.0);
 
-/// `true` si `h` es un extremo de canal con `SEND` y `RECV`.
-pub(crate) fn is_channel<T: Transport>(t: T, h: CapHandle) -> bool {
-    match t.cap_info(h) {
+/// `true` si `h` es un extremo de canal con `SEND` y `RECV`, creado para
+/// el contrato `contract`. El kernel guarda el contrato en el canal y no lo
+/// deja cambiar, así que nadie puede hacer pasar un canal de otro protocolo
+/// (`Sys.step_contract_fixed`).
+pub(crate) fn is_channel<T: Transport>(t: T, h: CapHandle, contract: u64) -> bool {
+    let typed = match t.cap_info(h) {
         Ok(i) => {
             i.object_type == ObjectType::Channel as u32 && Rights(i.rights).contains(CHAN_RIGHTS)
         }
         Err(_) => false,
-    }
+    };
+    typed && t.channel_contract(h) == Ok(contract)
 }
 
 /// Extremo de canal en el estado `S` del protocolo, con su transporte.
@@ -180,10 +188,11 @@ impl<T: Transport, S: State> Chan<T, S> {
 
     /// Toma un handle crudo (por ejemplo una capacidad de arranque) como
     /// extremo en el estado `S`. Comprueba que sea un canal con `SEND` y
-    /// `RECV`; que la otra punta siga el mismo contrato no se puede
-    /// comprobar: lo garantiza quien repartió el canal.
+    /// `RECV` creado para este contrato (`channel_contract`). Que la otra
+    /// punta lo *cumpla* no se puede comprobar; que el estado sea el que
+    /// corresponde, tampoco: lo garantiza quien repartió el canal.
     pub fn open(t: T, h: CapHandle) -> Result<Chan<T, S>, Error> {
-        if is_channel(t, h) {
+        if is_channel(t, h, S::CONTRACT) {
             Ok(Chan::__from_parts(t, h))
         } else {
             Err(Error::WrongType)

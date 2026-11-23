@@ -162,7 +162,7 @@ theorem exec'_msgInv {s s' : Sys} {a : Nat} {op : Op} {r : List Nat} (h : s.MsgI
     split at he; · cases he
     split at he; · cases he
     cases he; exact msgInv_of_eq rfl rfl rfl h
-  | create =>
+  | create _ =>
     simp only [exec'] at he
     split at he; · cases he
     split at he; · cases he
@@ -277,7 +277,7 @@ theorem exec'_fate_final {s s' : Sys} {a : Nat} {op : Op} {r : List Nat} (h : s.
     split at he; · cases he
     split at he; · cases he
     cases he; rfl
-  | create =>
+  | create _ =>
     simp only [exec'] at he
     split at he; · cases he
     split at he; · cases he
@@ -551,7 +551,7 @@ theorem exec'_wakeInv {s s' : Sys} {a : Nat} {op : Op} {r : List Nat} (h : s.Wak
     split at he; · cases he
     split at he; · cases he
     cases he; exact h
-  | create =>
+  | create _ =>
     simp only [exec'] at he
     split at he; · cases he
     split at he; · cases he
