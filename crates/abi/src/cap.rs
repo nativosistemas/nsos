@@ -113,7 +113,9 @@ impl ObjectType {
                     ObjectType::Channel => Rights::SEND.0 | Rights::RECV.0,
                     ObjectType::Memory => {
                         // CONTROL en memoria = conocer su dirección física (DMA).
-                        Rights::READ.0 | Rights::WRITE.0 | Rights::EXEC.0 | Rights::CONTROL.0
+                        // Sin EXEC: las cells están selladas, solo ejecutan el
+                        // código de su imagen (`Mem.step_sealed` en el modelo).
+                        Rights::READ.0 | Rights::WRITE.0 | Rights::CONTROL.0
                     }
                     ObjectType::Cell => Rights::CONTROL.0,
                     ObjectType::Irq => Rights::CONTROL.0,
@@ -327,6 +329,9 @@ mod tests {
         assert!(ObjectType::Channel.valid_rights().contains(Rights::SEND));
         assert!(!ObjectType::Channel.valid_rights().contains(Rights::EXEC));
         assert!(!ObjectType::Memory.valid_rights().contains(Rights::SEND));
+        // Cells selladas: la memoria nunca se ejecuta; solo una imagen.
+        assert!(!ObjectType::Memory.valid_rights().contains(Rights::EXEC));
+        assert!(ObjectType::Image.valid_rights().contains(Rights::EXEC));
         for v in 1..=6 {
             let t = ObjectType::from_raw(v).unwrap();
             assert_eq!(t as u32, v);

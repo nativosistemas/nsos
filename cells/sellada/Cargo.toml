@@ -1,0 +1,14 @@
+[package]
+name = "cell-sellada"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sellada"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+nsos-rt = { path = "../rt" }

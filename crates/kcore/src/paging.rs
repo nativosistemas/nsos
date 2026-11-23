@@ -7,6 +7,8 @@
 //! intermedios, páginas grandes), para probarla en el host y con Kani (ver
 //! `verification/kani.md`).
 
+use nsos_abi::Rights;
+
 /// Tamaño de página base.
 pub const PAGE_SIZE: u64 = 4096;
 /// Tamaño de página grande.
@@ -202,6 +204,34 @@ pub fn user_range_ok(vaddr: u64, size: u64, min: u64, max: u64) -> bool {
         }
 }
 
+/// Lo que pide `mem_map` una vez validado: los derechos que tiene que tener
+/// la capacidad y si el mapeo es escribible. No hay campo de ejecución: un
+/// objeto `Memory` nunca se mapea ejecutable (cells selladas; modelo:
+/// `Mem.step_sealed`, `Mem.exec_obj_breaks`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapRequest {
+    /// Derechos que tiene que tener la capacidad (`READ`, y `WRITE` si
+    /// `write`).
+    pub need: Rights,
+    /// El mapeo es escribible.
+    pub write: bool,
+}
+
+/// Valida los derechos que pide `mem_map(h, vaddr, rights)`: siempre `READ`,
+/// opcionalmente `WRITE` y nada más. `EXEC` (o cualquier otro bit) se
+/// rechaza: el código de una cell es solo el de su imagen ELF.
+pub fn map_request(want: u64) -> Option<MapRequest> {
+    let allowed = Rights::READ.bits() as u64 | Rights::WRITE.bits() as u64;
+    if want & !allowed != 0 || want & Rights::READ.bits() as u64 == 0 {
+        return None;
+    }
+    let need = Rights(want as u32);
+    Some(MapRequest {
+        need,
+        write: need.contains(Rights::WRITE),
+    })
+}
+
 /// `mem_unmap(vaddr, len)`: cuál de los mapeos de objetos `Memory` de la
 /// cell (`(dirección, tamaño)` de cada uno) se quita. Tiene que coincidir
 /// exactamente con uno: misma dirección y mismo tamaño (un objeto se mapea y
@@ -218,6 +248,29 @@ pub fn unmap_target(maps: &[(u64, u64)], vaddr: u64, len: u64) -> Option<usize> 
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn map_request_rejects_exec() {
+        let (r, w, x) = (
+            Rights::READ.bits() as u64,
+            Rights::WRITE.bits() as u64,
+            Rights::EXEC.bits() as u64,
+        );
+        assert_eq!(
+            map_request(r),
+            Some(MapRequest {
+                need: Rights::READ,
+                write: false
+            })
+        );
+        assert_eq!(map_request(r | w).map(|m| m.write), Some(true));
+        // Ni RX ni RWX: la memoria nunca es ejecutable.
+        assert_eq!(map_request(r | x), None);
+        assert_eq!(map_request(r | w | x), None);
+        // Sin READ, o con bits ajenos, tampoco.
+        assert_eq!(map_request(w), None);
+        assert_eq!(map_request(r | 1 << 40), None);
+    }
 
     #[test]
     fn unmap_target_matches_exactly() {
@@ -505,6 +558,26 @@ mod proofs {
 
     /// Un rango que `user_range_ok` acepta no desborda y queda entero en la
     /// mitad baja: ninguna página cae en una entrada del PML4 del kernel.
+    #[kani::proof]
+    fn map_request_never_exec() {
+        let want: u64 = kani::any();
+        match map_request(want) {
+            Some(r) => {
+                // Nunca ejecutable, siempre legible, y exactamente lo pedido.
+                assert!(want & Rights::EXEC.bits() as u64 == 0);
+                assert!(!r.need.contains(Rights::EXEC));
+                assert!(r.need.contains(Rights::READ));
+                assert_eq!(r.need.bits() as u64, want);
+                assert_eq!(r.write, want & Rights::WRITE.bits() as u64 != 0);
+            }
+            None => {
+                // Solo se rechaza lo que no es READ o READ|WRITE.
+                let r = Rights::READ.bits() as u64;
+                assert!(want != r && want != r | Rights::WRITE.bits() as u64);
+            }
+        }
+    }
+
     #[kani::proof]
     fn user_range_stays_low() {
         let (vaddr, size, off): (u64, u64, u64) = (kani::any(), kani::any(), kani::any());

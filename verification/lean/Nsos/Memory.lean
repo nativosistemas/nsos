@@ -31,6 +31,20 @@ Teoremas:
   cell no tiene ningún mapeo a sus marcos.
 * `Mem.no_revocation_breaks`: sin revocación (como era el kernel antes), el
   invariante se rompe: el emisor sigue viendo el objeto que entregó.
+
+Cells selladas (ninguna cell genera código ni toca el código de otra):
+
+* `Mem.step_sealed`: el invariante `Sealed` se mantiene en cada paso. Todo
+  mapeo ejecutable es de un marco propio de la cell (su imagen ELF), y ningún
+  mapeo de ninguna cell a ese marco es escribible.
+* `Mem.exec_is_own_code`: lo que una cell ejecuta es un marco propio de ella:
+  nunca un objeto `Memory` (que se puede escribir o compartir) ni un marco
+  de otra cell.
+* `Mem.code_never_writable`: nadie, ni la propia cell ni otra, tiene un mapeo
+  escribible del código de una cell (W^X por marco, no solo por mapeo).
+* `Mem.exec_obj_breaks`: con el `mem_map` de antes (que aceptaba `EXEC` si
+  la capacidad lo tenía), mapear el mismo objeto como RW y como RX rompe
+  el invariante: la cell escribe código y lo ejecuta.
 -/
 
 namespace Nsos
@@ -58,12 +72,13 @@ inductive Src where
   | obj (o : Nat)
   deriving DecidableEq, Repr
 
-/-- Un mapeo de una página: dirección virtual, marco, si es escribible y de
-qué viene. -/
+/-- Un mapeo de una página: dirección virtual, marco, si es escribible, si
+es ejecutable y de qué viene. -/
 structure Mapping where
   vpage : Nat
   frame : Nat
   write : Bool
+  exec : Bool
   src : Src
   deriving DecidableEq, Repr
 
@@ -109,17 +124,23 @@ inductive Step : MSys → MSys → Prop
       Step s { s.set a { s.cells a with caps := ⟨s.nextObj, true⟩ :: (s.cells a).caps } with
                owner := fun f => if f ∈ fs then .obj s.nextObj else s.owner f
                nextObj := s.nextObj + 1 }
-  /-- Mapear una página propia (carga del ELF, pila). -/
-  | mapPriv {s : MSys} {a v f : Nat} {w : Bool} :
-      s.owner f = .cell a →
+  /-- Mapear una página propia (carga del ELF, pila; `cell::spawn`): nunca
+  escribible y ejecutable a la vez (`elf::parse` rechaza los segmentos W+X),
+  y cada marco una sola vez (`map_user_page` reserva un marco nuevo por
+  página y los segmentos no se solapan). -/
+  | mapPriv {s : MSys} {a v f : Nat} {w x : Bool} :
+      s.owner f = .cell a → (w && x) = false →
+      (∀ m, m ∈ (s.cells a).maps → m.frame ≠ f) →
       Step s (s.set a { s.cells a with
-        maps := ⟨v, f, w, .priv⟩ :: (s.cells a).maps })
+        maps := ⟨v, f, w, x, .priv⟩ :: (s.cells a).maps })
   /-- `mem_map`: hace falta una capacidad al objeto con los derechos
-  pedidos, y el marco tiene que ser de ese objeto. -/
+  pedidos, y el marco tiene que ser de ese objeto. Nunca es ejecutable:
+  `EXEC` no es un derecho de un objeto `Memory` y `mem_map` lo rechaza
+  (`nsos_kcore::paging::map_request`). -/
   | mapObj {s : MSys} {a v f o : Nat} {w : Bool} {c : MCap} :
       c ∈ (s.cells a).caps → c.allows o w = true → s.owner f = .obj o →
       Step s (s.set a { s.cells a with
-        maps := ⟨v, f, w, .obj o⟩ :: (s.cells a).maps })
+        maps := ⟨v, f, w, false, .obj o⟩ :: (s.cells a).maps })
   /-- Quitar el mapeo de una página. -/
   | unmap {s : MSys} {a v : Nat} :
       Step s (s.set a { s.cells a with
@@ -166,7 +187,7 @@ theorem set_cells (s : MSys) (a : Nat) (c : CellM) (b : Nat) :
 
 theorem mapOk_not_free {s : MSys} {a : Nat} {m : Mapping} (h : MapOk s a m) :
     s.owner m.frame ≠ .free := by
-  obtain ⟨v, f, w, src⟩ := m
+  obtain ⟨v, f, w, x, src⟩ := m
   cases src <;> simp only [MapOk] at h ⊢
   · rw [h]; intro h'; cases h'
   · rw [h.1]; intro h'; cases h'
@@ -176,7 +197,7 @@ cell no perdió capacidades. -/
 theorem mapOk_congr {s s' : MSys} {a : Nat} {m : Mapping} (h : MapOk s a m)
     (ho : s'.owner m.frame = s.owner m.frame)
     (hc : ∀ c, c ∈ (s.cells a).caps → c ∈ (s'.cells a).caps) : MapOk s' a m := by
-  obtain ⟨v, f, w, src⟩ := m
+  obtain ⟨v, f, w, x, src⟩ := m
   simp only at ho
   cases src <;> simp only [MapOk] at h ⊢
   · rw [ho]; exact h
@@ -191,7 +212,7 @@ theorem mem_revoke {c : CellM} {m : Mapping} :
 theorem mapOk_revoke {s s' : MSys} {a : Nat} {m : Mapping} (h : MapOk s a m)
     (ho : s'.owner m.frame = s.owner m.frame) (hk : keep (s'.cells a).caps m = true) :
     MapOk s' a m := by
-  obtain ⟨v, f, w, src⟩ := m
+  obtain ⟨v, f, w, x, src⟩ := m
   simp only at ho
   cases src <;> simp only [MapOk, keep] at h hk ⊢
   · rw [ho]; exact h
@@ -229,7 +250,7 @@ theorem step_iso {s s' : MSys} (h : Iso s) (hs : Step s s') : Iso s' := by
     split
     · exact List.mem_cons_of_mem _ (by rename_i hb; subst hb; exact hc)
     · exact hc
-  | @mapPriv a v f w hf =>
+  | @mapPriv a v f w x hf _ _ =>
     intro b m hm
     simp only [set_cells] at hm
     split at hm
@@ -293,7 +314,7 @@ theorem step_iso {s s' : MSys} (h : Iso s) (hs : Step s s') : Iso s' := by
     have hok := h b m hm
     refine mapOk_congr hok ?_ (fun _ x => x)
     have : s.owner m.frame ≠ .obj o := by
-      obtain ⟨v, f, w, src⟩ := m
+      obtain ⟨v, f, w, x, src⟩ := m
       cases src <;> simp only [MapOk] at hok ⊢
       · rw [hok]; intro h'; cases h'
       · rename_i o'
@@ -310,7 +331,7 @@ theorem step_iso {s s' : MSys} (h : Iso s) (hs : Step s s') : Iso s' := by
       have hok := h b m hm
       refine mapOk_congr hok ?_ (fun c hc => by simp [MSys.set, hb]; exact hc)
       have : s.owner m.frame ≠ .cell a := by
-        obtain ⟨v, f, w, src⟩ := m
+        obtain ⟨v, f, w, x, src⟩ := m
         cases src <;> simp only [MapOk] at hok ⊢
         · rw [hok]; intro h'; cases h'; exact hb rfl
         · rw [hok.1]; intro h'; cases h'
@@ -326,12 +347,12 @@ theorem never_maps_foreign {s : MSys} (h : Iso s) {a : Nat} {m : Mapping}
       ∀ b, b ≠ a → s.owner m.frame ≠ .cell b := by
   have hok := h a m hm
   refine ⟨?_, mapOk_not_free hok, ?_⟩
-  · obtain ⟨v, f, w, src⟩ := m
+  · obtain ⟨v, f, w, x, src⟩ := m
     cases src <;> simp only [MapOk] at hok ⊢
     · rw [hok]; intro h'; cases h'
     · rw [hok.1]; intro h'; cases h'
   · intro b hb
-    obtain ⟨v, f, w, src⟩ := m
+    obtain ⟨v, f, w, x, src⟩ := m
     cases src <;> simp only [MapOk] at hok ⊢
     · rw [hok]; intro h'; cases h'; exact hb rfl
     · rw [hok.1]; intro h'; cases h'
@@ -342,7 +363,7 @@ theorem write_needs_cap {s : MSys} (h : Iso s) {a : Nat} {m : Mapping} {o : Nat}
     (hm : m ∈ (s.cells a).maps) (hs : m.src = .obj o) (hw : m.write = true) :
     ∃ c, c ∈ (s.cells a).caps ∧ c.obj = o ∧ c.write = true := by
   have hok := h a m hm
-  obtain ⟨v, f, w, src⟩ := m
+  obtain ⟨v, f, w, x, src⟩ := m
   simp only at hs hw
   subst hs hw
   simp only [MapOk] at hok
@@ -421,6 +442,230 @@ theorem iso_empty {s : MSys} (h : ∀ a, (s.cells a).maps = []) : Iso s := by
   rw [h a] at hm
   cases hm
 
+/-! ## Cells selladas
+
+Una cell solo ejecuta el código de su imagen. El kernel no tiene una
+operación que cree código: los marcos ejecutables salen de `cell::spawn`
+(segmentos del ELF, nunca W+X) y `mem_map` nunca mapea un objeto como
+ejecutable. -/
+
+/-- Sellado: todo mapeo ejecutable es de un marco propio, y ningún mapeo (de
+ninguna cell, incluido el mismo) a ese marco es escribible. -/
+def Sealed (s : MSys) : Prop :=
+  ∀ a m, m ∈ (s.cells a).maps → m.exec = true →
+    m.src = .priv ∧ ∀ b m', m' ∈ (s.cells b).maps → m'.frame = m.frame → m'.write = false
+
+/-- Si los mapeos solo se achican, el sellado se mantiene. -/
+theorem sealed_mono {s s' : MSys} (h : Sealed s)
+    (hsub : ∀ b m, m ∈ (s'.cells b).maps → m ∈ (s.cells b).maps) : Sealed s' := by
+  intro a m hm hx
+  obtain ⟨hp, hw⟩ := h a m (hsub a m hm) hx
+  exact ⟨hp, fun b m' hm' hf => hw b m' (hsub b m' hm') hf⟩
+
+/-- Agregar un mapeo `n` a la cell `a` mantiene el sellado si `n`, de ser
+ejecutable, es propio, no escribible y nadie escribe su marco; y si ningún
+mapeo ejecutable comparte marco con `n` cuando `n` es escribible. -/
+theorem sealed_add {s s' : MSys} {a : Nat} {n : Mapping} (h : Sealed s)
+    (hsub : ∀ b m, m ∈ (s'.cells b).maps → (b = a ∧ m = n) ∨ m ∈ (s.cells b).maps)
+    (hnew : n.exec = true → n.src = .priv ∧ n.write = false ∧
+      ∀ b m, m ∈ (s.cells b).maps → m.frame = n.frame → m.write = false)
+    (hold : ∀ b m, m ∈ (s.cells b).maps → m.exec = true → m.frame = n.frame →
+      n.write = false) : Sealed s' := by
+  intro b m hm hx
+  rcases hsub b m hm with ⟨_, rfl⟩ | hm
+  · obtain ⟨hp, hw, ho⟩ := hnew hx
+    refine ⟨hp, fun c m' hm' hf => ?_⟩
+    rcases hsub c m' hm' with ⟨_, rfl⟩ | hm'
+    · exact hw
+    · exact ho c m' hm' hf
+  · obtain ⟨hp, hw⟩ := h b m hm hx
+    refine ⟨hp, fun c m' hm' hf => ?_⟩
+    rcases hsub c m' hm' with ⟨_, rfl⟩ | hm'
+    · exact hold b m hm hx hf.symm
+    · exact hw c m' hm' hf
+
+/-- Un marco propio de `a` que `a` no mapeó no lo mapea nadie (por el
+aislamiento, nadie más puede mapear marcos propios de `a`). -/
+theorem unmapped_frame {s : MSys} (h : Iso s) {a f : Nat} (ho : s.owner f = .cell a)
+    (hfr : ∀ m, m ∈ (s.cells a).maps → m.frame ≠ f) :
+    ∀ b m, m ∈ (s.cells b).maps → m.frame ≠ f := by
+  intro b m hm hf
+  have hok := h b m hm
+  obtain ⟨v, f', w, x, src⟩ := m
+  simp only at hf
+  subst hf
+  cases src with
+  | priv =>
+    simp only [MapOk] at hok
+    rw [ho] at hok
+    cases hok
+    exact hfr _ hm rfl
+  | obj o =>
+    simp only [MapOk] at hok
+    rw [ho] at hok
+    exact Owner.noConfusion hok.1
+
+/-- Un mapeo ejecutable de un sistema aislado y sellado es de un marco propio. -/
+theorem exec_owner {s : MSys} (h : Iso s) (hs : Sealed s) {a : Nat} {m : Mapping}
+    (hm : m ∈ (s.cells a).maps) (hx : m.exec = true) : s.owner m.frame = .cell a := by
+  have hok := h a m hm
+  obtain ⟨v, f, w, x, src⟩ := m
+  have hp := (hs a _ hm hx).1
+  simp only at hp
+  subst hp
+  exact hok
+
+/-- **Sellado**: ningún paso rompe el invariante (sobre un sistema aislado,
+que lo es siempre por `step_iso`). -/
+theorem step_sealed {s s' : MSys} (hi : Iso s) (h : Sealed s) (hs : Step s s') :
+    Sealed s' := by
+  cases hs with
+  | spawn _ => exact h
+  | create _ =>
+    refine sealed_mono h fun b m hm => ?_
+    simp only [set_cells] at hm
+    split at hm
+    · rename_i hb; subst hb; exact hm
+    · exact hm
+  | @mapPriv a v f w x hf hwx hfr =>
+    have hnone := unmapped_frame hi hf hfr
+    refine sealed_add (a := a) (n := ⟨v, f, w, x, .priv⟩) h ?_ ?_ ?_
+    · intro b m hm
+      simp only [set_cells] at hm
+      split at hm
+      · rename_i hb; subst hb
+        simp only [List.mem_cons] at hm
+        rcases hm with rfl | hm
+        · exact .inl ⟨rfl, rfl⟩
+        · exact .inr hm
+      · exact .inr hm
+    · intro hx
+      simp only at hx
+      subst hx
+      refine ⟨rfl, ?_, fun b m hm hmf => absurd hmf (hnone b m hm)⟩
+      simpa using hwx
+    · intro b m hm _ hmf
+      exact absurd hmf (hnone b m hm)
+  | @mapObj a v f o w c hc hal hf =>
+    refine sealed_add (a := a) (n := ⟨v, f, w, false, .obj o⟩) h ?_ ?_ ?_
+    · intro b m hm
+      simp only [set_cells] at hm
+      split at hm
+      · rename_i hb; subst hb
+        simp only [List.mem_cons] at hm
+        rcases hm with rfl | hm
+        · exact .inl ⟨rfl, rfl⟩
+        · exact .inr hm
+      · exact .inr hm
+    · intro hx; cases hx
+    · intro b m hm hx hmf
+      have := exec_owner hi h hm hx
+      simp only at hmf
+      rw [hmf, hf] at this
+      cases this
+  | unmap =>
+    refine sealed_mono h fun b m hm => ?_
+    simp only [set_cells] at hm
+    split at hm
+    · rename_i hb; subst hb; exact (List.mem_filter.1 hm).1
+    · exact hm
+  | dup _ =>
+    refine sealed_mono h fun b m hm => ?_
+    simp only [set_cells] at hm
+    split at hm
+    · rename_i hb; subst hb; exact hm
+    · exact hm
+  | drop _ =>
+    refine sealed_mono h fun b m hm => ?_
+    simp only [set_cells] at hm
+    split at hm
+    · rename_i hb; subst hb; exact (mem_revoke.1 hm).1
+    · exact hm
+  | @send a a' c hne hc =>
+    refine sealed_mono h fun b m hm => ?_
+    simp only [set_cells] at hm
+    split at hm
+    · rename_i hb; subst hb; exact hm
+    · split at hm
+      · rename_i hb' hb; subst hb; exact (mem_revoke.1 hm).1
+      · exact hm
+  | freeObj _ => exact h
+  | kill =>
+    refine sealed_mono h fun b m hm => ?_
+    simp only [set_cells] at hm
+    split at hm
+    · simp at hm
+    · exact hm
+
+/-- Aislamiento y sellado juntos se mantienen en cada paso. -/
+theorem step_iso_sealed {s s' : MSys} (h : Iso s ∧ Sealed s) (hs : Step s s') :
+    Iso s' ∧ Sealed s' :=
+  ⟨step_iso h.1 hs, step_sealed h.1 h.2 hs⟩
+
+/-- **Lo que una cell ejecuta es código propio**: un marco suyo, nunca un
+objeto `Memory`, ni un marco del kernel, libre o de otra cell. -/
+theorem exec_is_own_code {s : MSys} (h : Iso s) (hs : Sealed s) {a : Nat} {m : Mapping}
+    (hm : m ∈ (s.cells a).maps) (hx : m.exec = true) :
+    m.src = .priv ∧ s.owner m.frame = .cell a := ⟨(hs a m hm hx).1, exec_owner h hs hm hx⟩
+
+/-- **Nadie escribe código**: ningún mapeo de ninguna cell (tampoco de la
+dueña) al marco de un mapeo ejecutable es escribible. -/
+theorem code_never_writable {s : MSys} (hs : Sealed s) {a b : Nat} {m m' : Mapping}
+    (hm : m ∈ (s.cells a).maps) (hx : m.exec = true) (hm' : m' ∈ (s.cells b).maps)
+    (hf : m'.frame = m.frame) : m'.write = false :=
+  (hs a m hm hx).2 b m' hm' hf
+
+/-- Un objeto `Memory` nunca se ejecuta. -/
+theorem obj_never_exec {s : MSys} (hs : Sealed s) {a o : Nat} {m : Mapping}
+    (hm : m ∈ (s.cells a).maps) (ho : m.src = .obj o) : m.exec = false := by
+  cases hx : m.exec
+  · rfl
+  · rw [(hs a m hm hx).1] at ho; cases ho
+
+/-- Un sistema sin mapeos está sellado. -/
+theorem sealed_empty {s : MSys} (h : ∀ a, (s.cells a).maps = []) : Sealed s := by
+  intro a m hm
+  rw [h a] at hm
+  cases hm
+
+/-! ### Con el `mem_map` de antes se rompe
+
+Antes `mem_map` aceptaba `EXEC` si la capacidad lo tenía, y W^X se miraba en
+cada mapeo, no en cada objeto: con una capacidad `READ | WRITE | EXEC`, la
+cell mapeaba el objeto como RW en una dirección y como RX en otra. -/
+
+/-- `mem_map` de antes: el mapeo de un objeto puede ser ejecutable (nunca
+W+X en el mismo mapeo). -/
+def mapObjOld (s : MSys) (a v f o : Nat) (w x : Bool) : MSys :=
+  s.set a { s.cells a with maps := ⟨v, f, w, x, .obj o⟩ :: (s.cells a).maps }
+
+/-- La cell 0 creó el objeto 0 (marco 0) y lo mapeó RW en la página 1. -/
+def rwMapped : MSys where
+  owner f := if f = 0 then .obj 0 else .free
+  cells a := if a = 0 then ⟨[⟨0, true⟩], [⟨1, 0, true, false, .obj 0⟩]⟩ else ⟨[], []⟩
+  nextObj := 1
+
+theorem exec_obj_breaks :
+    Iso rwMapped ∧ Sealed rwMapped ∧ ¬ Sealed (mapObjOld rwMapped 0 2 0 0 false true) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro a m hm
+    by_cases ha : a = 0
+    · subst ha
+      simp [rwMapped] at hm
+      subst hm
+      simp [MapOk, rwMapped, MCap.allows]
+    · simp [rwMapped, ha] at hm
+  · intro a m hm hx
+    by_cases ha : a = 0
+    · subst ha
+      simp [rwMapped] at hm
+      subst hm
+      cases hx
+    · simp [rwMapped, ha] at hm
+  · intro h
+    have := (h 0 ⟨2, 0, false, true, .obj 0⟩ (by simp [mapObjOld, set_cells]) rfl).1
+    cases this
+
 /-! ## Sin revocación se rompe
 
 Así era `channel_send` antes: la capacidad se va, el mapeo queda. -/
@@ -433,7 +678,7 @@ def sendOld (s : MSys) (a b : Nat) (c : MCap) : MSys :=
 /-- La cell 0 creó el objeto 0 (marco 0) y lo mapeó con escritura. -/
 def before : MSys where
   owner f := if f = 0 then .obj 0 else .free
-  cells a := if a = 0 then ⟨[⟨0, true⟩], [⟨1, 0, true, .obj 0⟩]⟩ else ⟨[], []⟩
+  cells a := if a = 0 then ⟨[⟨0, true⟩], [⟨1, 0, true, false, .obj 0⟩]⟩ else ⟨[], []⟩
   nextObj := 1
 
 theorem no_revocation_breaks :
@@ -447,7 +692,7 @@ theorem no_revocation_breaks :
       simp [MapOk, before, MCap.allows]
     · simp [before, ha] at hm
   · intro h
-    have := h 0 ⟨1, 0, true, .obj 0⟩ (by simp [sendOld, set_cells, before])
+    have := h 0 ⟨1, 0, true, false, .obj 0⟩ (by simp [sendOld, set_cells, before])
     simp [MapOk, sendOld, set_cells, before] at this
 
 end Mem

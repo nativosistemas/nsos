@@ -67,6 +67,10 @@ mod ec {
 /// (`ExitStatus::Faulted`): data abort desde EL0.
 pub const FAULT_PAGE: u64 = ec::DABT_LOWER;
 
+/// Código de excepción de ejecutar una página sin permiso (UXN) desde EL0:
+/// instruction abort.
+pub const FAULT_EXEC: u64 = ec::IABT_LOWER;
+
 fn pan_bit() -> u64 {
     if super::paging::pan_enabled() {
         SPSR_PAN

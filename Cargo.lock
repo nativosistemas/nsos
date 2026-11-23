@@ -154,6 +154,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-sellada"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-virtblk"
 version = "0.1.0"
 dependencies = [

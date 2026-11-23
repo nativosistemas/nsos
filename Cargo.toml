@@ -23,6 +23,7 @@ members = [
     "cells/caos",
     "cells/espera",
     "cells/desmapeo",
+    "cells/sellada",
     "cells/bench",
     "cells/enlace",
     "cells/origen",

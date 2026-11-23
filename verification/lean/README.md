@@ -17,7 +17,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/Migration.lean` | Migración de un servicio a otra máquina: el mismo protocolo con la versión nueva del otro lado de un cable (hito 10). |
 | `Nsos/Link.lean` | Enlace autenticado entre máquinas: un adversario que controla la red no logra que se acepte nada falso, repetido ni fuera de orden. |
 | `Nsos/Ipc.lean` | Teoremas del IPC completo: colas, bloqueo y recolector. |
-| `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación. |
+| `Nsos/Memory.lean` | Aislamiento de memoria: marcos, objetos `Memory`, mapeos y revocación; cells selladas (solo ejecutan su imagen). |
 | `Nsos/Store.lean` | Almacén de objetos: consistencia ante caídas (copy-on-write) y aislamiento entre dueños (handles). |
 | `Nsos/Contract.lean` | Contratos de canal tipados (`crates/contract`): autómata, dos puntas con colas FIFO, el control `check` y su corrección. |
 | `Nsos/UpgradeContract.lean` | El protocolo de `Upgrade.lean` sigue los contratos `handover` y `restore`. |
@@ -253,6 +253,22 @@ Cada marco físico tiene un dueño (kernel, libre, una cell o un objeto
 * `Mem.no_revocation_breaks`: sin revocación (el kernel antes de este cambio)
   el invariante se rompe.
 
+Cells selladas (cada mapeo dice además si es ejecutable):
+
+* `Mem.step_sealed` (y `Mem.step_iso_sealed`, junto con el aislamiento): en
+  cada paso, todo mapeo ejecutable es de un marco propio de la cell (su
+  imagen) y ningún mapeo de ninguna cell a ese marco es escribible.
+* `Mem.exec_is_own_code`: lo que una cell ejecuta es un marco suyo; nunca un
+  objeto `Memory`, ni un marco del kernel, libre o de otra cell.
+* `Mem.code_never_writable`: nadie, ni la propia cell, escribe en su código.
+* `Mem.obj_never_exec`: un objeto `Memory` nunca se ejecuta.
+* `Mem.exec_obj_breaks`: con el `mem_map` de antes (que aceptaba `EXEC`), la
+  cell mapea el mismo objeto RW y RX y el invariante se rompe.
+
+Mutaciones que rompen `step_sealed`: que `mem_map` acepte `EXEC` aunque
+nunca junto con `WRITE` (W^X solo por mapeo); que el cargador mapee dos veces
+un mismo marco propio; que el cargador acepte segmentos W+X.
+
 ## Tests derivados del modelo
 
 `lake exe tracegen` ejecuta el modelo de la CSpace con unas 4800 operaciones
@@ -300,6 +316,13 @@ a `kcore`.
    datos y se caía antes de su superbloque, la ranura vieja quedaba válida
    y ganaba: un estado que nunca se confirmó. Ahora montar la borra
    (`Store.mount_good`, `Store.stale_resurrects`).
+6. **W^X por mapeo, no por objeto.** `mem_map` aceptaba `EXEC` si la
+   capacidad lo tenía y solo rechazaba un mapeo W+X. El mismo objeto podía
+   quedar mapeado RW en una dirección (o en otra cell) y RX en otra: código
+   escrito y ejecutado. No se alcanzaba porque ninguna capacidad de memoria
+   tenía `EXEC`, pero nada lo garantizaba. Ahora `EXEC` no es un derecho de
+   la memoria y `mem_map` lo rechaza (`Mem.step_sealed`,
+   `Mem.exec_obj_breaks`).
 
 ## Uso
 

@@ -13,7 +13,7 @@
 //! * `time`: timer del scheduler y reloj;
 //! * `discover` (lee el device tree, antes de `mm::init`), `init_devices`;
 //! * `serial`, `init_cpu`, `yield_now`, `breakpoint`, `set_kernel_stack`,
-//!   `FAULT_PAGE`, `configure`, `halt_forever` y `qemu_exit`.
+//!   `FAULT_PAGE`, `FAULT_EXEC`, `configure`, `halt_forever` y `qemu_exit`.
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
