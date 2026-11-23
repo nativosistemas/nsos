@@ -52,8 +52,9 @@ La sección "Verificación formal" responde:
 
 * Un PR por hito o por cambio coherente, con tests y documentación.
 * `make lint` (formato, clippy, auditoría de `unsafe`), `make test`,
-  `make smoke`, `make smoke-arm` y `make verify` tienen que pasar. Los que tocan `kcore`,
-  `abi`, `link`, `store` o `contract` corren también `make kani`.
+  `make smoke` y `make smoke-arm` tienen que pasar. Los que tocan el modelo en
+  Lean corren también `make verify`. Los que tocan `kcore`, `abi`, `link`,
+  `store` o `contract` corren también `make kani`.
 * `unsafe` solo en el kernel y en `cells/rt`, siempre con un comentario
   `SAFETY:` y registrado en `docs/unsafe.md`. `abi`, `kcore`, `link`,
   `store` y `contract` tienen `forbid(unsafe_code)`; las cells, `deny(unsafe_code)`.

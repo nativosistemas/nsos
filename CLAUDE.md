@@ -14,7 +14,8 @@ Leé y seguí [`CONTRIBUTING.md`](CONTRIBUTING.md). Lo esencial:
 * Si cambia lo que se garantiza o aparece un hueco, actualizá
   `docs/amenazas.md`. Todo `unsafe` nuevo va en `docs/unsafe.md`.
 * Antes de abrir el PR: `make lint`, `make test`, `make smoke`,
-  `make smoke-arm` y, si tocaste el modelo, `make verify` (compila el
-  modelo en Lean, regenera la traza del modelo y corre el test
-  `model_traces`).
+  `make smoke-arm`. Si tocaste el modelo en Lean, también `make verify`
+  (compila el modelo, regenera la traza del modelo y corre el test
+  `model_traces`). Si tocaste `crates/kcore`, `abi`, `link`, `store` o
+  `contract`, también `make kani`.
 * Español en documentación y mensajes; identificadores en inglés.
