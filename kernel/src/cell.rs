@@ -733,17 +733,9 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
 }
 
 impl Cell {
-    /// Mapea `obj` en `vaddr` con los permisos pedidos (W^X).
-    pub fn map_memory(
-        &self,
-        obj: Arc<MemObj>,
-        vaddr: u64,
-        write: bool,
-        exec: bool,
-    ) -> Result<(), Error> {
-        if write && exec {
-            return Err(Error::InvalidArgs);
-        }
+    /// Mapea `obj` en `vaddr`, de solo lectura o escribible y nunca
+    /// ejecutable.
+    pub fn map_memory(&self, obj: Arc<MemObj>, vaddr: u64, write: bool) -> Result<(), Error> {
         // Solo la mitad baja: demostrado con Kani en `nsos_kcore::paging`.
         if !nsos_kcore::paging::user_range_ok(vaddr, obj.size(), elf::USER_MIN, elf::USER_MAX) {
             return Err(Error::InvalidArgs);
@@ -756,12 +748,12 @@ impl Cell {
                 return Err(Error::InvalidArgs);
             }
         }
-        let mut f = flags::USER;
+        // Nunca ejecutable: una cell solo ejecuta el código de su imagen
+        // (`Mem.step_sealed`). Así W^X vale por objeto, no solo por mapeo:
+        // el mismo objeto puede estar mapeado escribible en otro lado.
+        let mut f = flags::USER | flags::NO_EXECUTE;
         if write {
             f |= flags::WRITABLE;
-        }
-        if !exec {
-            f |= flags::NO_EXECUTE;
         }
         let mut alloc = pmm::alloc_frame;
         for i in 0..obj.pages as u64 {
@@ -776,12 +768,7 @@ impl Cell {
                 .map_err(|_| Error::NoMemory)?;
         }
         drop(g);
-        self.mappings.lock().push(Mapping {
-            obj,
-            vaddr,
-            write,
-            exec,
-        });
+        self.mappings.lock().push(Mapping { obj, vaddr, write });
         Ok(())
     }
 
@@ -852,7 +839,6 @@ struct Mapping {
     obj: Arc<MemObj>,
     vaddr: u64,
     write: bool,
-    exec: bool,
 }
 
 impl Mapping {
@@ -861,9 +847,6 @@ impl Mapping {
         let mut need = Rights::READ;
         if self.write {
             need = need | Rights::WRITE;
-        }
-        if self.exec {
-            need = need | Rights::EXEC;
         }
         matches!(&c.object, KObject::Memory(m) if Arc::ptr_eq(m, &self.obj))
             && c.rights.contains(need)

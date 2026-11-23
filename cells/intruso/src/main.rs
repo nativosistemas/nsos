@@ -52,6 +52,7 @@ fn abuse_objects() -> bool {
     let (m, ch) = (mem.0 as u64, a.0 as u64);
     let rw = (Rights::READ | Rights::WRITE).bits() as u64;
     let rwx = (Rights::READ | Rights::WRITE | Rights::EXEC).bits() as u64;
+    let rx = (Rights::READ | Rights::EXEC).bits() as u64;
     let mut ok = true;
     // Memoria.
     ok &= expect(
@@ -80,9 +81,14 @@ fn abuse_objects() -> bool {
         Error::InvalidArgs,
     );
     ok &= expect(
-        "mem_map W+X (y sin derecho EXEC)",
+        "mem_map W+X",
         s4(MemMap, m, FREE, rwx, 0),
-        Error::AccessDenied,
+        Error::InvalidArgs,
+    );
+    ok &= expect(
+        "mem_map ejecutable (cells selladas)",
+        s4(MemMap, m, FREE, rx, 0),
+        Error::InvalidArgs,
     );
     ok &= expect(
         "mem_map desalineado",

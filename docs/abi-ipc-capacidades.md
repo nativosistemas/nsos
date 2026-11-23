@@ -27,7 +27,7 @@ Si ambos divergen, es un bug.
 | Tipo (`ObjectType`) | Qué representa | Derechos válidos |
 |---|---|---|
 | `Channel` (1) | Un extremo de un canal bidireccional | `SEND RECV` |
-| `Memory` (2) | Conjunto de marcos físicos mapeable | `READ WRITE EXEC CONTROL` (`CONTROL`: conocer la dirección física, para DMA) |
+| `Memory` (2) | Conjunto de marcos físicos mapeable | `READ WRITE CONTROL` (`CONTROL`: conocer la dirección física, para DMA; nunca `EXEC`) |
 | `Cell` (3) | Control de una cell hija | `CONTROL` |
 | `Irq` (4) | Línea de interrupción para un driver | `CONTROL` |
 | `IoPorts` (5) | Rango de puertos x86 para un driver | `READ WRITE` |
@@ -68,7 +68,7 @@ Cada cell tiene un **CSpace**: una tabla de slots, cada uno con
 | 1 | `RECV` | recibir del canal |
 | 2 | `READ` | mapear lectura / leer puertos |
 | 3 | `WRITE` | mapear escritura / escribir puertos |
-| 4 | `EXEC` | mapear ejecutable / instanciar imagen |
+| 4 | `EXEC` | instanciar imagen (no vale para memoria) |
 | 5 | `GRANT` | transferir la capacidad por IPC |
 | 6 | `DUPLICATE` | derivar una copia atenuada |
 | 7 | `CONTROL` | matar/actualizar cell, ack de IRQ |
@@ -76,8 +76,15 @@ Cada cell tiene un **CSpace**: una tabla de slots, cada uno con
 
 **Regla de monotonía:** los derechos solo se reducen. `cap_dup(h, mask)`
 produce `derechos(h) ∩ mask` y exige `DUPLICATE`. No existe operación que
-agregue bits. Además `mem_map` nunca mapea una página como `WRITE` y `EXEC`
-a la vez (W^X).
+agregue bits.
+
+**Cells selladas:** una cell solo ejecuta el código de su imagen. `EXEC` vale
+para un objeto `Image` (`cell_spawn`), no para un objeto `Memory`: ninguna
+capacidad de memoria lo tiene y `mem_map` rechaza pedirlo (`InvalidArgs`),
+así que todo objeto de memoria se mapea sin permiso de ejecución. Como el
+mismo objeto puede estar mapeado escribible en otra dirección o en otra
+cell, W^X por mapeo no alcanzaría: hace falta que la memoria compartible no
+se ejecute nunca. Modelo: `Mem.step_sealed` (`verification/lean/Nsos/Memory.lean`).
 
 ### 3.2 Revocación
 
@@ -388,7 +395,9 @@ Modelo y demostraciones: [`Nsos/Irq.lean`](../verification/lean/Nsos/Irq.lean)
 
 * `mem_map(h, vaddr, rights)`: mapea el objeto entero en `vaddr` (alineada a
   página, en el rango de usuario, sin pisar otro mapeo). Exige `READ` en la
-  capacidad y los derechos pedidos; W^X se aplica también aquí. El mapeo
+  capacidad y los derechos pedidos, que son `READ` o `READ | WRITE`: pedir
+  `EXEC` (o cualquier otro bit) es `InvalidArgs`, y el mapeo es siempre sin
+  permiso de ejecución (cells selladas, ver §3.1). El mapeo
   dura mientras la cell tenga una capacidad al objeto con esos derechos: si
   la envía, la pasa a una cell hija o la suelta, el kernel lo quita
   (revocación, demostrada en `Mem.step_iso`).

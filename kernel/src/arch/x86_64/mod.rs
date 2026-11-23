@@ -19,6 +19,8 @@ pub use syscall::set_kernel_stack;
 
 /// Código de excepción de un fallo de página (`ExitStatus::Faulted`).
 pub const FAULT_PAGE: u64 = 14;
+/// Código de excepción de ejecutar una página sin permiso (NX): también #PF.
+pub const FAULT_EXEC: u64 = 14;
 
 /// Dispositivos que hay que mapear después de `mm::init`: el IOAPIC (COM1
 /// es un puerto de E/S y el APIC local lo mapea `time::init`).

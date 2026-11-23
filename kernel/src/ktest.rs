@@ -672,6 +672,17 @@ pub fn run_cells() -> bool {
         ),
     );
     check(
+        "sellada: memoria nunca ejecutable y fallo al saltar a datos escritos",
+        matches!(
+            status("sellada"),
+            Some(Faulted {
+                vector: crate::arch::FAULT_EXEC,
+                rip: 0x5a00_0000,
+                addr: 0x5a00_0000,
+            })
+        ),
+    );
+    check(
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),
     );

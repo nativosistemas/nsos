@@ -366,6 +366,28 @@ un tipo por estado, y se comprueba al compilar.
   exigen. `intruso` suma 3 abusos y `ping` le manda a `pong` un canal de
   otro contrato.
 
+## Cells selladas (hecho)
+
+Como los SIPs de Singularity, una cell solo ejecuta el código de su imagen
+ELF: no genera código ni toca el de otra cell. Antes se cumplía de hecho
+(ninguna capacidad de memoria tenía `EXEC`), pero nada lo garantizaba y
+`mem_map` controlaba W^X por mapeo, no por objeto: con un solo cambio de
+derechos, el mismo objeto podía quedar RW y RX a la vez.
+
+* Modelo primero: `Mem.step_sealed`, `Mem.exec_is_own_code`,
+  `Mem.code_never_writable` y el contraejemplo `Mem.exec_obj_breaks`
+  (`Nsos/Memory.lean`; 3 mutaciones lo rompen).
+* `EXEC` deja de ser un derecho de `Memory` y `mem_map` lo rechaza
+  (`kcore::paging::map_request`, Kani `map_request_never_exec`); todo
+  objeto se mapea NX.
+* Prueba negativa en QEMU (x86_64 y ARM64): la cell `sellada` escribe un
+  `ret` en su memoria y salta ahí; el kernel la termina por #PF o
+  instruction abort en esa dirección. Con la mutación de mapear la memoria
+  sin NX, la cell ejecuta el `ret`, vuelve y ktest falla.
+* Si algún día hace falta un JIT, tiene que ser un derecho nuevo y explícito,
+  con W^X por objeto (nunca mapeado escribible en ningún lado mientras sea
+  ejecutable) y su propio modelo.
+
 ## ARM64 (en curso)
 
 * Paso 1 (hecho): QEMU `virt` aarch64. Kernel en EL1 y cells en EL0 con la

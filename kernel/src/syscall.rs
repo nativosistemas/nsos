@@ -257,8 +257,6 @@ fn endpoint(cell: &Cell, h: CapHandle, need: Rights) -> SysResult<Arc<cell::Endp
     }
 }
 
-/// `mem_map(h, vaddr, rights)`: los derechos pedidos deben estar en la
-/// capacidad; siempre hace falta READ; nunca WRITE y EXEC juntos.
 /// Tope de `mem_create` (los objetos son contiguos).
 const MEM_CREATE_MAX: u64 = 1 << 20;
 
@@ -278,26 +276,20 @@ fn mem_create(cell: &Cell, size: u64, fl: u64) -> SysResult<u64> {
     Ok(h.0 as u64)
 }
 
+/// `mem_map(h, vaddr, rights)`: los derechos pedidos deben estar en la
+/// capacidad; siempre hace falta READ; nunca EXEC (el mapeo es siempre NX).
 fn mem_map(cell: &Cell, h: CapHandle, vaddr: u64, want: u64) -> SysResult<u64> {
-    let want = Rights::from_bits(want as u32).ok_or(Error::InvalidArgs)?;
-    if !want.contains(Rights::READ)
-        || want.bits() & !(Rights::READ | Rights::WRITE | Rights::EXEC).bits() != 0
-    {
-        return Err(Error::InvalidArgs);
-    }
-    let obj = match cell.cspace.lock().get_with(h, want)? {
+    // Solo READ o READ | WRITE: `EXEC` se rechaza (cells selladas; Kani:
+    // `map_request_never_exec`, modelo: `Mem.step_sealed`).
+    let req = nsos_kcore::paging::map_request(want).ok_or(Error::InvalidArgs)?;
+    let obj = match cell.cspace.lock().get_with(h, req.need)? {
         Cap {
             object: KObject::Memory(m),
             ..
         } => m.clone(),
         _ => return Err(Error::WrongType),
     };
-    cell.map_memory(
-        obj,
-        vaddr,
-        want.contains(Rights::WRITE),
-        want.contains(Rights::EXEC),
-    )?;
+    cell.map_memory(obj, vaddr, req.write)?;
     Ok(vaddr)
 }
 

@@ -40,7 +40,10 @@ en cells.
 
 Una *cell* es el equivalente a un SIP de Singularity: un proceso aislado,
 compilado AOT a código nativo Rust, sin memoria compartida y que solo se
-comunica por canales. Usa `no_std` + `alloc` y un runtime pequeño con executor
+comunica por canales. Como los SIPs, está **sellada**: solo ejecuta el
+código de su imagen ELF. Ninguna memoria que pueda escribir o compartir se
+mapea ejecutable, así que no genera código ni toca el de otra cell
+(`Mem.step_sealed`). Usa `no_std` + `alloc` y un runtime pequeño con executor
 async sobre la syscall `wait`.
 
 ## Aislamiento en dos capas

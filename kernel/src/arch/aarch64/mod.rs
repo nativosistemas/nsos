@@ -14,7 +14,7 @@ pub mod trap;
 use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-pub use trap::{initial_frame, TrapFrame, FAULT_PAGE};
+pub use trap::{initial_frame, TrapFrame, FAULT_EXEC, FAULT_PAGE};
 
 // Punto de entrada (ver `ENTRY` en el linker script): el kernel corre con
 // `SP_EL1` (`SPSel` = 1) sobre la pila que dejó Limine.
