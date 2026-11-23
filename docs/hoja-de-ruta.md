@@ -352,8 +352,19 @@ un tipo por estado, y se comprueba al compilar.
   `counter`, `handover` y `restore`; el estado viaja a la versión nueva
   como `Mem<RO>`. Modelo: `UpgradeContract.lean` demuestra que cada paso
   de `Upgrade.lean` es un paso de los contratos (8 mutaciones lo rompen).
-* Etapa 3: almacén. Etapa 4: drivers y enlace. Etapa 5 (opcional):
-  `contract_id` en el kernel.
+* Etapa 3 (hecha): almacén con `store_root`, `store_obj` y
+  `store_share`; el búfer vuelve en toda respuesta por tipo. Modelo:
+  `StoreContract.lean`. Las etiquetas pasaron a exigirse distintas por
+  estado.
+* Etapa 4 (hecha): drivers y enlace con `console`, `block` y el flujo
+  `net` (forma `stream` de la macro, `try_send`); el modelo de flujos
+  mostró un bloqueo mutuo posible entre `virtnet` y `enlace`, que se
+  corrigió. Modelo: `MigrationContract.lean`.
+* Etapa 5 (hecha): el kernel guarda el contrato de cada canal
+  (`channel_create(out, contrato)`, `channel_contract`) y no lo deja
+  cambiar (`ContractId.lean`, 2 mutaciones); `open` y `Endpoint` lo
+  exigen. `intruso` suma 3 abusos y `ping` le manda a `pong` un canal de
+  otro contrato.
 
 ## ARM64 (en curso)
 

@@ -201,6 +201,7 @@ name = "nsos-contract"
 version = "0.1.0"
 dependencies = [
  "nsos-abi",
+ "nsos-store",
 ]
 
 [[package]]
@@ -216,6 +217,7 @@ version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
  "nsos-abi",
+ "nsos-contract",
  "nsos-kcore",
  "nsos-link",
 ]

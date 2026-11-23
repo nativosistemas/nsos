@@ -85,7 +85,12 @@ rechaza.
   ella se lee, pero escribir se rechaza, y copiarla de nuevo da otra de solo
   lectura.
 
-Protocolo completo: `crates/store/src/proto.rs`.
+Protocolo completo: `crates/store/src/proto.rs`. Las cells lo hablan con
+los contratos tipados `store_root` (por la raíz) y `store_obj` (por cada
+handle) de `nsos_contract::protocols` (ver [`contratos.md`](contratos.md)):
+`Open` no tiene campo de dueño, el handle viaja como
+`Endpoint<store_obj::client::Idle>` y el búfer de `READ` y `WRITE` es un
+`Mem<RW>` que **toda** respuesta devuelve, también la de error.
 
 ## Verificación formal
 
@@ -103,6 +108,11 @@ Modelo en `verification/lean/Nsos/Store.lean`, escrito antes que el código:
 * Ejemplos con `decide` de por qué hace falta cada regla
   (`overwrite_breaks`, `same_slot_breaks`, `same_seq_loses`,
   `stale_resurrects`).
+* `StoreContract.exec_follows`, `rejected_follows`: cada pedido del modelo
+  (abrir, copiar de solo lectura, escribir) es un intercambio completo de
+  su contrato, y los rechazos tienen su respuesta de error.
+  `buffer_states_reply_only`: lo que se pidió con un búfer solo se
+  contesta con mensajes que lo devuelven.
 
 En el código: los tests de `crates/store` prueban **todas** las
 combinaciones de escrituras hechas, no hechas o rotas (sector a sector) de

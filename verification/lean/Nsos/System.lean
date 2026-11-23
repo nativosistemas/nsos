@@ -90,12 +90,16 @@ structure Sys where
   nextMsg : Nat
   /-- Qué fue de cada mensaje. -/
   fate : Nat → Fate
+  /-- Contrato declarado de cada par al crearlo (`channel_create(out,
+  contrato)`; 0 = sin contrato). Lo comparten los dos extremos y ninguna
+  syscall lo cambia (`Sys.step_contract_fixed`). -/
+  contract : Nat → Nat
 
 /-- Syscalls modeladas. Los handles y máscaras son los valores crudos del ABI. -/
 inductive Op where
   | dup (h mask : Nat)
   | drop (h : Nat)
-  | create
+  | create (cid : Nat)
   | send (h label : Nat) (hs : List Nat)
   | recv (h : Nat)
   /-- Tras un `recv` con `WouldBlock`: bloquearse si sigue sin haber nada. -/
@@ -216,7 +220,7 @@ def exec' (s : Sys) (a : Nat) : Op → Except Err (Sys × List Nat)
       match cs.remove h with
       | .error e => .error e
       | .ok (cs', _) => .ok (s.setCell a cs', [])
-  | .create =>
+  | .create cid =>
     match s.cellAt a with
     | .error e => .error e
     | .ok cs =>
@@ -225,7 +229,9 @@ def exec' (s : Sys) (a : Nat) : Op → Except Err (Sys × List Nat)
       match cs.insertAll [⟨e0, ENDPOINT_RIGHTS⟩, ⟨e1, ENDPOINT_RIGHTS⟩] with
       | .error e => .error e
       | .ok (cs', hs) =>
-        .ok ({ s.setCell a cs' with nextPair := s.nextPair + 1 }, hs)
+        .ok ({ s.setCell a cs' with
+                nextPair := s.nextPair + 1
+                contract := fun p => if p = s.nextPair then cid else s.contract p }, hs)
   | .send h label hs =>
     if !validCaps hs then .error .badMessage else
     match s.cellAt a with

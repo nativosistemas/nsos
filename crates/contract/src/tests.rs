@@ -9,10 +9,10 @@ use std::vec::Vec;
 use nsos_abi::cap::CapInfo;
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::{counter, echo, handover, note, restore};
+use crate::protocols::{block, counter, echo, handover, net, note, restore, store_obj, store_root};
 use crate::{
-    check, labels_distinct, Bytes, Chan, CheckError, Dir, Mem, Msg, RecvError, Transition,
-    Transport, RO, RW,
+    check, labels_distinct_per_state, Bytes, Chan, CheckError, Dir, Mem, Msg, RecvError,
+    Transition, Transport, TrySendError, RO, RW,
 };
 
 /// Un objeto del kernel simulado.
@@ -35,6 +35,8 @@ struct Kernel {
     caps: BTreeMap<u32, (Obj, Rights)>,
     next: u32,
     queues: Vec<VecDeque<Queued>>,
+    /// Contrato de cada par (el par `e / 2`).
+    contracts: Vec<u64>,
 }
 
 impl Kernel {
@@ -72,6 +74,10 @@ impl Transport for Sim<'_> {
         if !k.endpoint_alive(e ^ 1) {
             return Err(Error::PeerClosed);
         }
+        if k.queues[e ^ 1].len() >= crate::QUEUE_CAP as usize {
+            // Un solo hilo: bloquear sería colgarse.
+            return Err(Error::WouldBlock);
+        }
         let mut moved = Vec::new();
         for c in m.cap_slice() {
             moved.push(*k.caps.get(&c.0).ok_or(Error::BadHandle)?);
@@ -81,6 +87,10 @@ impl Transport for Sim<'_> {
         }
         k.queues[e ^ 1].push_back((*m, moved));
         Ok(())
+    }
+
+    fn try_send(self, h: CapHandle, m: &Message) -> Result<(), Error> {
+        self.send(h, m)
     }
 
     fn recv(self, h: CapHandle, m: &mut Message, nonblock: bool) -> Result<(), Error> {
@@ -123,12 +133,21 @@ impl Transport for Sim<'_> {
         self.0.borrow_mut().caps.remove(&h.0);
     }
 
-    fn channel_create(self) -> Result<(CapHandle, CapHandle), Error> {
+    fn channel_create(self, contract: u64) -> Result<(CapHandle, CapHandle), Error> {
         let mut k = self.0.borrow_mut();
         let e = k.queues.len();
         k.queues.push(VecDeque::new());
         k.queues.push(VecDeque::new());
+        k.contracts.push(contract);
         Ok((k.insert(Obj::End(e), ALL), k.insert(Obj::End(e + 1), ALL)))
+    }
+
+    fn channel_contract(self, h: CapHandle) -> Result<u64, Error> {
+        let k = self.0.borrow();
+        match k.caps.get(&h.0).ok_or(Error::BadHandle)? {
+            (Obj::End(e), _) => Ok(k.contracts[e / 2]),
+            _ => Err(Error::WrongType),
+        }
     }
 
     fn cap_dup(self, h: CapHandle, mask: Rights) -> Result<CapHandle, Error> {
@@ -194,7 +213,7 @@ fn wire_format_is_the_raw_one() {
     // Una cell sin contrato (como `bench`) habla el mismo protocolo.
     let k = RefCell::new(Kernel::default());
     let t = Sim(&k);
-    let (a, b) = t.channel_create().unwrap();
+    let (a, b) = t.channel_create(echo::ID).unwrap();
     let s: Chan<_, echo::server::Ready> = Chan::open(t, b).unwrap();
     raw(t, a, 1, b"x", &[]);
     let s = match s.recv().unwrap() {
@@ -242,7 +261,7 @@ fn endpoint_moves() {
 fn violations_are_dropped_and_state_kept() {
     let k = RefCell::new(Kernel::default());
     let t = Sim(&k);
-    let (a, b) = t.channel_create().unwrap();
+    let (a, b) = t.channel_create(echo::ID).unwrap();
     let mut s: Chan<_, echo::server::Ready> = Chan::open(t, b).unwrap();
 
     // 1. Una etiqueta del contrato pero de la otra dirección.
@@ -250,7 +269,7 @@ fn violations_are_dropped_and_state_kept() {
     // 2. Una etiqueta desconocida.
     raw(t, a, 777, b"", &[]);
     // 3. `Echo` con una capacidad de más: tiene que soltarla.
-    let (x, y) = t.channel_create().unwrap();
+    let (x, y) = t.channel_create(0).unwrap();
     raw(t, a, 1, b"con cap", &[y]);
     // 4. `NewChannel` con una capacidad que no es un canal.
     let mem = k.borrow_mut().insert(Obj::Mem, ALL);
@@ -317,7 +336,7 @@ fn open_checks_the_type() {
         Chan::<_, echo::server::Ready>::open(t, mem).unwrap_err(),
         Error::WrongType
     );
-    let (a, _b) = t.channel_create().unwrap();
+    let (a, _b) = t.channel_create(echo::ID).unwrap();
     k.borrow_mut().caps.get_mut(&a.0).unwrap().1 = Rights::RECV;
     assert!(Chan::<_, echo::server::Ready>::open(t, a).is_err());
 }
@@ -370,8 +389,15 @@ fn check_rejects_what_the_model_rejects() {
     let three = [tr(0, true, 1, 1), tr(1, true, 2, 2), tr(2, true, 3, 3)];
     assert_eq!(check(&three), Ok(3));
     assert_eq!(check(&[tr(64, true, 1, 0)]), Err(CheckError::TooManyStates));
-    assert!(labels_distinct(&[1, 2, 3]));
-    assert!(!labels_distinct(&[1, 2, 1]));
+    // La misma etiqueta en dos estados, sí; en el mismo, no.
+    assert!(labels_distinct_per_state(&[
+        tr(0, true, 1, 1),
+        tr(1, false, 1, 0)
+    ]));
+    assert!(!labels_distinct_per_state(&[
+        tr(0, true, 1, 1),
+        tr(0, true, 1, 2)
+    ]));
 }
 
 fn mem(k: &RefCell<Kernel>, r: Rights) -> CapHandle {
@@ -398,7 +424,7 @@ fn read_only_is_read_only() {
         Error::WrongType
     );
     // Un canal no es memoria.
-    let (a, _b) = t.channel_create().unwrap();
+    let (a, _b) = t.channel_create(0).unwrap();
     assert!(Mem::<RO>::open(t, a).is_err());
 }
 
@@ -408,7 +434,7 @@ fn restore_rejects_a_writable_state() {
     // escribible: la versión nueva lo descarta sin quedarse con nada.
     let k = RefCell::new(Kernel::default());
     let t = Sim(&k);
-    let (sup, new) = t.channel_create().unwrap();
+    let (sup, new) = t.channel_create(restore::ID).unwrap();
     let new: Chan<_, restore::server::Start> = Chan::open(t, new).unwrap();
     let state = mem(&k, ALL);
     let (_c, s) = counter::pair(t).unwrap();
@@ -531,7 +557,7 @@ fn upgrade_reject_then_accept() {
 fn call_is_send_then_recv() {
     let k = RefCell::new(Kernel::default());
     let t = Sim(&k);
-    let (cli, srv) = t.channel_create().unwrap();
+    let (cli, srv) = t.channel_create(counter::ID).unwrap();
     let cli: Chan<_, counter::client::Serving> = Chan::open(t, cli).unwrap();
     // La respuesta ya está en la cola (ver `Sim::call`).
     let mut d = [0u8; 12];
@@ -544,4 +570,203 @@ fn call_is_send_then_recv() {
     let mut m = Message::default();
     t.recv(srv, &mut m, true).unwrap();
     assert_eq!(m.header.label, 1);
+}
+
+/// El formato en el cable es el de `nsos_store::proto`: `OPENED` es
+/// `[versión u64 | largo u32 | escribe u8]` con el handle adjunto.
+#[test]
+fn store_wire_format() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = t.channel_create(store_root::ID).unwrap();
+    let cli: Chan<_, store_root::client::Ready> = Chan::open(t, cli).unwrap();
+    let opening = cli
+        .send(store_root::Open {
+            flags: 1,
+            name: Bytes::new(b"contador").unwrap(),
+        })
+        .unwrap();
+    let mut m = Message::default();
+    t.recv(srv, &mut m, true).unwrap();
+    assert_eq!((m.header.label, m.payload()), (10, &b"\x01contador"[..]));
+    // El almacén contesta a mano, como hoy.
+    let (_mine, theirs) = t.channel_create(store_obj::ID).unwrap();
+    let mut p = [0u8; 13];
+    p[..8].copy_from_slice(&3u64.to_le_bytes());
+    p[8..12].copy_from_slice(&16u32.to_le_bytes());
+    p[12] = 1;
+    raw(t, srv, 11, &p, &[theirs]);
+    let store_root::client::recv::Opening::Opened(_ready, o) = opening.recv().unwrap() else {
+        panic!("esperaba Opened");
+    };
+    assert_eq!((o.version, o.len, o.write), (3, 16, true));
+    let h: Chan<_, store_obj::client::Idle> = Chan::attach(t, o.handle);
+    drop(h);
+}
+
+/// Un pedido con búfer: el error lo devuelve; una respuesta sin búfer no es
+/// del contrato y el cliente sigue esperando en `Reading`.
+#[test]
+fn store_buffer_always_comes_back() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = t.channel_create(store_obj::ID).unwrap();
+    let cli: Chan<_, store_obj::client::Idle> = Chan::open(t, cli).unwrap();
+    let buf: Mem<RW> = Mem::open(t, mem(&k, ALL)).unwrap();
+    let reading = cli.send(store_obj::Read { buf }).unwrap();
+    let mut m = Message::default();
+    t.recv(srv, &mut m, true).unwrap();
+    let back = m.caps[0];
+    // Un error sin el búfer: violación (el cliente no lo pierde de vista).
+    raw(t, srv, 99, &[0; 12], &[]);
+    let Err(RecvError::Violation { chan: reading, .. }) = reading.recv() else {
+        panic!("esperaba una violación");
+    };
+    // El error con el búfer: `FailMem`.
+    raw(t, srv, 99, &[0; 12], &[back]);
+    let store_obj::client::recv::Reading::FailMem(_idle, f) = reading.recv().unwrap() else {
+        panic!("esperaba FailMem");
+    };
+    assert!(Mem::<RW>::open(t, f.buf.handle()).is_ok());
+}
+
+/// Un flujo: las dos puntas mandan sin cambiar de estado, y los mensajes
+/// cruzados llegan bien.
+#[test]
+fn net_stream_both_ways() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, srv) = net::pair(t).unwrap();
+    // Los dos mandan a la vez.
+    let cli = cli
+        .send(net::Send {
+            packet: Bytes::new(b"a").unwrap(),
+        })
+        .unwrap();
+    let srv = srv
+        .send(net::Recv {
+            packet: Bytes::new(b"b").unwrap(),
+        })
+        .unwrap();
+    let net::server::recv::Open::Send(_srv, p) = srv.recv().unwrap();
+    assert_eq!(p.packet.as_slice(), b"a");
+    let net::client::recv::Open::Recv(_cli, p) = cli.recv().unwrap();
+    assert_eq!(p.packet.as_slice(), b"b");
+}
+
+/// Con la cola llena, `try_send` descarta y devuelve el canal: la punta que
+/// entrega nunca queda bloqueada esperando a la otra.
+#[test]
+fn net_try_send_drops_when_full() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, mut srv) = net::pair(t).unwrap();
+    let mut dropped = 0;
+    for i in 0..100u8 {
+        srv = match srv.try_send(net::Recv {
+            packet: Bytes::new(&[i]).unwrap(),
+        }) {
+            Ok(s) => s,
+            Err(TrySendError::Full(s)) => {
+                dropped += 1;
+                s
+            }
+            Err(TrySendError::Failed(e)) => panic!("{e:?}"),
+        };
+    }
+    assert_eq!(dropped, 100 - crate::QUEUE_CAP);
+    // Llegan los primeros 64, en orden.
+    let net::client::recv::Open::Recv(_c, p) = cli.recv().unwrap();
+    assert_eq!(p.packet.as_slice(), &[0]);
+    drop(srv);
+}
+
+/// El formato en el cable de `block` es el de `virtblk`: `Info` y su
+/// respuesta comparten la etiqueta 1, y `Geometry` es
+/// `[sectores u64 | flush u8 | búfer en sectores u32]`.
+#[test]
+fn block_wire_format() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (cli, drv) = t.channel_create(block::ID).unwrap();
+    let cli: Chan<_, block::client::Ready> = Chan::open(t, cli).unwrap();
+    let asking = cli.send(block::Info {}).unwrap();
+    let mut m = Message::default();
+    t.recv(drv, &mut m, true).unwrap();
+    assert_eq!((m.header.label, m.payload().len()), (1, 0));
+    let mut p = [0u8; 13];
+    p[..8].copy_from_slice(&2048u64.to_le_bytes());
+    p[8] = 1;
+    p[9..].copy_from_slice(&8u32.to_le_bytes());
+    raw(t, drv, 1, &p, &[]);
+    let block::client::recv::Asking::Geometry(ready, g) = asking.recv().unwrap();
+    assert_eq!((g.sectors, g.flush, g.buf_sectors), (2048, true, 8));
+    let busy = ready
+        .send(block::Read {
+            sector: 7,
+            count: 8,
+        })
+        .unwrap();
+    t.recv(drv, &mut m, true).unwrap();
+    assert_eq!(m.payload(), &[7, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0]);
+    raw(t, drv, 4, &[0], &[]);
+    let block::client::recv::Busy::Done(_r, d) = busy.recv().unwrap();
+    assert_eq!(d.status, 0);
+}
+
+/// `open` exige el contrato con que se creó el canal: uno de otro protocolo
+/// o sin contrato no sirve.
+#[test]
+fn open_checks_the_contract() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (_a, b) = t.channel_create(store_obj::ID).unwrap();
+    assert_eq!(
+        Chan::<_, echo::server::Ready>::open(t, b).unwrap_err(),
+        Error::WrongType
+    );
+    let (_a, b) = t.channel_create(0).unwrap();
+    assert!(Chan::<_, echo::server::Ready>::open(t, b).is_err());
+    let (_a, b) = t.channel_create(echo::ID).unwrap();
+    assert!(Chan::<_, echo::server::Ready>::open(t, b).is_ok());
+}
+
+/// Un extremo de otro protocolo (aquí, un handle del almacén) no pasa por
+/// uno de `note`: el decodificador lo descarta y suelta la capacidad.
+#[test]
+fn endpoint_of_another_protocol_is_rejected() {
+    let k = RefCell::new(Kernel::default());
+    let t = Sim(&k);
+    let (a, b) = t.channel_create(echo::ID).unwrap();
+    let s: Chan<_, echo::server::Ready> = Chan::open(t, b).unwrap();
+    let (_x, store_handle) = t.channel_create(store_obj::ID).unwrap();
+    raw(t, a, <echo::NewChannel as Msg>::LABEL, b"", &[store_handle]);
+    let Err(RecvError::Violation { chan, .. }) = s.recv() else {
+        panic!("esperaba una violación");
+    };
+    assert!(!k.borrow().endpoint_alive(3), "soltó el handle ajeno");
+    drop(chan);
+}
+
+#[test]
+fn contract_ids_are_distinct() {
+    let ids = [
+        echo::ID,
+        note::ID,
+        counter::ID,
+        handover::ID,
+        restore::ID,
+        store_root::ID,
+        store_obj::ID,
+        crate::protocols::store_share::ID,
+        crate::protocols::console::ID,
+        block::ID,
+        net::ID,
+    ];
+    for (i, a) in ids.iter().enumerate() {
+        assert!(*a != 0 && *a <= i64::MAX as u64, "{a:#x}");
+        for b in &ids[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
 }

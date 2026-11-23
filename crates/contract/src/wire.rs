@@ -193,7 +193,8 @@ impl<const N: usize> Field for Bytes<N> {
 }
 
 /// Un extremo de canal que viaja en el mensaje (se *mueve*: el emisor lo
-/// pierde). Al recibirlo se comprueba que sea un canal con `SEND` y `RECV`.
+/// pierde). Al recibirlo se comprueba que sea un canal con `SEND` y `RECV`
+/// creado para el contrato de `S`.
 impl<S: State> Field for Endpoint<S> {
     const DATA: usize = 0;
     const CAPS: usize = 1;
@@ -202,7 +203,7 @@ impl<S: State> Field for Endpoint<S> {
     }
     fn take<T: Transport>(r: &mut Reader<'_>, t: T) -> Option<Self> {
         let h = r.cap()?;
-        is_channel(t, h).then(|| Endpoint::from_raw(h))
+        is_channel(t, h, S::CONTRACT).then(|| Endpoint::from_raw(h))
     }
 }
 

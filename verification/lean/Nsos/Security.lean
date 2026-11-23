@@ -138,8 +138,8 @@ theorem spec_drop {s s' : Sys} {a h : Nat} {r : List Nat}
     exact .inl (same_cap ((CSpace.remove_caps hrm).2.2 c hc))
   · intro c hq; exact .inr hq
 
-theorem spec_create {s s' : Sys} {a : Nat} {r : List Nat}
-    (he : s.exec' a .create = .ok (s', r)) : Spec s s' a false := by
+theorem spec_create {s s' : Sys} {a : Nat} {r : List Nat} {cid : Nat}
+    (he : s.exec' a (.create cid) = .ok (s', r)) : Spec s s' a false := by
   simp only [exec'] at he
   split at he
   · cases he
@@ -252,7 +252,7 @@ theorem exec_spec {s s' : Sys} {a : Nat} {op : Op} {r : List Nat}
   cases op with
   | dup => exact spec_dup he
   | drop => exact spec_drop he
-  | create => exact spec_create he
+  | create _ => exact spec_create he
   | send => exact spec_send he
   | recv => exact spec_recv he
   | waitRecv h => exact spec_wait (.inl rfl) he

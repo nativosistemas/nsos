@@ -10,10 +10,14 @@
 //! 4. Canal con el cliente (la cell `enlace`).
 //! 5. `Irq` de su línea de interrupción, si el kernel la pudo entregar.
 //!
-//! Protocolo con el cliente: `SEND` con un paquete → el driver lo manda en
-//! una trama Ethernet de difusión con EtherType `nsos_link::ETHERTYPE`
-//! (precedido por su largo, porque Ethernet rellena las tramas cortas). Cada
-//! trama recibida con ese EtherType llega al cliente como `RECV`. El resto
+//! Protocolo con el cliente: el flujo `net` (`nsos_contract::protocols`).
+//! `Send` con un paquete → el driver lo manda en una trama Ethernet de
+//! difusión con EtherType `nsos_link::ETHERTYPE` (precedido por su largo,
+//! porque Ethernet rellena las tramas cortas). Cada trama recibida con ese
+//! EtherType llega al cliente como `Recv`, **sin bloquear**: si la cola del
+//! cliente está llena, la trama se descarta (como una placa con el anillo
+//! lleno). Así el driver nunca queda esperando al enlace mientras el enlace
+//! lo espera a él. El resto
 //! del tráfico se descarta. El driver no autentica nada: eso es trabajo del
 //! enlace, y el driver podría estar comprometido sin que el enlace acepte
 //! una trama falsa.
@@ -30,15 +34,13 @@
 
 use nsos_rt::abi::cap::signals;
 use nsos_rt::abi::msg::MAX_DATA;
-use nsos_rt::abi::syscall::flags::NONBLOCK;
-use nsos_rt::abi::{CapHandle, Error, Message, Rights};
+use nsos_rt::abi::{CapHandle, Error, Rights};
+use nsos_rt::contract::protocols::net;
+use nsos_rt::contract::{Bytes, Chan, RecvError, TrySendError};
 use nsos_rt::{
-    bootstrap, channel_recv, channel_send, fence, ioport_read, ioport_write, mem_info, mem_map,
-    println, wait, wait_item, yield_now, DevIrq, Mapped,
+    bootstrap, fence, ioport_read, ioport_write, mem_info, mem_map, println, wait, wait_item,
+    yield_now, DevIrq, Mapped, Sys,
 };
-
-const SEND: u64 = 1;
-const RECV: u64 = 2;
 const ETHERTYPE: u16 = 0x88B5;
 
 // Registros virtio legacy (desplazamientos desde BAR0).
@@ -326,27 +328,56 @@ fn empty_queue() -> Queue {
     }
 }
 
-fn run(dev: &mut Device, client: CapHandle) -> Result<(), Error> {
-    let mut m = Message::default();
+type Client = Chan<Sys, net::server::Open>;
+
+fn run(dev: &mut Device, client: Client) -> Result<(), Error> {
+    // `None` solo un instante, mientras se manda o se recibe.
+    let mut client = Some(client);
+    let mut dropped = 0u64;
     loop {
         let mut idle = true;
-        match channel_recv(client, &mut m, NONBLOCK) {
-            Ok(()) if m.header.label == SEND => {
-                dev.transmit(m.payload())?;
+        let c = client.take().ok_or(Error::PeerClosed)?;
+        client = Some(match c.try_recv() {
+            Ok(net::server::recv::Open::Send(c, p)) => {
+                dev.transmit(p.packet.as_slice())?;
                 idle = false;
+                c
             }
-            Ok(()) => println!("virtnet: etiqueta desconocida {}", m.header.label),
-            Err(Error::WouldBlock) => {}
-            Err(Error::PeerClosed) => return Ok(()),
-            Err(e) => return Err(e),
-        }
-        while dev.poll_rx(|p| channel_send(client, &Message::new(RECV, p)?, 0))? {
+            Err(RecvError::Violation { chan, label }) => {
+                println!("virtnet: mensaje fuera de protocolo {}", label);
+                chan
+            }
+            Err(RecvError::WouldBlock(c)) => c,
+            Err(RecvError::Failed(Error::PeerClosed)) => return Ok(()),
+            Err(RecvError::Failed(e)) => return Err(e),
+        });
+        // Lo que llega se entrega sin bloquear: `net` es un flujo, y si el
+        // enlace no lee (o alguien inunda la red), la trama se descarta como
+        // en una placa con el anillo lleno, en vez de quedar los dos
+        // bloqueados esperándose (`Contract.stream_unbounded`).
+        while dev.poll_rx(|p| {
+            let c = client.take().ok_or(Error::PeerClosed)?;
+            let packet = Bytes::new(p).ok_or(Error::InvalidArgs)?;
+            client = Some(match c.try_send(net::Recv { packet }) {
+                Ok(c) => c,
+                Err(TrySendError::Full(c)) => {
+                    dropped += 1;
+                    if dropped.is_power_of_two() {
+                        println!("virtnet: el enlace no lee; descarté {} tramas", dropped);
+                    }
+                    c
+                }
+                Err(TrySendError::Failed(e)) => return Err(e),
+            });
+            Ok(())
+        })? {
             idle = false;
         }
         if idle && dev.irq.present() {
             // Dormir hasta un pedido del cliente o una interrupción.
+            let h = client.as_ref().ok_or(Error::PeerClosed)?.handle();
             let mut items = [
-                wait_item(client, signals::READABLE | signals::PEER_CLOSED),
+                wait_item(h, signals::READABLE | signals::PEER_CLOSED),
                 dev.irq.item(),
             ];
             if wait(&mut items, IRQ_TIMEOUT_NS).is_ok()
@@ -364,7 +395,10 @@ fn run(dev: &mut Device, client: CapHandle) -> Result<(), Error> {
 nsos_rt::entry!(main);
 
 fn main() -> i32 {
-    let client = bootstrap(4);
+    let Ok(client) = Client::open(Sys, bootstrap(4)) else {
+        println!("virtnet: la capacidad del cliente no es un canal");
+        return 1;
+    };
     let irq = DevIrq::from_bootstrap(5);
     let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3), irq) {
         Ok(d) => d,

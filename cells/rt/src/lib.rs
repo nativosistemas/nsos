@@ -34,6 +34,10 @@ impl contract::Transport for Sys {
         channel_send(h, m, 0)
     }
 
+    fn try_send(self, h: CapHandle, m: &Message) -> SysResult<()> {
+        channel_send(h, m, abi::syscall::flags::NONBLOCK)
+    }
+
     fn recv(self, h: CapHandle, m: &mut Message, nonblock: bool) -> SysResult<()> {
         let flags = if nonblock {
             abi::syscall::flags::NONBLOCK
@@ -51,8 +55,12 @@ impl contract::Transport for Sys {
         let _ = cap_drop(h);
     }
 
-    fn channel_create(self) -> SysResult<(CapHandle, CapHandle)> {
-        channel_create()
+    fn channel_create(self, contract: u64) -> SysResult<(CapHandle, CapHandle)> {
+        channel_create_for(contract)
+    }
+
+    fn channel_contract(self, h: CapHandle) -> SysResult<u64> {
+        channel_contract(h)
     }
 
     fn cap_dup(self, h: CapHandle, mask: Rights) -> SysResult<CapHandle> {
@@ -87,17 +95,29 @@ pub fn exit(code: i32) -> ! {
     loop {}
 }
 
-/// Crea un canal y devuelve sus dos extremos.
+/// Crea un canal sin contrato y devuelve sus dos extremos.
 pub fn channel_create() -> SysResult<(CapHandle, CapHandle)> {
+    channel_create_for(0)
+}
+
+/// Crea un canal declarando el contrato `contract` (el `ID` que genera
+/// `contract!`; 0 = sin contrato). Los canales tipados se crean con `pair`
+/// de cada contrato, que lo usa.
+pub fn channel_create_for(contract: u64) -> SysResult<(CapHandle, CapHandle)> {
     let mut out = [CapHandle::INVALID; 2];
     decode_ret(syscall4(
         Syscall::ChannelCreate,
         out.as_mut_ptr() as u64,
-        0,
+        contract,
         0,
         0,
     ))?;
     Ok((out[0], out[1]))
+}
+
+/// El contrato que se declaró al crear el canal de `h` (0 = sin contrato).
+pub fn channel_contract(h: CapHandle) -> SysResult<u64> {
+    decode_ret(syscall4(Syscall::ChannelContract, h.0 as u64, 0, 0, 0))
 }
 
 /// Envía un mensaje. Las capacidades adjuntas se mueven al receptor.

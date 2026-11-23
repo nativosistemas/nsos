@@ -75,7 +75,14 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
             copy_to_user(cell, a1, &b)?;
             Ok(0)
         }
-        Syscall::ChannelCreate => channel_create(cell, a0),
+        Syscall::ChannelCreate => channel_create(cell, a0, a1),
+        Syscall::ChannelContract => {
+            let cs = cell.cspace.lock();
+            match &cs.get(h(a0))?.object {
+                KObject::Channel(e) => Ok(e.contract()),
+                _ => Err(Error::WrongType),
+            }
+        }
         Syscall::ChannelSend => channel_send(cell, h(a0), a1, a2),
         Syscall::ChannelRecv => channel_recv(cell, h(a0), a1, a2),
         Syscall::ChannelCall => channel_call(cell, h(a0), a1, a2),
@@ -106,9 +113,14 @@ fn debug_log(cell: &Cell, ptr: u64, len: u64) -> SysResult<u64> {
     Ok(0)
 }
 
-fn channel_create(cell: &Cell, out: u64) -> SysResult<u64> {
+fn channel_create(cell: &Cell, out: u64, contract: u64) -> SysResult<u64> {
+    // `channel_contract` lo devuelve como resultado de syscall, que es
+    // negativo si es un error: solo caben contratos menores que 2^63.
+    if contract > i64::MAX as u64 {
+        return Err(Error::InvalidArgs);
+    }
     copy_to_user(cell, out, &[0u8; 8])?; // validar antes de crear nada
-    let (a, b) = cell::channel_create();
+    let (a, b) = cell::channel_create(contract);
     let caps = vec![
         Cap {
             object: KObject::Channel(a),

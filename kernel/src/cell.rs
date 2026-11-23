@@ -331,6 +331,10 @@ fn wake_all(list: &mut Vec<ThreadId>) {
 /// Par de extremos conectados.
 pub struct ChannelPair {
     sides: IrqSpinLock<[Side; 2]>,
+    /// Contrato declarado al crearlo (0 = sin contrato). No cambia nunca: no
+    /// hay forma de escribirlo después de `channel_create`
+    /// (`Sys.step_contract_fixed` en `verification/lean/Nsos/ContractId.lean`).
+    contract: u64,
 }
 
 /// Un extremo de canal. Se cierra cuando muere su última capacidad.
@@ -346,10 +350,11 @@ pub const ENDPOINT_RIGHTS: Rights = Rights(
     Rights::SEND.0 | Rights::RECV.0 | Rights::GRANT.0 | Rights::DUPLICATE.0 | Rights::WAIT.0,
 );
 
-/// Crea un canal y devuelve sus dos extremos.
-pub fn channel_create() -> (Arc<Endpoint>, Arc<Endpoint>) {
+/// Crea un canal con el contrato `contract` y devuelve sus dos extremos.
+pub fn channel_create(contract: u64) -> (Arc<Endpoint>, Arc<Endpoint>) {
     let pair = Arc::new(ChannelPair {
         sides: IrqSpinLock::new(Default::default()),
+        contract,
     });
     (
         Arc::new(Endpoint {
@@ -368,6 +373,11 @@ pub fn channel_create() -> (Arc<Endpoint>, Arc<Endpoint>) {
 impl Endpoint {
     fn peer(&self) -> usize {
         1 - self.side
+    }
+
+    /// El contrato del canal (el mismo para los dos extremos).
+    pub fn contract(&self) -> u64 {
+        self.pair.contract
     }
 
     /// Envía un mensaje construido por `build` *bajo el lock del canal*:

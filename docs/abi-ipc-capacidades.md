@@ -101,13 +101,16 @@ implementación (hito 7): `debug_log`, `yield`, `exit`, `clock_monotonic`,
 `cap_dup`, `cap_drop`, `cap_info`, `channel_create`, `channel_send`,
 `channel_recv`, `mem_create`, `mem_map`, `mem_info`, `ioport_read`, `ioport_write`,
 `cell_spawn`, `cell_kill`, `cell_status`, (hito 12) `wait` e `irq_ack`, y
-(hito 13) `channel_call` y `mem_unmap`: todas las del ABI v1. Resumen:
+(hito 13) `channel_call` y `mem_unmap`: todas las del ABI v1. Después
+(contratos, etapa 5) `channel_contract`, y `channel_create` toma el contrato
+como segundo argumento; los dos cambios son compatibles con lo anterior.
+Resumen:
 
 | Rango | Subsistema | Llamadas |
 |---|---|---|
 | 0x | básicas | `debug_log`, `yield`, `exit`, `clock_monotonic` |
 | 1x | capacidades | `cap_dup`, `cap_drop`, `cap_info` |
-| 2x | canales | `channel_create`, `channel_send`, `channel_recv`, `channel_call` |
+| 2x | canales | `channel_create`, `channel_send`, `channel_recv`, `channel_call`, `channel_contract` |
 | 3x | espera | `wait` |
 | 4x | memoria | `mem_create`, `mem_map`, `mem_unmap`, `mem_info` |
 | 5x | cells | `cell_spawn`, `cell_kill`, `cell_status` |
@@ -205,6 +208,15 @@ de la cola). Una cell tipada no puede mandar fuera de protocolo, y lo que
 recibe fuera de protocolo lo descarta soltando sus capacidades. El formato
 en el cable es este mismo, así que una cell sin contrato puede hablar con
 una tipada. Ver [`contratos.md`](contratos.md).
+
+Cada canal guarda el **contrato** que declaró quien lo creó
+(`channel_create(out, contrato)`; 0 = sin contrato, menor que 2^63) y
+`channel_contract(h)` lo devuelve. Lo comparten los dos extremos y ninguna
+syscall lo cambia (`Sys.step_contract_fixed` en
+`verification/lean/Nsos/ContractId.lean`). Una cell tipada exige que un
+canal que abre o recibe tenga el contrato que espera: nadie puede hacer
+pasar un canal de un protocolo por otro. El número identifica, no
+autentica: quien crea el canal declara lo que quiere.
 
 ## 6. Espera y async
 

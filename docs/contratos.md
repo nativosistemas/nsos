@@ -1,10 +1,14 @@
 # Contratos de canal tipados
 
-Estado: **etapa 2** (crate `nsos-contract`, modelo en Lean, `ping`/`pong`
-y la actualización en vivo migrados). La fuente de verdad ejecutable es
+Estado: **etapa 5** (todos los protocolos entre cells del sistema
+migrados, salvo los ad hoc de las pruebas del supervisor, y el contrato de
+cada canal guardado en el kernel). La fuente de verdad ejecutable es
 [`crates/contract`](../crates/contract), y los modelos,
-[`verification/lean/Nsos/Contract.lean`](../verification/lean/Nsos/Contract.lean)
-y [`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean).
+[`Contract.lean`](../verification/lean/Nsos/Contract.lean),
+[`UpgradeContract.lean`](../verification/lean/Nsos/UpgradeContract.lean),
+[`StoreContract.lean`](../verification/lean/Nsos/StoreContract.lean),
+[`MigrationContract.lean`](../verification/lean/Nsos/MigrationContract.lean)
+y [`ContractId.lean`](../verification/lean/Nsos/ContractId.lean).
 
 ## Qué son
 
@@ -74,7 +78,7 @@ contrato. Si falla, el programa no compila:
 | En cada estado manda una sola punta | Si las dos pueden mandar a la vez, cada una recibe algo que no espera | `Contract.mixed_breaks` |
 | Una etiqueta lleva a un solo estado | Si no, las puntas quedan desfasadas | `Contract.nondet_breaks` |
 | Hay una cota `k` de mensajes seguidos de una misma punta, y `k ≤ 64` | Sin cota, la cola del kernel (64 mensajes) se llena | `Contract.loop_unbounded` |
-| Las etiquetas no se repiten | El decodificador no sabría qué mensaje es | — |
+| En un mismo estado, dos mensajes no comparten etiqueta | El decodificador elige el mensaje por la etiqueta en el estado actual. En estados distintos sí pueden (el error del almacén va con o sin búfer según el estado) | — |
 | Cada mensaje entra en un `Message` (224 bytes, 4 capacidades) | — | — |
 
 La sintaxis ya impide algunos errores: un estado en `client` y en `server` a
@@ -128,7 +132,8 @@ contrato no prevé.
   genera la macro sean las del modelo. La CI regenera la traza y falla si
   cambió.
 * Kani (`crates/contract/src/proofs.rs`): `decode_any`, `restore_decode_any`,
-  `roundtrip_echo`, `roundtrip_endpoint`, `check_any`.
+  `store_reading_decode_any`, `try_send_any`, `roundtrip_echo`,
+  `roundtrip_endpoint`, `check_any`.
 
 La macro numera los estados como el modelo: primero los estados `client`,
 después los `server` y al final los `end`, cada grupo en el orden en que se
@@ -182,15 +187,135 @@ el estado, retomar sin `Rollback`) y cinco de los contratos.
 y `destino` usan los contratos; `enlace` sigue sin tipos (etapa 4), pero
 ahora le pasa a `destino` el estado de solo lectura, como exige `restore`.
 
+## El almacén (etapa 3)
+
+El protocolo de [`almacenamiento.md`](almacenamiento.md) son dos contratos,
+con las etiquetas de `nsos_store::proto` (un test lo comprueba):
+
+| Contrato | Cliente ↔ servidor | Tabla | Cota |
+|---|---|---|---|
+| `store_root` | dueño ↔ `almacen` | `Ready: Open → Opening`; `Opening: Opened → Ready`, `Fail → Ready` | 1 |
+| `store_obj` | quien tiene el handle ↔ `almacen` | `Idle: Stat → Asking`, `Read → Reading`, `Write → Writing`, `DupRo → Duping`; `Asking: Info`, `Fail`; `Reading: Data`, `FailMem`; `Writing: Written`, `FailMem`; `Duping: Opened`, `Fail` (todas a `Idle`) | 1 |
+
+Más `store_share`, el canal de prueba por el que `escritor` le pasa a
+`curioso` un handle de solo lectura.
+
+**Lo que garantiza el tipo.**
+* `Open` lleva `flags` y `name`, **no** un dueño: el almacén lo toma de la
+  raíz por la que llegó (`Store.rw_handle_from_owner` supone eso).
+* El handle viaja como `Endpoint<store_obj::client::Idle>`, en `Opened`
+  y en `Share`.
+* `Read` y `Write` llevan el búfer del cliente (`Mem<RW>`), y sus
+  respuestas también, la de error incluida (`FailMem`). El almacén tipado
+  no puede contestar sin devolverlo, y el cliente tipado descarta una
+  respuesta sin él (Kani: `store_reading_decode_any`; test
+  `store_buffer_always_comes_back`).
+* El error tiene la misma etiqueta (99) con y sin búfer. Por eso la regla
+  de etiquetas distintas pasó a ser **por estado**, que es lo que necesita
+  el decodificador.
+
+**Lo que demuestra el modelo** (`Nsos/StoreContract.lean`): cada pedido
+del modelo del almacén es un intercambio completo de su contrato, de
+reposo a reposo (`exec_follows`), y los que el modelo rechaza tienen su
+respuesta de error (`rejected_follows`). Es una correspondencia por tipo
+de pedido: lo que decide si se atiende (quién puede escribir) lo sigue
+demostrando `Store.lean`. `buffer_states_reply_only` es la propiedad de la
+tabla en que se apoya la devolución del búfer. Cinco mutaciones de las
+tablas lo rompen.
+
+Un cambio de comportamiento: un nombre de más de 31 bytes ya no recibe
+`ERR`, porque no es del contrato (`Bytes<31>`): el almacén lo descarta
+como violación. Ningún cliente del sistema lo mandaba.
+
+## Drivers, flujos y el enlace (etapa 4)
+
+| Contrato | Cliente ↔ servidor | Tabla | Cota |
+|---|---|---|---|
+| `console` | `hola` ↔ `virtcon` | `Ready: Write → Writing`; `Writing: Written → Ready` | 1 |
+| `block` | `almacen` ↔ `virtblk` | `Ready: Info → Asking`, `Read`/`Write`/`Flush → Busy`; `Asking: Geometry → Ready`; `Busy: Done → Ready` | 1 |
+| `net` (flujo) | `enlace` ↔ `virtnet` | `Open: Send → Open` (cliente), `Recv → Open` (servidor) | sin cota |
+
+**Flujos.** La red no es pedido y respuesta: `enlace` manda paquetes cuando
+quiere y `virtnet` le entrega cada trama que llega. Eso es un estado en el
+que mandan las dos puntas, que `check` rechaza. Para eso está la otra forma
+de la macro, `stream`: un solo estado, `Open`, del que nunca se sale. Se
+comprueba al compilar con `stream_check` (`Contract.streamB` en el modelo;
+el test `contract_model` compara las dos en 412 contratos). Lo que vale:
+
+* ningún mensaje inesperado: como nadie cambia de estado, los mensajes
+  cruzados se reciben bien (`Contract.stream_head_receivable_a/b`);
+* pero **no hay cota**: la cola puede crecer tanto como se quiera
+  (`Contract.stream_unbounded`).
+
+Con colas finitas, lo segundo es un riesgo concreto. Antes de esta etapa,
+`virtnet` entregaba cada trama con un `send` bloqueante y `enlace` le
+mandaba paquetes también bloqueando. Si alguien inunda la red mientras
+`enlace` atiende al cliente (y no lee la red), se llena la cola de
+`enlace`, `virtnet` queda bloqueado, deja de transmitir, se llena su propia
+cola y `enlace` también se bloquea. No hace falta la clave del enlace:
+alcanza con poder poner tramas en la red. Ahora `virtnet` entrega con
+`Chan::try_send` y, si la cola de `enlace` está llena, descarta la trama y
+la cuenta, como una placa de red con el anillo lleno. La regla para todo
+flujo: al menos una punta manda sin bloquear.
+
+**El enlace** usa `net` hacia `virtnet`, `restore` hacia los supervisores
+(servidor del lado de origen, donde el enlace hace de versión nueva;
+cliente del lado de destino) y `counter` para el servicio que reenvía. Lo
+que viaja por el cable no cambió (`T_REQ`/`T_RESP` con etiqueta y datos),
+así que el modelo del enlace autenticado (`Link.lean`) sigue valiendo.
+
+**Lo que demuestra el modelo** (`Nsos/MigrationContract.lean`): cada paso
+de la migración de `Migration.lean` es cero, uno o dos pasos de `handover`
+y `restore`, ahora sin excepciones (el canal con el enlace es el mismo en
+todos los intentos y por eso `restore` vuelve a `Start`), y en todo estado
+alcanzable valen los teoremas de `Contract.lean`
+(`migration_contract_safe`). Al escribirlo apareció un error en el mapeo
+(el paso en que `origen` recibe el estado de la vieja); la demostración no
+cerraba hasta corregirlo. Tres mutaciones del modelo y tres de las tablas y
+de la teoría de flujos lo rompen.
+
+## El contrato de cada canal, en el kernel (etapa 5)
+
+Hasta la etapa 4, al abrir un canal o recibir un extremo en un mensaje solo
+se comprobaba que fuera un canal con `SEND` y `RECV`. Un emisor podía pasar
+un canal de otro protocolo (por ejemplo un handle del almacén donde se
+espera un canal `note`) y del otro lado todo llegaba como violación.
+
+Ahora cada canal guarda el contrato que declaró quien lo creó:
+
+* `channel_create(out, contrato)`: el segundo argumento, que antes se
+  ignoraba, es el identificador del contrato (0 = sin contrato; menor que
+  2^63, porque `channel_contract` lo devuelve como resultado de syscall).
+  Las llamadas viejas siguen valiendo y crean canales sin contrato.
+* `channel_contract(h)`: lo devuelve. No pide derechos (como `cap_info`).
+* Los dos extremos lo comparten y **ninguna syscall lo cambia**
+  (`Sys.step_contract_fixed`, `run_contract_fixed`; `cap_dup` o `create`
+  que reetiquetaran rompen la demostración).
+
+La macro le da a cada contrato un `ID` (FNV-1a de 63 bits sobre el nombre y
+la tabla; un test comprueba que los del sistema son distintos), `pair` crea
+el canal con ese `ID`, y `Chan::open` y el decodificador de `Endpoint<S>`
+exigen que el canal tenga el `ID` del contrato de `S`. El kernel etiqueta
+también los canales que reparte al arrancar (`echo`, `console`, `net`,
+`restore`, `block`, `store_root`, `store_share`).
+
+El número **identifica, no autentica**: quien crea un canal puede declarar
+el contrato que quiera y después hablarlo mal. Lo que cierra es el
+reetiquetado: un canal creado para un protocolo no se puede hacer pasar
+por otro. En QEMU, `ping` le manda a `pong` un `NewChannel` con un canal
+creado para `store_obj`, y `pong` lo descarta y lo suelta.
+
 ## Etapas
 
 1. **(hecha)** Crate, modelo, `ping`/`pong`.
 2. **(hecha)** Protocolo de actualización en vivo (`init`, `contador-*`,
    `cliente`, `origen`, `destino`), con `Mem<RW>`/`Mem<RO>` y `call`. El
    modelo `Upgrade.lean` sigue los contratos (`UpgradeContract.lean`).
-3. Protocolo del almacén (`nsos_store::proto`).
-4. Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de migración.
-5. Opcional: un `contract_id` fijo en cada canal, que el kernel informe en
-   `cap_info`, para que la identidad del contrato de un extremo recibido la
-   garantice el kernel (hoy se comprueba solo que sea un canal con `SEND` y
-   `RECV`). Cambia la ABI: modelo primero.
+3. **(hecha)** Protocolo del almacén (`almacen`, `escritor`, `curioso`):
+   `store_root`, `store_obj` y `store_share` (`StoreContract.lean`).
+4. **(hecha)** Drivers (`virtcon`, `virtblk`, `virtnet`) y el enlace de
+   migración: `console`, `block`, el flujo `net` y `restore`/`counter` en
+   `enlace` (`MigrationContract.lean`).
+5. **(hecha)** El contrato de cada canal lo guarda el kernel
+   (`channel_create(out, contrato)`, `channel_contract(h)`) y no cambia
+   nunca (`ContractId.lean`).

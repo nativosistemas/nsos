@@ -12,6 +12,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use nsos_contract::protocols;
 
 type Test = (&'static str, fn() -> Result<(), &'static str>);
 
@@ -313,7 +314,7 @@ fn ipc_send(
 }
 
 fn ipc_self_loop() -> Result<(), &'static str> {
-    let (a, b) = crate::cell::channel_create();
+    let (a, b) = crate::cell::channel_create(0);
     ipc_send(&a, &b)?; // b viaja en la cola de b
     let (wa, wb) = (Arc::downgrade(&a), Arc::downgrade(&b));
     drop((a, b));
@@ -327,8 +328,8 @@ fn ipc_self_loop() -> Result<(), &'static str> {
 }
 
 fn ipc_two_cycle() -> Result<(), &'static str> {
-    let (a0, a1) = crate::cell::channel_create();
-    let (b0, b1) = crate::cell::channel_create();
+    let (a0, a1) = crate::cell::channel_create(0);
+    let (b0, b1) = crate::cell::channel_create(0);
     ipc_send(&a0, &b1)?; // b1 viaja hacia a1
     ipc_send(&b0, &a1)?; // a1 viaja hacia b1
     let (wa, wb) = (Arc::downgrade(&a1), Arc::downgrade(&b1));
@@ -345,8 +346,8 @@ fn ipc_two_cycle() -> Result<(), &'static str> {
 }
 
 fn ipc_reachable_kept() -> Result<(), &'static str> {
-    let (a0, a1) = crate::cell::channel_create();
-    let (b0, b1) = crate::cell::channel_create();
+    let (a0, a1) = crate::cell::channel_create(0);
+    let (b0, b1) = crate::cell::channel_create(0);
     ipc_send(&a0, &b1)?; // b1 viaja hacia a1, que seguimos teniendo
     let wb = Arc::downgrade(&b1);
     drop((a0, b0, b1));
@@ -447,8 +448,8 @@ pub fn run_migration(origin: bool) -> bool {
             object: KObject::Memory(cell::MemObj::from_bytes(&config).ok_or("sin memoria")?),
             rights: Rights::READ,
         };
-        let (net_a, net_b) = cell::channel_create();
-        let (ctl_a, ctl_b) = cell::channel_create();
+        let (net_a, net_b) = cell::channel_create(protocols::net::ID);
+        let (ctl_a, ctl_b) = cell::channel_create(protocols::restore::ID);
         let virtnet = crate::module("virtnet").ok_or("falta el módulo virtnet")?;
         let enlace = crate::module("enlace").ok_or("falta el módulo enlace")?;
         let sup_img = crate::module(sup).ok_or("falta el supervisor")?;
@@ -560,10 +561,10 @@ pub fn run_store(mode: &str) -> bool {
         };
         let allow_format = (code != b'v') as u8;
         let config = cell::MemObj::from_bytes(&[code, n, allow_format]).ok_or("sin memoria")?;
-        let (drv_a, drv_b) = cell::channel_create();
-        let (root1_a, root1_b) = cell::channel_create();
-        let (root2_a, root2_b) = cell::channel_create();
-        let (peer_a, peer_b) = cell::channel_create();
+        let (drv_a, drv_b) = cell::channel_create(protocols::block::ID);
+        let (root1_a, root1_b) = cell::channel_create(protocols::store_root::ID);
+        let (root2_a, root2_b) = cell::channel_create(protocols::store_root::ID);
+        let (peer_a, peer_b) = cell::channel_create(protocols::store_share::ID);
         let module = |n| crate::module(n).ok_or("falta un módulo del almacén");
         let mut blk_caps = alloc::vec![
             ports,

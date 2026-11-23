@@ -122,6 +122,24 @@ fn abuse_objects() -> bool {
             ok = false;
         }
     }
+    // Contratos de canal (`channel_contract`): solo describe canales, y no
+    // se puede declarar un contrato que no cabría en el resultado.
+    ok &= expect(
+        "channel_contract de una memoria",
+        s4(ChannelContract, m, 0, 0, 0),
+        Error::WrongType,
+    );
+    ok &= expect(
+        "channel_contract de un handle inventado",
+        s4(ChannelContract, 0x7_0000, 0, 0, 0),
+        Error::BadHandle,
+    );
+    let mut out = [0u32; 2];
+    ok &= expect(
+        "channel_create con un contrato de 64 bits",
+        s4(ChannelCreate, out.as_mut_ptr() as u64, 1 << 63, 0, 0),
+        Error::InvalidArgs,
+    );
     // Puertos de E/S.
     ok &= expect(
         "ioport_read con un objeto de memoria",

@@ -12,8 +12,8 @@
 //! 4. Canal con el cliente.
 //! 5. `Irq` de su línea de interrupción, si el kernel la pudo entregar.
 //!
-//! Protocolo (genérico: un bloque de 512 bytes = un sector, como el
-//! dispositivo). Sirve igual para el almacén propio (`almacen`) y para una
+//! Protocolo (contrato `block`; genérico: un bloque de 512 bytes = un
+//! sector, como el dispositivo). Sirve igual para el almacén propio (`almacen`) y para una
 //! futura cell lectora de FAT32:
 //! * `INFO` → `INFO [sectores u64 | flush u8 | búfer en sectores u32]`
 //! * `READ [sector u64 | cantidad u32]` → los datos quedan al principio del
@@ -32,17 +32,12 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-use nsos_rt::abi::{CapHandle, Error, Message, Rights};
+use nsos_rt::abi::{CapHandle, Error, Rights};
+use nsos_rt::contract::protocols::block;
+use nsos_rt::contract::{Chan, RecvError};
 use nsos_rt::{
-    bootstrap, channel_recv, channel_send, fence, ioport_read, ioport_write, mem_info, mem_map,
-    println, DevIrq, Mapped,
+    bootstrap, fence, ioport_read, ioport_write, mem_info, mem_map, println, DevIrq, Mapped, Sys,
 };
-
-const INFO: u64 = 1;
-const READ: u64 = 2;
-const WRITE: u64 = 3;
-const DONE: u64 = 4;
-const FLUSH: u64 = 5;
 
 const OK: u8 = 0;
 const DEV_ERROR: u8 = 1;
@@ -244,16 +239,7 @@ impl Device {
     }
 
     /// Atiende un pedido del cliente; devuelve el estado.
-    fn serve(&mut self, kind: u32, p: &[u8]) -> Result<u8, Error> {
-        if p.len() < 12 {
-            return Ok(BAD_REQUEST);
-        }
-        let mut s = [0u8; 8];
-        s.copy_from_slice(&p[..8]);
-        let sector = u64::from_le_bytes(s);
-        let mut c = [0u8; 4];
-        c.copy_from_slice(&p[8..12]);
-        let count = u32::from_le_bytes(c);
+    fn serve(&mut self, kind: u32, sector: u64, count: u32) -> Result<u8, Error> {
         let max = (self.buf.len() / SECTOR) as u32;
         if count == 0
             || count > max
@@ -268,26 +254,27 @@ impl Device {
     }
 }
 
-fn run(dev: &mut Device, client: CapHandle) -> Result<(), Error> {
-    let mut m = Message::default();
+type Client = Chan<Sys, block::server::Ready>;
+
+fn run(dev: &mut Device, mut client: Client) -> Result<(), Error> {
+    use block::server::recv::Ready as Req;
     loop {
-        match channel_recv(client, &mut m, 0) {
-            Ok(()) => {}
-            Err(Error::PeerClosed) => return Ok(()),
-            Err(e) => return Err(e),
-        }
-        let reply = match m.header.label {
-            INFO => {
-                let mut p = [0u8; 13];
-                p[..8].copy_from_slice(&dev.sectors.to_le_bytes());
-                p[8] = dev.flush as u8;
-                p[9..13].copy_from_slice(&((dev.buf.len() / SECTOR) as u32).to_le_bytes());
-                Message::new(INFO, &p)?
+        let sent = match client.recv() {
+            Ok(Req::Info(c, _)) => c.send(block::Geometry {
+                sectors: dev.sectors,
+                flush: dev.flush,
+                buf_sectors: (dev.buf.len() / SECTOR) as u32,
+            }),
+            Ok(Req::Read(c, r)) => {
+                let status = dev.serve(T_IN, r.sector, r.count)?;
+                c.send(block::Done { status })
             }
-            READ => Message::new(DONE, &[dev.serve(T_IN, m.payload())?])?,
-            WRITE => Message::new(DONE, &[dev.serve(T_OUT, m.payload())?])?,
-            FLUSH => {
-                let st = if dev.flush {
+            Ok(Req::Write(c, w)) => {
+                let status = dev.serve(T_OUT, w.sector, w.count)?;
+                c.send(block::Done { status })
+            }
+            Ok(Req::Flush(c, _)) => {
+                let status = if dev.flush {
                     match dev.request(T_FLUSH, 0, 0)? {
                         0 => OK,
                         _ => DEV_ERROR,
@@ -295,22 +282,35 @@ fn run(dev: &mut Device, client: CapHandle) -> Result<(), Error> {
                 } else {
                     OK // sin caché: lo escrito ya está en el disco
                 };
-                Message::new(DONE, &[st])?
+                c.send(block::Done { status })
             }
-            _ => Message::new(DONE, &[BAD_REQUEST])?,
+            Err(RecvError::Violation { chan, label }) => {
+                println!("virtblk: pedido fuera de protocolo {}", label);
+                client = chan;
+                continue;
+            }
+            Err(RecvError::WouldBlock(c)) => {
+                client = c;
+                continue;
+            }
+            Err(RecvError::Failed(Error::PeerClosed)) => return Ok(()),
+            Err(RecvError::Failed(e)) => return Err(e),
         };
-        match channel_send(client, &reply, 0) {
-            Ok(()) => {}
+        client = match sent {
+            Ok(c) => c,
             Err(Error::PeerClosed) => return Ok(()),
             Err(e) => return Err(e),
-        }
+        };
     }
 }
 
 nsos_rt::entry!(main);
 
 fn main() -> i32 {
-    let client = bootstrap(4);
+    let Ok(client) = Client::open(Sys, bootstrap(4)) else {
+        println!("virtblk: la capacidad del cliente no es un canal");
+        return 1;
+    };
     let irq = DevIrq::from_bootstrap(5);
     let mut dev = match Device::init(bootstrap(1), bootstrap(2), bootstrap(3), irq) {
         Ok(d) => d,

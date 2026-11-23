@@ -6,7 +6,7 @@ use nsos_abi::cap::CapInfo;
 use nsos_abi::msg::{MsgHeader, MAX_CAPS, MAX_DATA};
 use nsos_abi::{CapHandle, Error, Message, ObjectType, Rights};
 
-use crate::protocols::{echo, restore};
+use crate::protocols::{echo, restore, store_obj};
 use crate::{check, Bytes, Chan, Dir, Msg, Receives, RecvError, Transition, Transport};
 
 /// Transporte cuyo `recv` entrega un mensaje cualquiera y cuyo `cap_info`
@@ -18,6 +18,8 @@ struct Any<'a> {
     /// Lo que contestó `cap_info` para cada handle: `(handle, tipo, derechos)`.
     seen: &'a Cell<[(u32, u32, u32); 4]>,
     n_seen: &'a Cell<usize>,
+    /// Lo último que contestó `channel_contract`: `(handle, contrato)`.
+    ctr: &'a Cell<(u32, u64)>,
 }
 
 impl Any<'_> {
@@ -35,6 +37,13 @@ impl Any<'_> {
 impl Transport for Any<'_> {
     fn send(self, _: CapHandle, _: &Message) -> Result<(), Error> {
         Ok(())
+    }
+    fn try_send(self, _: CapHandle, _: &Message) -> Result<(), Error> {
+        match kani::any::<u8>() % 3 {
+            0 => Ok(()),
+            1 => Err(Error::WouldBlock),
+            _ => Err(Error::PeerClosed),
+        }
     }
     fn recv(self, _: CapHandle, m: &mut Message, _: bool) -> Result<(), Error> {
         *m = *self.msg;
@@ -62,8 +71,13 @@ impl Transport for Any<'_> {
     fn cap_drop(self, _: CapHandle) {
         self.drops.set(self.drops.get() + 1);
     }
-    fn channel_create(self) -> Result<(CapHandle, CapHandle), Error> {
+    fn channel_create(self, _: u64) -> Result<(CapHandle, CapHandle), Error> {
         Err(Error::NoMemory)
+    }
+    fn channel_contract(self, h: CapHandle) -> Result<u64, Error> {
+        let c: u64 = kani::any();
+        self.ctr.set((h.0, c));
+        Ok(c)
     }
     fn cap_dup(self, _: CapHandle, _: Rights) -> Result<CapHandle, Error> {
         Err(Error::NoMemory)
@@ -106,11 +120,13 @@ fn any_valid_message() -> Message {
 fn decode_any() {
     let msg = any_valid_message();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &msg,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let s: Chan<_, echo::server::Ready> = Chan::__from_parts(t, CapHandle(1));
     let n = msg.cap_slice().len();
@@ -129,6 +145,8 @@ fn decode_any() {
                     assert_eq!(n, 1);
                     assert!(msg.payload().is_empty());
                     assert_eq!(m.side.handle(), msg.caps[0]);
+                    // El extremo aceptado fue creado para `note`.
+                    assert_eq!(ctr.get(), (msg.caps[0].0, crate::protocols::note::ID));
                     core::mem::forget(c);
                 }
                 echo::server::recv::Ready::Bye(c, _) => {
@@ -162,11 +180,13 @@ fn roundtrip_echo() {
     echo::Echo { data }.encode(&mut m);
     assert!(m.validate().is_ok());
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &m,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let back = echo::Echo::decode(t, &m).unwrap();
     assert_eq!(back.data.as_slice(), &buf[..len]);
@@ -247,11 +267,13 @@ fn check_any() {
 fn restore_decode_any() {
     let msg = any_valid_message();
     let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
     let t = Any {
         msg: &msg,
         drops: &drops,
         seen: &seen,
         n_seen: &n_seen,
+        ctr: &ctr,
     };
     let s: Chan<_, restore::server::Start> = Chan::__from_parts(t, CapHandle(1));
     let n = msg.cap_slice().len();
@@ -274,5 +296,93 @@ fn restore_decode_any() {
             core::mem::forget(chan);
         }
         Err(_) => unreachable!(),
+    };
+}
+
+/// El cliente del almacén esperando la respuesta a `Read`, con cualquier
+/// mensaje y cualquier respuesta de `cap_info`: sin pánicos; si acepta, es
+/// `Data` o `FailMem` y trae exactamente una capacidad, un objeto `Memory`
+/// con `READ` y `WRITE` (el búfer de vuelta); si no, se soltaron todas y el
+/// cliente sigue esperando en `Reading`.
+#[kani::proof]
+#[kani::unwind(230)]
+fn store_reading_decode_any() {
+    let msg = any_valid_message();
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
+    let t = Any {
+        msg: &msg,
+        drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
+        ctr: &ctr,
+    };
+    let c: Chan<_, store_obj::client::Reading> = Chan::__from_parts(t, CapHandle(1));
+    let n = msg.cap_slice().len();
+    let check_buf = |h: CapHandle| {
+        assert_eq!(n, 1);
+        assert_eq!(h, msg.caps[0]);
+        let (ty, rights) = t.answered(h).unwrap();
+        assert_eq!(ty, ObjectType::Memory as u32);
+        assert!(Rights(rights).contains(Rights::READ | Rights::WRITE));
+    };
+    match c.recv() {
+        Ok(store_obj::client::recv::Reading::Data(idle, d)) => {
+            assert_eq!(msg.header.label, 15);
+            check_buf(d.buf.handle());
+            core::mem::forget(idle);
+        }
+        Ok(store_obj::client::recv::Reading::FailMem(idle, f)) => {
+            assert_eq!(msg.header.label, 99);
+            check_buf(f.buf.handle());
+            core::mem::forget(idle);
+        }
+        Err(RecvError::Violation { chan, .. }) => {
+            assert_eq!(drops.get(), n);
+            core::mem::forget(chan);
+        }
+        Err(_) => unreachable!(),
+    };
+}
+
+/// `try_send` con cualquier resultado de la syscall: si se mandó, no se
+/// soltó nada (las capacidades viajan); si la cola estaba llena, el canal
+/// vuelve en el mismo estado y se soltó la capacidad del mensaje; si falló,
+/// se soltó también, y el canal se cerró. Nunca queda una capacidad
+/// ocupando un slot.
+#[kani::proof]
+#[kani::unwind(230)]
+fn try_send_any() {
+    let msg = Message::default();
+    let (drops, seen, n_seen) = (Cell::new(0), Cell::new([(0, 0, 0); 4]), Cell::new(0));
+    let ctr = Cell::new((0u32, 0u64));
+    let t = Any {
+        msg: &msg,
+        drops: &drops,
+        seen: &seen,
+        n_seen: &n_seen,
+        ctr: &ctr,
+    };
+    let h = CapHandle(kani::any());
+    kani::assume(h.is_valid());
+    let c: Chan<_, echo::client::Ready> = Chan::__from_parts(t, CapHandle(1));
+    let m = echo::NewChannel {
+        side: crate::Endpoint::from_raw(h),
+    };
+    match c.try_send(m) {
+        Ok(next) => {
+            assert_eq!(drops.get(), 0);
+            core::mem::forget(next);
+        }
+        Err(crate::TrySendError::Full(same)) => {
+            assert_eq!(drops.get(), 1);
+            assert_eq!(same.handle(), CapHandle(1));
+            core::mem::forget(same);
+        }
+        Err(crate::TrySendError::Failed(e)) => {
+            // La capacidad del mensaje y el canal mismo, que se cerró.
+            assert_eq!(e, Error::PeerClosed);
+            assert_eq!(drops.get(), 2);
+        }
     };
 }

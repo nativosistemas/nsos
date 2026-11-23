@@ -88,18 +88,33 @@
 //! }
 //! ```
 //!
-//! Dos mensajes con la misma etiqueta:
+//! Dos mensajes con la misma etiqueta que pueden llegar en el mismo
+//! estado (el decodificador no sabría cuál es):
 //!
 //! ```compile_fail,E0080
 //! nsos_contract::contract! {
 //!     pub contract dup {
-//!         messages { Ping(1) {}, Pong(1) {} }
+//!         messages { Ping(1) {}, Pong(1) {}, Ack(2) {} }
 //!         start A;
-//!         client A { Ping => B }
-//!         server B { Pong => C }
-//!         end C;
+//!         client A { Ping => B, Pong => B }
+//!         server B { Ack => A }
 //!     }
 //! }
+//! ```
+//!
+//! En estados distintos sí pueden compartirla (como el error del almacén,
+//! que según el estado devuelve o no el búfer):
+//!
+//! ```
+//! nsos_contract::contract! {
+//!     pub contract shared {
+//!         messages { Ping(1) {}, Pong(1) {}, Ack(2) {} }
+//!         start A;
+//!         client A { Ping => B }
+//!         server B { Pong => A }
+//!     }
+//! }
+//! # fn main() {}
 //! ```
 
 #![no_std]
@@ -112,7 +127,9 @@ mod mem;
 pub mod protocols;
 mod wire;
 
-pub use chan::{Chan, Endpoint, Receives, RecvError, RecvResult, Sends, State, Transport};
+pub use chan::{
+    Chan, Endpoint, Receives, RecvError, RecvResult, Sends, State, Transport, TrySendError,
+};
 pub use mem::{Access, Mem, RO, RW};
 pub use wire::{Bytes, Field, Msg, Reader, Writer};
 
@@ -252,14 +269,19 @@ const fn reach_n(table: &[Transition], d: Dir, steps: usize, from: u64) -> u64 {
     cur
 }
 
-/// `true` si las etiquetas no se repiten (dos mensajes de un contrato no
-/// pueden compartir etiqueta: el decodificador no sabría cuál es).
-pub const fn labels_distinct(labels: &[u64]) -> bool {
+/// `true` si en cada estado las etiquetas de sus transiciones no se
+/// repiten. El decodificador elige el mensaje por la etiqueta **en el
+/// estado actual**, así que dos mensajes que pueden llegar en el mismo
+/// estado no pueden compartirla; en estados distintos sí (el modelo
+/// identifica cada mensaje por estado y etiqueta). La macro genera una fila
+/// por cada par (estado, mensaje), así que dos filas con el mismo origen y
+/// la misma etiqueta son dos mensajes distintos.
+pub const fn labels_distinct_per_state(table: &[Transition]) -> bool {
     let mut i = 0;
-    while i < labels.len() {
+    while i < table.len() {
         let mut j = i + 1;
-        while j < labels.len() {
-            if labels[i] == labels[j] {
+        while j < table.len() {
+            if table[i].src == table[j].src && table[i].label == table[j].label {
                 return false;
             }
             j += 1;
@@ -269,13 +291,96 @@ pub const fn labels_distinct(labels: &[u64]) -> bool {
     true
 }
 
+/// `true` si la tabla es un **flujo**: todas sus transiciones salen de
+/// `start` y vuelven a `start` (`Contract.streamB`). En un flujo mandan las
+/// dos puntas sin cambiar de estado, así que todo lo que llega es esperado
+/// (`Contract.stream_head_receivable_a/b`), pero la cola no tiene cota
+/// (`Contract.stream_unbounded`): al menos una punta tiene que mandar con
+/// [`Chan::try_send`] y descartar lo que no entra.
+pub const fn stream_check(table: &[Transition], start: u16) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].src != start || table[i].dst != start {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Identificador de un contrato: FNV-1a de 64 bits sobre el nombre y la
+/// tabla, en 63 bits. Es lo que se declara al crear el canal (`channel_create(out,
+/// id)`) y lo que se exige al abrir uno o al recibirlo en un mensaje. Nunca
+/// es 0 (0 es "sin contrato"). Dos contratos distintos chocan solo si el
+/// hash choca: el número identifica, no autentica (ver
+/// `docs/contratos.md`).
+#[doc(hidden)]
+pub const fn __contract_id(name: &str, table: &[Transition]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+    let b = name.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        h = (h ^ b[i] as u64).wrapping_mul(PRIME);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < table.len() {
+        let t = &table[i];
+        let mut word = [0u8; 13];
+        let src = t.src.to_le_bytes();
+        let label = t.label.to_le_bytes();
+        let dst = t.dst.to_le_bytes();
+        word[0] = src[0];
+        word[1] = src[1];
+        word[2] = if dir_eq(t.dir, Dir::ClientToServer) {
+            0
+        } else {
+            1
+        };
+        let mut j = 0;
+        while j < 8 {
+            word[3 + j] = label[j];
+            j += 1;
+        }
+        word[11] = dst[0];
+        word[12] = dst[1];
+        let mut j = 0;
+        while j < word.len() {
+            h = (h ^ word[j] as u64).wrapping_mul(PRIME);
+            j += 1;
+        }
+        i += 1;
+    }
+    // 63 bits: las syscalls devuelven el resultado como `i64` y un valor
+    // negativo es un error, así que `channel_contract` solo puede contestar
+    // contratos menores que 2^63 (el kernel rechaza los demás al crear).
+    let h = h & (u64::MAX >> 1);
+    if h == 0 {
+        1
+    } else {
+        h
+    }
+}
+
+/// El control de un flujo que corre la macro al compilar.
+#[doc(hidden)]
+pub const fn __assert_stream(table: &[Transition]) {
+    if !labels_distinct_per_state(table) {
+        panic!("flujo: dos mensajes con la misma etiqueta");
+    }
+    if !stream_check(table, 0) {
+        panic!("flujo: una transición cambia de estado");
+    }
+}
+
 /// El control que corre la macro al compilar: falla la compilación con un
 /// mensaje si el contrato no está bien formado o su cota no entra en la
 /// cola del kernel.
 #[doc(hidden)]
-pub const fn __assert_contract(table: &[Transition], labels: &[u64]) -> u32 {
-    if !labels_distinct(labels) {
-        panic!("contrato: dos mensajes con la misma etiqueta");
+pub const fn __assert_contract(table: &[Transition]) -> u32 {
+    if !labels_distinct_per_state(table) {
+        panic!("contrato: dos mensajes con la misma etiqueta en un mismo estado");
     }
     match check(table) {
         Ok(k) if k <= QUEUE_CAP => k,

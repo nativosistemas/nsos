@@ -161,3 +161,251 @@ contract! {
         end End;
     }
 }
+
+contract! {
+    /// Almacén, por la **raíz** de un dueño (`escritor`, `curioso` ↔
+    /// `almacen`). Etiquetas de `nsos_store::proto`. Modelo:
+    /// `Store.lean` y `StoreContract.lean`.
+    ///
+    /// `Open` no tiene campo de dueño: el almacén lo toma de la raíz por la
+    /// que llega el pedido, nunca del mensaje (`Store.rw_handle_from_owner`).
+    pub contract store_root {
+        messages {
+            /// Abrir el objeto `name` del dueño de esta raíz.
+            Open(10) {
+                /// `nsos_store::proto::OPEN_WRITE` pide escritura.
+                flags: u8,
+                /// Nombre (1 a 31 bytes, sin ceros).
+                name: Bytes<31>,
+            },
+            /// Abierto: datos del objeto y su handle.
+            Opened(11) {
+                /// Versión actual (0: todavía no existe).
+                version: u64,
+                /// Largo en bytes.
+                len: u32,
+                /// Si el handle permite escribir.
+                write: bool,
+                /// El handle: un canal que da acceso a este objeto y a nada más.
+                handle: Endpoint<store_obj::client::Idle>,
+            },
+            /// No se pudo.
+            Fail(99) {
+                /// Código (`nsos_store::proto::E_*`).
+                code: u32,
+                /// Versión actual, si viene al caso.
+                version: u64,
+            },
+        }
+        start Ready;
+        client Ready { Open => Opening }
+        server Opening { Opened => Ready, Fail => Ready }
+    }
+}
+
+contract! {
+    /// Almacén, por un **handle** (quien lo tenga ↔ `almacen`).
+    ///
+    /// `Read` y `Write` llevan el búfer del cliente (`Mem<RW>`) y **toda**
+    /// respuesta a ellos lo devuelve, también la de error (`FailMem`): el
+    /// cliente tipado siempre lo recupera. Por eso hay dos errores con la
+    /// misma etiqueta, cada uno en sus estados.
+    pub contract store_obj {
+        messages {
+            /// Datos del objeto.
+            Stat(12) {},
+            /// Respuesta a `Stat`.
+            Info(13) {
+                /// Versión actual.
+                version: u64,
+                /// Largo en bytes.
+                len: u32,
+                /// Si este handle permite escribir.
+                write: bool,
+            },
+            /// Leer el objeto en el búfer.
+            Read(14) {
+                /// Búfer (el almacén escribe en él).
+                buf: Mem<RW>,
+            },
+            /// Respuesta a `Read`: los datos están al principio del búfer.
+            Data(15) {
+                /// Versión leída.
+                version: u64,
+                /// Bytes leídos.
+                len: u32,
+                /// El búfer, de vuelta.
+                buf: Mem<RW>,
+            },
+            /// Escribir los primeros `len` bytes del búfer.
+            Write(16) {
+                /// Versión que se espera encontrar (`ANY_VERSION`: cualquiera;
+                /// 0: que no exista).
+                expected: u64,
+                /// Bytes a escribir.
+                len: u32,
+                /// Búfer con los datos.
+                buf: Mem<RW>,
+            },
+            /// Respuesta a `Write`.
+            Written(17) {
+                /// Versión nueva.
+                version: u64,
+                /// El búfer, de vuelta.
+                buf: Mem<RW>,
+            },
+            /// Un handle nuevo de **solo lectura** al mismo objeto.
+            DupRo(18) {},
+            /// Respuesta a `DupRo`.
+            Opened(11) {
+                /// Versión actual.
+                version: u64,
+                /// Largo en bytes.
+                len: u32,
+                /// Siempre `false`.
+                write: bool,
+                /// El handle nuevo.
+                handle: Endpoint<client::Idle>,
+            },
+            /// Error de un pedido sin búfer.
+            Fail(99) {
+                /// Código.
+                code: u32,
+                /// Versión actual, si viene al caso.
+                version: u64,
+            },
+            /// Error de un pedido con búfer: lo devuelve.
+            FailMem(99) {
+                /// Código.
+                code: u32,
+                /// Versión actual, si viene al caso.
+                version: u64,
+                /// El búfer, de vuelta.
+                buf: Mem<RW>,
+            },
+        }
+        start Idle;
+        client Idle { Stat => Asking, Read => Reading, Write => Writing, DupRo => Duping }
+        server Asking { Info => Idle, Fail => Idle }
+        server Reading { Data => Idle, FailMem => Idle }
+        server Writing { Written => Idle, FailMem => Idle }
+        server Duping { Opened => Idle, Fail => Idle }
+    }
+}
+
+contract! {
+    /// Prueba del almacén: `escritor` (cliente) le pasa a `curioso`
+    /// (servidor) un handle de solo lectura a su objeto, y `curioso`
+    /// contesta si todo salió como se esperaba.
+    pub contract store_share {
+        messages {
+            /// El handle de solo lectura.
+            Share(1) {
+                /// Handle (se mueve).
+                handle: Endpoint<store_obj::client::Idle>,
+            },
+            /// Resultado de las pruebas de `curioso`.
+            Verdict(2) {
+                /// `true` si todo fue como se esperaba.
+                ok: bool,
+            },
+        }
+        start Start;
+        client Start { Share => Waiting }
+        server Waiting { Verdict => End }
+        end End;
+    }
+}
+
+contract! {
+    /// Consola virtio (`hola` ↔ `virtcon`): texto y cuántos bytes salieron.
+    pub contract console {
+        messages {
+            /// Texto a transmitir.
+            Write(1) {
+                /// El texto.
+                text: Bytes<224>,
+            },
+            /// Se transmitió.
+            Written(2) {
+                /// Bytes transmitidos.
+                n: u32,
+            },
+        }
+        start Ready;
+        client Ready { Write => Writing }
+        server Writing { Written => Ready }
+    }
+}
+
+contract! {
+    /// Disco virtio (`almacen` ↔ `virtblk`). Los datos van por el búfer que
+    /// comparten (lo reparte el kernel); por el canal, solo los pedidos. Un
+    /// sector son 512 bytes. `Info` es pedido y respuesta con la misma
+    /// etiqueta, en estados distintos.
+    pub contract block {
+        messages {
+            /// Geometría del disco.
+            Info(1) {},
+            /// Respuesta a `Info`.
+            Geometry(1) {
+                /// Sectores del disco.
+                sectors: u64,
+                /// Si el disco tiene caché (y `Flush` hace algo).
+                flush: bool,
+                /// Tamaño del búfer compartido, en sectores.
+                buf_sectors: u32,
+            },
+            /// Leer `count` sectores desde `sector` al principio del búfer.
+            Read(2) {
+                /// Primer sector.
+                sector: u64,
+                /// Cantidad.
+                count: u32,
+            },
+            /// Escribir lo que hay al principio del búfer.
+            Write(3) {
+                /// Primer sector.
+                sector: u64,
+                /// Cantidad.
+                count: u32,
+            },
+            /// Que todo lo escrito quede en el disco.
+            Flush(5) {},
+            /// Respuesta a `Read`, `Write` y `Flush`.
+            Done(4) {
+                /// 0 = bien, 1 = error del dispositivo, 2 = pedido inválido.
+                status: u8,
+            },
+        }
+        start Ready;
+        client Ready { Info => Asking, Read => Busy, Write => Busy, Flush => Busy }
+        server Asking { Geometry => Ready }
+        server Busy { Done => Ready }
+    }
+}
+
+contract! {
+    /// Red virtio (`enlace` ↔ `virtnet`): un **flujo**. Los paquetes van y
+    /// vienen sin pedido ni respuesta, así que no hay cota de mensajes en
+    /// vuelo (`Contract.stream_unbounded`). `virtnet` entrega lo que llega
+    /// con `try_send` y descarta si la cola del enlace está llena, como una
+    /// placa de red con el anillo lleno: así nunca se bloquean los dos a la
+    /// vez esperándose.
+    pub stream net {
+        messages {
+            /// Paquete para mandar a la red.
+            Send(1) {
+                /// El paquete.
+                packet: Bytes<224>,
+            },
+            /// Paquete que llegó de la red.
+            Recv(2) {
+                /// El paquete.
+                packet: Bytes<224>,
+            },
+        }
+        client sends { Send }
+        server sends { Recv }
+    }
+}

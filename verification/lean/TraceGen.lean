@@ -189,19 +189,29 @@ def randContract : GenM Contract.Contract := do
 def contractTraces : GenM Unit := do
   emit "# Generado por `lake exe tracegen` (verification/lean). No editar a mano."
   emit "# C <inicio> <origen,dir,etiqueta,destino>... => some <cota> | none   (Contract.check)"
+  emit "# F <inicio> <transiciones>... => true | false   (Contract.streamB, mismo contrato que la línea C anterior)"
   emit "# P <nombre> <inicio> <transiciones>...   (tablas de nsos_contract::protocols)"
   for c in [Contract.mixed, Contract.nondet, Contract.flood, Contract.echoOld,
             Contract.echo, Contract.note, Contract.counter, Contract.handover,
-            Contract.restore] do
+            Contract.restore, Contract.storeRoot, Contract.storeObj, Contract.storeShare,
+            Contract.console, Contract.block, Contract.net] do
     emit s!"C {c.start} {transStr c} => {checkStr c}"
+    emit s!"F {c.start} {transStr c} => {Contract.streamB c}"
   for _ in [0:400] do
     let c ← randContract
     emit s!"C {c.start} {transStr c} => {checkStr c}"
+    emit s!"F {c.start} {transStr c} => {Contract.streamB c}"
   emit s!"P echo {Contract.echo.start} {transStr Contract.echo}"
   emit s!"P note {Contract.note.start} {transStr Contract.note}"
   emit s!"P counter {Contract.counter.start} {transStr Contract.counter}"
   emit s!"P handover {Contract.handover.start} {transStr Contract.handover}"
   emit s!"P restore {Contract.restore.start} {transStr Contract.restore}"
+  emit s!"P store_root {Contract.storeRoot.start} {transStr Contract.storeRoot}"
+  emit s!"P store_obj {Contract.storeObj.start} {transStr Contract.storeObj}"
+  emit s!"P store_share {Contract.storeShare.start} {transStr Contract.storeShare}"
+  emit s!"P console {Contract.console.start} {transStr Contract.console}"
+  emit s!"P block {Contract.block.start} {transStr Contract.block}"
+  emit s!"P net {Contract.net.start} {transStr Contract.net}"
 
 def writeLines (path : String) (gen : GenM Unit) : IO Unit := do
   let (((), _), lines) ← (gen.run ⟨20261119⟩).run #[]

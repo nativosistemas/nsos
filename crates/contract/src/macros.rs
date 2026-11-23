@@ -45,8 +45,9 @@
 ///
 /// Al compilar comprueba con [`check`](crate::check) que el contrato esté
 /// bien formado (ningún estado deja mandar a las dos puntas, cada etiqueta
-/// lleva a un solo estado, la cota entra en la cola del kernel), que las
-/// etiquetas no se repitan y que cada mensaje entre en un [`Message`]
+/// lleva a un solo estado, la cota entra en la cola del kernel), que en un
+/// mismo estado no haya dos mensajes con la misma etiqueta y que cada
+/// mensaje entre en un [`Message`]
 /// (`crate::abi::Message`). Un mensaje repetido en un estado es un error de
 /// compilación (variante repetida).
 #[macro_export]
@@ -73,49 +74,12 @@ macro_rules! contract {
         $vis mod $name {
             use super::*;
 
-            $(
-                $(#[$mmeta])*
-                #[derive(Debug)]
-                pub struct $msg {
-                    $( $(#[$fmeta])* pub $field: $fty, )*
-                }
-
-                impl $crate::Msg for $msg {
-                    const LABEL: u64 = $label;
-
-                    fn encode(self, m: &mut $crate::abi::Message) {
-                        #[allow(unused_mut, unused_variables)]
-                        let mut w = $crate::Writer::new(m, $label);
-                        let $msg { $( $field, )* } = self;
-                        $( $crate::Field::put($field, &mut w); )*
-                    }
-
-                    fn decode<T: $crate::Transport>(
-                        t: T,
-                        m: &$crate::abi::Message,
-                    ) -> ::core::option::Option<Self> {
-                        if m.header.label != $label {
-                            return ::core::option::Option::None;
-                        }
-                        #[allow(unused_mut)]
-                        let mut r = $crate::Reader::new(m);
-                        $( let $field = <$fty as $crate::Field>::take(&mut r, t)?; )*
-                        let _ = t;
-                        if !r.finish() {
-                            return ::core::option::Option::None;
-                        }
-                        ::core::option::Option::Some($msg { $( $field, )* })
-                    }
-                }
-
-                const _: () = assert!(
-                    $crate::__fits(
-                        0 $( + <$fty as $crate::Field>::DATA )*,
-                        0 $( + <$fty as $crate::Field>::CAPS )*
-                    ),
-                    "contrato: un mensaje no entra en los datos o capacidades de un Message"
-                );
-            )*
+            $crate::__contract_messages! {
+                $(
+                    $(#[$mmeta])*
+                    $msg($label) { $( $(#[$fmeta])* $field : $fty ),* }
+                ),*
+            }
 
             #[allow(dead_code)]
             #[derive(Clone, Copy)]
@@ -142,12 +106,16 @@ macro_rules! contract {
             /// Estado inicial.
             pub const START: u16 = StateId::$start as u16;
 
+            /// Identificador del contrato (el que se declara al crear el
+            /// canal y se exige al abrirlo o recibirlo).
+            pub const ID: u64 = $crate::__contract_id(stringify!($name), TRANSITIONS);
+
             /// Etiquetas de todos los mensajes.
             pub const LABELS: &[u64] = &[ $( $label, )* ];
 
             /// Máximo de mensajes en vuelo entre las dos puntas
             /// (`Contract.queue_bound`).
-            pub const BOUND: u32 = $crate::__assert_contract(TRANSITIONS, LABELS);
+            pub const BOUND: u32 = $crate::__assert_contract(TRANSITIONS);
             const _: u32 = BOUND;
 
             /// Crea un canal con un extremo de cada lado, en el estado inicial.
@@ -157,7 +125,7 @@ macro_rules! contract {
                 ($crate::Chan<T, client::$start>, $crate::Chan<T, server::$start>),
                 $crate::abi::Error,
             > {
-                let (a, b) = $crate::Transport::channel_create(t)?;
+                let (a, b) = $crate::Transport::channel_create(t, ID)?;
                 ::core::result::Result::Ok((
                     $crate::Chan::__from_parts(t, a),
                     $crate::Chan::__from_parts(t, b),
@@ -175,6 +143,216 @@ macro_rules! contract {
                 sends { $( $ss { $( $smsg => $sdst ),* } )* }
                 receives { $( $cs { $( $cmsg => $cdst ),* } )* }
                 ends { $( $es )* }
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $vis:vis stream $name:ident {
+            messages {
+                $(
+                    $(#[$mmeta:meta])*
+                    $msg:ident($label:expr) {
+                        $( $(#[$fmeta:meta])* $field:ident : $fty:ty ),* $(,)?
+                    }
+                ),* $(,)?
+            }
+            client sends { $( $cmsg:ident ),* $(,)? }
+            server sends { $( $smsg:ident ),* $(,)? }
+        }
+    ) => {
+        $(#[$meta])*
+        #[allow(unused_imports)]
+        $vis mod $name {
+            use super::*;
+
+            $crate::__contract_messages! {
+                $(
+                    $(#[$mmeta])*
+                    $msg($label) { $( $(#[$fmeta])* $field : $fty ),* }
+                ),*
+            }
+
+            /// Tabla del flujo: todas las transiciones van del estado único
+            /// a sí mismo (`Contract.streamB`).
+            pub const TRANSITIONS: &[$crate::Transition] = &[
+                $( $crate::Transition {
+                    src: 0,
+                    dir: $crate::Dir::ClientToServer,
+                    label: <$cmsg as $crate::Msg>::LABEL,
+                    dst: 0,
+                }, )*
+                $( $crate::Transition {
+                    src: 0,
+                    dir: $crate::Dir::ServerToClient,
+                    label: <$smsg as $crate::Msg>::LABEL,
+                    dst: 0,
+                }, )*
+            ];
+
+            /// Estado inicial (el único).
+            pub const START: u16 = 0;
+
+            /// Identificador del contrato.
+            pub const ID: u64 = $crate::__contract_id(stringify!($name), TRANSITIONS);
+
+            const _: () = $crate::__assert_stream(TRANSITIONS);
+
+            /// Crea un canal con un extremo de cada lado.
+            pub fn pair<T: $crate::Transport>(
+                t: T,
+            ) -> ::core::result::Result<
+                ($crate::Chan<T, client::Open>, $crate::Chan<T, server::Open>),
+                $crate::abi::Error,
+            > {
+                let (a, b) = $crate::Transport::channel_create(t, ID)?;
+                ::core::result::Result::Ok((
+                    $crate::Chan::__from_parts(t, a),
+                    $crate::Chan::__from_parts(t, b),
+                ))
+            }
+
+            $crate::__stream_side! {
+                client, "el cliente",
+                sends { $( $cmsg ),* }
+                receives { $( $smsg ),* }
+            }
+            $crate::__stream_side! {
+                server, "el servidor",
+                sends { $( $smsg ),* }
+                receives { $( $cmsg ),* }
+            }
+        }
+    };
+}
+
+/// Los structs de los mensajes de un contrato, con su codificación.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __contract_messages {
+    (
+        $(
+            $(#[$mmeta:meta])*
+            $msg:ident($label:expr) {
+                $( $(#[$fmeta:meta])* $field:ident : $fty:ty ),*
+            }
+        ),*
+    ) => {
+    $(
+        $(#[$mmeta])*
+        #[derive(Debug)]
+        pub struct $msg {
+            $( $(#[$fmeta])* pub $field: $fty, )*
+        }
+
+        impl $crate::Msg for $msg {
+            const LABEL: u64 = $label;
+
+            fn encode(self, m: &mut $crate::abi::Message) {
+                #[allow(unused_mut, unused_variables)]
+                let mut w = $crate::Writer::new(m, $label);
+                let $msg { $( $field, )* } = self;
+                $( $crate::Field::put($field, &mut w); )*
+            }
+
+            fn decode<T: $crate::Transport>(
+                t: T,
+                m: &$crate::abi::Message,
+            ) -> ::core::option::Option<Self> {
+                if m.header.label != $label {
+                    return ::core::option::Option::None;
+                }
+                #[allow(unused_mut)]
+                let mut r = $crate::Reader::new(m);
+                $( let $field = <$fty as $crate::Field>::take(&mut r, t)?; )*
+                let _ = t;
+                if !r.finish() {
+                    return ::core::option::Option::None;
+                }
+                ::core::option::Option::Some($msg { $( $field, )* })
+            }
+        }
+
+        const _: () = assert!(
+            $crate::__fits(
+                0 $( + <$fty as $crate::Field>::DATA )*,
+                0 $( + <$fty as $crate::Field>::CAPS )*
+            ),
+            "contrato: un mensaje no entra en los datos o capacidades de un Message"
+        );
+    )*
+    };
+}
+
+/// Un lado de un flujo: un solo estado (`Open`) en el que manda y recibe.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __stream_side {
+    (
+        $side:ident, $who:literal,
+        sends { $( $smsg:ident ),* }
+        receives { $( $rmsg:ident ),* }
+    ) => {
+        #[doc = concat!("Lado de ", $who, ": un solo estado, `Open`.")]
+        pub mod $side {
+            use super::*;
+
+            /// El único estado del flujo: se manda y se recibe sin cambiar
+            /// de estado.
+            #[derive(Debug)]
+            pub struct Open;
+            impl $crate::State for Open {
+                const ID: u16 = 0;
+                const CONTRACT: u64 = super::ID;
+            }
+            $( impl $crate::Sends<super::$smsg> for Open {
+                type Next = Open;
+            } )*
+            impl $crate::Receives for Open {
+                type Branch<T: $crate::Transport> = recv::Open<T>;
+
+                fn decode<T: $crate::Transport>(
+                    t: T,
+                    h: $crate::abi::CapHandle,
+                    m: &$crate::abi::Message,
+                ) -> ::core::option::Option<recv::Open<T>> {
+                    $(
+                        if m.header.label == <super::$rmsg as $crate::Msg>::LABEL {
+                            let msg = <super::$rmsg as $crate::Msg>::decode(t, m)?;
+                            return ::core::option::Option::Some(recv::Open::$rmsg(
+                                $crate::Chan::__from_parts(t, h),
+                                msg,
+                            ));
+                        }
+                    )*
+                    let _ = (t, h, m);
+                    ::core::option::Option::None
+                }
+            }
+
+            /// Lo que puede llegar.
+            pub mod recv {
+                /// Lo que puede llegar en `Open`.
+                // Los mensajes van por valor: las cells no tienen heap.
+                #[allow(clippy::large_enum_variant)]
+                pub enum Open<T: $crate::Transport> {
+                    $(
+                        #[doc = concat!("`", stringify!($rmsg), "`; el canal sigue en `Open`.")]
+                        $rmsg($crate::Chan<T, super::Open>, super::super::$rmsg),
+                    )*
+                }
+
+                impl<T: $crate::Transport> ::core::fmt::Debug for Open<T> {
+                    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                        match *self {
+                            $( Open::$rmsg(ref c, ref m) => f
+                                .debug_tuple(stringify!($rmsg))
+                                .field(c)
+                                .field(m)
+                                .finish(), )*
+                        }
+                    }
+                }
             }
         }
     };
@@ -201,6 +379,7 @@ macro_rules! __contract_side {
                 pub struct $s;
                 impl $crate::State for $s {
                     const ID: u16 = StateId::$s as u16;
+                    const CONTRACT: u64 = super::ID;
                 }
                 $( impl $crate::Sends<super::$smsg> for $s {
                     type Next = $sdst;
@@ -213,6 +392,7 @@ macro_rules! __contract_side {
                 pub struct $r;
                 impl $crate::State for $r {
                     const ID: u16 = StateId::$r as u16;
+                    const CONTRACT: u64 = super::ID;
                 }
                 impl $crate::Receives for $r {
                     type Branch<T: $crate::Transport> = recv::$r<T>;
@@ -243,6 +423,7 @@ macro_rules! __contract_side {
                 pub struct $e;
                 impl $crate::State for $e {
                     const ID: u16 = StateId::$e as u16;
+                    const CONTRACT: u64 = super::ID;
                 }
             )*
 
