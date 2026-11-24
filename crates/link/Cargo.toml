@@ -4,6 +4,7 @@ description = "Enlace autenticado entre máquinas: HMAC-SHA256, sesiones y secue
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 # `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
 [lints.rust]

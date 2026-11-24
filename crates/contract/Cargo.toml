@@ -4,6 +4,7 @@ description = "Contratos de canal tipados al estilo Singularity: protocolos como
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 # `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
 [lints.rust]

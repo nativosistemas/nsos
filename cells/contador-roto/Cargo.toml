@@ -3,6 +3,7 @@ name = "cell-contador-roto"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "contador-roto"

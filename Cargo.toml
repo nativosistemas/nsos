@@ -42,6 +42,7 @@ default-members = ["crates/abi", "crates/kcore", "crates/link", "crates/store", 
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/nativosistemas/nsos"
+license = "MIT OR Apache-2.0"
 
 [profile.dev]
 panic = "abort"

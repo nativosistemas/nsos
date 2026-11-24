@@ -101,6 +101,8 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    un derecho específico para migrar.
 8. **Arranque sin verificación.** Limine carga el kernel y las cells sin
    comprobar firmas; quien pueda cambiar la imagen ISO controla el sistema.
+   Al menos la imagen se arma con un Limine fijo: `build-image.sh` usa un
+   commit concreto y falla si la copia local no coincide.
 9. **Un solo núcleo.** Varias invariantes (syscalls con interrupciones
    apagadas, la pila de kernel en una variable global) asumen un CPU. Con
    SMP hay que revisarlas antes de prender el segundo núcleo.
