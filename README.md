@@ -94,7 +94,7 @@ además el mapa de memoria de Limine.
 * [Arquitectura](docs/arquitectura.md)
 * [ABI de IPC y modelo de capacidades](docs/abi-ipc-capacidades.md)
 * [Contratos de canal tipados](docs/contratos.md)
-* [Hoja de ruta](docs/hoja-de-ruta.md)
+* [Hoja de ruta](docs/hoja-de-ruta.md) e [historial de hitos](docs/historial.md)
 * [Almacenamiento propio](docs/almacenamiento.md)
 * [Registro de `unsafe`](docs/unsafe.md)
 * [Verificación formal en Lean](verification/lean/README.md)
