@@ -43,7 +43,7 @@ casos borde.
 | `pio_access_in_range` | `crates/kcore/src/platform.rs` | Un acceso de una cell a sus puertos que acepta `pio_offset` cae entero en su rango y en la ventana de E/S. |
 | `alloc_any` | `crates/kcore/src/frame_bitmap.rs` | Desde cualquier bitmap de hasta 128 marcos que cumpla el invariante (`free` cuenta los marcos libres; bits y `hint` cualesquiera, también los que sobran al final de la última palabra): `alloc` entrega un marco que estaba libre y dentro del rango, lo marca ocupado y no toca ningún otro; si no entrega nada, no había libres. Dos cells nunca reciben el mismo marco. |
 | `free_any` | `crates/kcore/src/frame_bitmap.rs` | `free_frame` con cualquier número de marco: solo libera uno ocupado y dentro del rango; uno libre da `DoubleFree` y uno fuera de rango `OutOfRange`, sin cambiar nada. |
-| `alloc_contiguous_any` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 72 marcos, cualquier `n <= 3` y cualquier alineación `<= 8`: los marcos que entrega estaban todos libres, están alineados y dentro del rango, y no toca ningún otro. |
+| `alloc_contiguous_0`, `alloc_contiguous_2`, `alloc_contiguous_3` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 72 marcos, `n` de 0, 2 y 3 (concreto: con `n` simbólico CBMC se queda sin memoria) y cualquier alineación `<= 8`: con `n = 0` no entrega nada; si no, los marcos que entrega estaban todos libres, están alineados y dentro del rango, y no toca ningún otro. |
 | `regions_any` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 72 marcos y cualquier dirección y largo de 64 bits: sin pánicos ni desbordes; `reserve_region` ocupa todo marco que toca la región y `release_region` libera solo los marcos enteros dentro de ella. |
 | `new_any` (bitmap) | `crates/kcore/src/frame_bitmap.rs` | `FrameBitmap::new` con cualquier tamaño: todo ocupado, sin libres y con el invariante. |
 | `check_item_any` | `crates/kcore/src/wait.rs` | Un ítem de `wait` aceptado pide al menos una señal, todas emitibles por el tipo de su objeto, con `reserved` en 0; memoria, puertos e imágenes nunca se aceptan. |
@@ -76,7 +76,7 @@ solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
 Cada una hace fallar la prueba indicada: no saltear en `alloc` los bits que
 sobran después del último marco (`alloc_any`), quitar el control de
 `DoubleFree` (`free_any`), saltar un hueco sin redondear a la alineación
-(`alloc_contiguous_any`) y redondear `release_region` hacia afuera
+(`alloc_contiguous_2`) y redondear `release_region` hacia afuera
 (`regions_any`).
 
 Los invariantes se cuentan por palabra (`count_ones` sobre máscaras), no

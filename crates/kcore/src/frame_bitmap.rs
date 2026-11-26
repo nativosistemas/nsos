@@ -283,20 +283,19 @@ mod proofs {
     const SMALL: usize = 72;
 
     /// `alloc_contiguous` entrega `n` marcos que estaban todos libres,
-    /// alineados y dentro del rango, y no toca ningún otro.
-    #[kani::proof]
-    #[kani::unwind(74)]
-    fn alloc_contiguous_any() {
+    /// alineados y dentro del rango, y no toca ningún otro. `n` es concreto
+    /// en cada prueba: con `n` simbólico, CBMC desenrolla el bucle interno
+    /// tantas veces como el externo y se queda sin memoria.
+    fn alloc_contiguous_n(n: usize) {
         let before: [u64; W] = kani::any();
         let mut bits = before;
         let mut b = any_state(&mut bits, SMALL);
         let free0 = b.free;
-        let n: usize = kani::any();
         let align: usize = kani::any();
-        kani::assume(n <= 3 && align <= 8);
+        kani::assume(align <= 8);
         match b.alloc_contiguous(n, align) {
             Some(f) => {
-                assert!(n > 0 && f % align == 0);
+                assert!(f % align == 0);
                 assert!(f + n <= b.nframes);
                 assert!(taken(&b, &before, f, f + n));
                 assert!(same_outside(&b, &before, f, f + n));
@@ -305,6 +304,27 @@ mod proofs {
             None => assert!(same_outside(&b, &before, 0, 0)),
         }
         assert!(invariant(&b));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(74)]
+    fn alloc_contiguous_2() {
+        alloc_contiguous_n(2);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(74)]
+    fn alloc_contiguous_3() {
+        alloc_contiguous_n(3);
+    }
+
+    /// `n == 0` nunca entrega nada.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn alloc_contiguous_0() {
+        let mut bits: [u64; W] = kani::any();
+        let mut b = any_state(&mut bits, SMALL);
+        assert!(b.alloc_contiguous(0, kani::any()).is_none());
     }
 
     /// Las regiones del mapa de memoria (solo al arrancar), con cualquier
