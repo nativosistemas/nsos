@@ -220,15 +220,21 @@ fn timer_ticks() -> Result<(), &'static str> {
 
 fn preemption() -> Result<(), &'static str> {
     // Tres hilos que nunca ceden la CPU: si los tres avanzan y se alternan,
-    // el timer los está apropiando.
+    // el timer los está apropiando. Corren hasta ver `TARGET` alternancias
+    // (con un plazo de 5 s), no una cantidad fija de ticks: si el host frena
+    // a QEMU, los ticks atrasados llegan juntos y los hilos casi no corren
+    // entre uno y otro, y con un plazo de 15 ticks la prueba fallaba a veces
+    // sin que el scheduler anduviera mal.
+    const TARGET: u64 = 6;
     let counters: Arc<[AtomicU64; 3]> = Arc::new(Default::default());
     let last = Arc::new(AtomicU64::new(u64::MAX));
     let alternations = Arc::new(AtomicU64::new(0));
-    let end = time::ticks() + 15;
+    let end = time::ticks() + 5 * u64::from(crate::TIMER_HZ);
     for i in 0..3u64 {
         let (c, l, a) = (counters.clone(), last.clone(), alternations.clone());
         sched::spawn("busy", move || {
-            while time::ticks() < end {
+            let ran_all = |c: &[AtomicU64; 3]| c.iter().all(|c| c.load(Ordering::Relaxed) > 0);
+            while time::ticks() < end && (a.load(Ordering::Relaxed) < TARGET || !ran_all(&c)) {
                 c[i as usize].fetch_add(1, Ordering::Relaxed);
                 if l.swap(i, Ordering::Relaxed) != i {
                     a.fetch_add(1, Ordering::Relaxed);
@@ -243,7 +249,7 @@ fn preemption() -> Result<(), &'static str> {
         "algún hilo no corrió",
     )?;
     check(
-        alternations.load(Ordering::Relaxed) >= 6,
+        alternations.load(Ordering::Relaxed) >= TARGET,
         "no hubo apropiación",
     )
 }
