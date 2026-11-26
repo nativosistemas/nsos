@@ -82,7 +82,12 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    El scheduler es round-robin sin prioridades: no hay garantías de tiempo
    real. `wait` no agrega un vector nuevo: cada objeto anota a lo sumo un
    registro por hilo y por lista, y el scheduler un plazo por hilo. *Mitigación futura*: cuotas de memoria y de cells por supervisor
-   (las cuenta quien crea la cell).
+   (las cuenta quien crea la cell). El diseño ya está modelado y demostrado
+   en Lean, antes del código (`Nsos/Quota.lean`): si los marcos libres son
+   la suma de las cuotas disponibles, una cell con cuota siempre consigue
+   memoria, haga lo que haga el resto (`QuotaModel.no_starvation`). Falta
+   implementarlo en el kernel; la memoria del propio kernel (pilas, colas,
+   CSpace) no entra en el modelo.
 5. **La consola es compartida y falsificable.** `debug_log` antepone el
    nombre de la cell solo al inicio de cada escritura; una cell puede
    escribir un salto de línea y luego texto que parezca venir de otra.
