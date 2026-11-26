@@ -49,7 +49,7 @@ casos borde.
 | `frames_any` | `crates/kcore/src/frame_bitmap.rs` | Con cualquier dirección y largo de 64 bits: `inner_frames` da exactamente los marcos enteros dentro de la región (`release_region`) y `outer_frames` los que la tocan (`reserve_region`). |
 | `alloc_contiguous_small` | `crates/kcore/src/frame_bitmap.rs` | `alloc_contiguous` entero con hasta 8 marcos y cualquier `n` y alineación `<= 8`: entrega marcos que estaban libres, alineados y dentro del rango, y no toca ningún otro. |
 | `new_any` (bitmap) | `crates/kcore/src/frame_bitmap.rs` | `FrameBitmap::new` con cualquier tamaño: todo ocupado, sin libres y con el invariante. |
-| `segment_any` | `crates/kcore/src/elf.rs` | Con cualesquiera campos de un `PT_LOAD` y cualquier largo de archivo, sin pánicos ni desbordes. Si se acepta, el segmento cumple todo lo que `cell::spawn` da por cierto para mapearlo y copiarlo sin más controles: páginas enteras, dentro de `[USER_MIN, USER_MAX)` sin desbordar, los datos dentro del archivo con `filesz <= memsz`, nunca W+X, permisos iguales a los del ELF, y cada byte del archivo en la dirección que pidió el ELF. |
+| `segment_any` | `crates/kcore/src/elf.rs` | Con cualesquiera campos de un `PT_LOAD` y cualquier largo de archivo, sin pánicos ni desbordes. Si se acepta, el segmento cumple todo lo que `cell::spawn` da por cierto para mapearlo y copiarlo sin más controles: páginas enteras, dentro de `[USER_MIN, IMAGE_MAX)` sin desbordar (debajo de la pila de usuario y de su página de guarda), los datos dentro del archivo con `filesz <= memsz`, nunca W+X, permisos iguales a los del ELF, y cada byte del archivo en la dirección que pidió el ELF. |
 | `header_any` | `crates/kcore/src/elf.rs` | Validar cualquier cabecera de hasta 64 bytes nunca entra en pánico. |
 | `overlaps_any_sound` | `crates/kcore/src/elf.rs` | Si `overlaps_any` dice que un segmento válido no se solapa con los anteriores (hasta dos), es disjunto de cada uno. `push_disjoint` solo agrega con esa respuesta, así que, por inducción, los segmentos de una imagen aceptada son disjuntos y ninguna página se mapea dos veces. |
 | `check_entry_any` | `crates/kcore/src/elf.rs` | Si `check_entry` acepta, la entrada cae en un segmento ejecutable. |
@@ -129,9 +129,10 @@ QEMU).
 
 ### Mutaciones del validador ELF
 
-Cada una hace fallar la prueba indicada: quitar el control W^X, el tope
-`USER_MAX`, `filesz <= memsz` o el control de que los datos estén dentro
-del archivo, y redondear `memsz` sin sumar el desplazamiento dentro de la
+Cada una hace fallar la prueba indicada: quitar el control W^X,
+`filesz <= memsz` o el control de que los datos estén dentro del archivo;
+cambiar el tope `IMAGE_MAX` por `USER_MAX` (un segmento podría pisar la
+pila); y redondear `memsz` sin sumar el desplazamiento dentro de la
 página (`segment_any`); comparar solapes solo por el inicio del segmento
 (`overlaps_any_sound`); y aceptar una entrada en un segmento no ejecutable
 (`check_entry_any`).

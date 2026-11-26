@@ -331,7 +331,7 @@ mod proofs {
         let mut bits: [u64; W] = kani::any();
         let b = any_state(&mut bits, W * 64);
         let (f, n): (usize, usize) = (kani::any(), kani::any());
-        kani::assume(n <= 3 && f + n <= b.nframes);
+        kani::assume(n <= 3 && f <= b.nframes && n <= b.nframes - f);
         match b.last_used(f, n) {
             None => assert!((0..W).all(|w| b.bits[w] & range(w, f, f + n) == 0)),
             Some(u) => {
