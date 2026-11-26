@@ -677,17 +677,15 @@ mod proofs {
         cs.check_invariants();
     }
 
-    /// Con una reserva pendiente, cualquier operación del medio (insertar,
-    /// insertar varias, quitar, duplicar o vaciar) deja lugar para ella:
+    /// Con una reserva pendiente, la operación `op` (insertar, insertar
+    /// varias, quitar, duplicar o vaciar) deja lugar para ella:
     /// `insert_reserved` después no entra en pánico, el handle vale y nombra
-    /// la capacidad insertada. Es lo que necesita `cell_spawn`.
-    #[kani::proof]
-    #[kani::unwind(6)]
-    #[kani::solver(cadical)]
-    fn insert_reserved_any() {
+    /// la capacidad insertada. Es lo que necesita `cell_spawn`. Una prueba
+    /// por operación: juntas, CBMC se queda sin memoria.
+    fn reserved_then(op: u8) {
         let (mut cs, issued) = any_state();
         let Ok(r) = cs.reserve() else { return };
-        match kani::any::<u8>() % 5 {
+        match op {
             0 => {
                 let _ = cs.insert(any_cap());
             }
@@ -712,6 +710,41 @@ mod proofs {
         let h = cs.insert_reserved(r, c.clone());
         assert!(cs.get(h) == Ok(&c));
         cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_insert() {
+        reserved_then(0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_insert_all() {
+        reserved_then(1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_remove() {
+        reserved_then(2);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_dup() {
+        reserved_then(3);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_clear() {
+        reserved_then(4);
     }
 
     /// Un handle cualquiera (incluso fabricado) nunca hace fallar a `get`.

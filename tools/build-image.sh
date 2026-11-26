@@ -26,12 +26,10 @@ case "$ARCH" in
     x86_64)
         TARGET=x86_64-unknown-none
         ISO="${ISO:-$ROOT/build/nsos.iso}"
-        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos espera desmapeo sellada bench enlace origen destino virtnet virtblk almacen escritor curioso)
         ;;
     aarch64)
         TARGET=aarch64-unknown-none-softfloat
         ISO="${ISO:-$ROOT/build/nsos-aarch64.img}"
-        CELLS=(ping pong intruso virtcon hola init fragil dormilona contador-v1 contador-v2 cliente contador-roto caos espera desmapeo sellada bench enlace origen destino virtnet virtblk almacen escritor curioso)
         ;;
     *)
         echo "ARCH desconocida: $ARCH (x86_64 o aarch64)" >&2
@@ -40,6 +38,13 @@ case "$ARCH" in
 esac
 
 cd "$ROOT"
+
+# Cells: cada carpeta de `cells/` menos el runtime `rt`.
+CELLS=()
+for d in cells/*/; do
+    c=$(basename "$d")
+    [[ "$c" == rt ]] || CELLS+=("$c")
+done
 
 # 1. Kernel
 if [[ "$PROFILE" == "release" ]]; then

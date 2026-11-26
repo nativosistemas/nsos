@@ -1,3 +1,6 @@
+# Paquetes de las cells: cada carpeta de `cells/` (menos el runtime `rt`).
+CELL_PKGS := -p nsos-rt $(patsubst cells/%/,-p cell-%,$(filter-out cells/rt/,$(sort $(wildcard cells/*/))))
+
 .PHONY: all iso run run-uefi run-arm run-almacen test smoke smoke-uefi smoke-arm smoke-almacen demo-almacen lint verify kani clean
 
 all: iso
@@ -54,9 +57,9 @@ lint:
 	cargo clippy -p nsos-kernel --target x86_64-unknown-none -- -D warnings
 	cargo clippy -p nsos-kernel --target aarch64-unknown-none-softfloat -- -D warnings
 	RUSTFLAGS="-C relocation-model=static" cargo clippy --target x86_64-unknown-none \
-		--target-dir target/cells -p nsos-rt -p cell-ping -p cell-pong -p cell-intruso -p cell-virtcon -p cell-hola -p cell-init -p cell-fragil -p cell-dormilona -p cell-contador-v1 -p cell-contador-v2 -p cell-cliente -p cell-contador-roto -p cell-caos -p cell-espera -p cell-desmapeo -p cell-sellada -p cell-bench -p cell-enlace -p cell-origen -p cell-destino -p cell-virtnet -p cell-virtblk -p cell-almacen -p cell-escritor -p cell-curioso -- -D warnings
+		--target-dir target/cells $(CELL_PKGS) -- -D warnings
 	RUSTFLAGS="-C relocation-model=static" cargo clippy --target aarch64-unknown-none-softfloat \
-		--target-dir target/cells -p nsos-rt -p cell-ping -p cell-pong -p cell-intruso -p cell-virtcon -p cell-hola -p cell-init -p cell-fragil -p cell-dormilona -p cell-contador-v1 -p cell-contador-v2 -p cell-cliente -p cell-contador-roto -p cell-caos -p cell-espera -p cell-desmapeo -p cell-sellada -p cell-bench -p cell-enlace -p cell-origen -p cell-destino -p cell-virtnet -p cell-virtblk -p cell-almacen -p cell-escritor -p cell-curioso -- -D warnings
+		--target-dir target/cells $(CELL_PKGS) -- -D warnings
 	tools/audit-unsafe.sh
 
 # Demostraciones en Lean y regeneración de las trazas del modelo
