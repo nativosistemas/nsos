@@ -179,6 +179,19 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    inundación, que el enlace ya trata como pérdida. No hay prueba en QEMU
    que inunde la red; lo cubren el modelo, el test
    `net_try_send_drops_when_full` y Kani (`try_send_any`).
+16. **Latencia en el peor caso: syscalls largas con interrupciones
+   apagadas.** Toda syscall corre con interrupciones deshabilitadas (el
+   kernel no es apropiable dentro de una syscall), y `debug_log` escribe
+   hasta 1024 bytes esperando al UART byte a byte. En QEMU el UART es
+   instantáneo, pero en hardware real a 115200 baudios son unos 89 ms sin
+   atender interrupciones ni cambiar de hilo: cualquier cell puede frenar
+   así al resto (y a los drivers) cada vez que escribe. En menor escala,
+   `cap_drop` y cada `send` con capacidades corren el recolector `ipc_gc`,
+   que recorre todos los extremos con mensajes en vuelo. No rompe el aislamiento de memoria ni de
+   capacidades, pero no hay cota de latencia. *Mitigación futura*: un búfer
+   de consola que se vacíe por la interrupción de transmisión del UART (o
+   la consola en una cell, ver punto 5), y medir en `bench` la latencia
+   máxima de syscall mientras corre `caos`.
 
 ## Supuestos de confianza
 
