@@ -41,6 +41,10 @@ casos borde.
 | `io_ranges_disjoint` | `crates/kcore/src/platform.rs` | Un paso del asignador de E/S desde cualquier estado alcanzable y con cualquier tamaño: el rango empieza en o después del primer puerto libre, el nuevo primer libre es su fin, está alineado y cabe en la ventana y en 16 bits. Por inducción, todos los rangos que entrega son disjuntos. |
 | `io_two_ranges_disjoint` | `crates/kcore/src/platform.rs` | Dos rangos seguidos con tamaños cualesquiera no se solapan (el caso concreto de la inducción). |
 | `pio_access_in_range` | `crates/kcore/src/platform.rs` | Un acceso de una cell a sus puertos que acepta `pio_offset` cae entero en su rango y en la ventana de E/S. |
+| `segment_any` | `crates/kcore/src/elf.rs` | Con cualesquiera campos de un `PT_LOAD` y cualquier largo de archivo, sin pánicos ni desbordes. Si se acepta, el segmento cumple todo lo que `cell::spawn` da por cierto para mapearlo y copiarlo sin más controles: páginas enteras, dentro de `[USER_MIN, USER_MAX)` sin desbordar, los datos dentro del archivo con `filesz <= memsz`, nunca W+X, permisos iguales a los del ELF, y cada byte del archivo en la dirección que pidió el ELF. |
+| `header_any` | `crates/kcore/src/elf.rs` | Validar cualquier cabecera de hasta 64 bytes nunca entra en pánico. |
+| `overlaps_any_sound` | `crates/kcore/src/elf.rs` | Si `overlaps_any` dice que un segmento válido no se solapa con los anteriores (hasta dos), es disjunto de cada uno. `push_disjoint` solo agrega con esa respuesta, así que, por inducción, los segmentos de una imagen aceptada son disjuntos y ninguna página se mapea dos veces. |
+| `check_entry_any` | `crates/kcore/src/elf.rs` | Si `check_entry` acepta, la entrada cae en un segmento ejecutable. |
 | `check_item_any` | `crates/kcore/src/wait.rs` | Un ítem de `wait` aceptado pide al menos una señal, todas emitibles por el tipo de su objeto, con `reserved` en 0; memoria, puertos e imágenes nunca se aceptan. |
 | `channel_signals_any` | `crates/kcore/src/wait.rs` | Con cualquier estado de canal, las señales son las del tipo y dicen exactamente lo que harían `recv` y `send`: `READABLE` sii hay mensaje, `PEER_CLOSED` sii el peer cerró, `WRITABLE` sii está abierto y su cola tiene lugar. |
 | `deadline_any` | `crates/kcore/src/wait.rs` | El plazo de `wait` nunca desborda: con `At(d)`, `d = now + timeout` exacto y no vence antes; si no entra en 64 bits es "sin plazo". |
@@ -99,6 +103,24 @@ bytes de bloque CBMC no termina en 10 minutos). Lo que lee pasa entero por
 tests en el host lo recorren con cada byte de un árbol alterado, cada
 truncamiento y miles de árboles con bytes al azar (también el DTB real de
 QEMU).
+
+### Mutaciones del validador ELF
+
+Cada una hace fallar la prueba indicada: quitar el control W^X, el tope
+`USER_MAX`, `filesz <= memsz` o el control de que los datos estén dentro
+del archivo, y redondear `memsz` sin sumar el desplazamiento dentro de la
+página (`segment_any`); comparar solapes solo por el inicio del segmento
+(`overlaps_any_sound`); y aceptar una entrada en un segmento no ejecutable
+(`check_entry_any`).
+
+`parse` entero es demasiado grande para Kani: con un archivo simbólico de
+120 bytes (cabecera y una cabecera de programa), CBMC se queda sin memoria
+con 6 GB. Por eso se divide en `header`, `segment`, `push_disjoint` (con
+`overlaps_any`) y `check_entry`, que están probados. Lo que queda es el
+bucle sobre la tabla, que lee con aritmética comprobada y no puede entrar
+en pánico. El test `pseudo_fuzz_never_panics` lo recorre en el host con
+50 000 cabeceras alteradas y comprueba las mismas propiedades sobre la
+imagen aceptada.
 
 ## Límites
 

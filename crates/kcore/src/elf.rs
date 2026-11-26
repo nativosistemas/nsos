@@ -82,7 +82,7 @@ pub struct Image {
 
 fn u16_at(b: &[u8], o: usize) -> Result<u16, ElfError> {
     Ok(u16::from_le_bytes(
-        b.get(o..o + 2)
+        b.get(o..o.checked_add(2).ok_or(ElfError::Truncated)?)
             .ok_or(ElfError::Truncated)?
             .try_into()
             .unwrap(),
@@ -90,7 +90,7 @@ fn u16_at(b: &[u8], o: usize) -> Result<u16, ElfError> {
 }
 fn u32_at(b: &[u8], o: usize) -> Result<u32, ElfError> {
     Ok(u32::from_le_bytes(
-        b.get(o..o + 4)
+        b.get(o..o.checked_add(4).ok_or(ElfError::Truncated)?)
             .ok_or(ElfError::Truncated)?
             .try_into()
             .unwrap(),
@@ -98,15 +98,26 @@ fn u32_at(b: &[u8], o: usize) -> Result<u32, ElfError> {
 }
 fn u64_at(b: &[u8], o: usize) -> Result<u64, ElfError> {
     Ok(u64::from_le_bytes(
-        b.get(o..o + 8)
+        b.get(o..o.checked_add(8).ok_or(ElfError::Truncated)?)
             .ok_or(ElfError::Truncated)?
             .try_into()
             .unwrap(),
     ))
 }
 
-/// Valida un ELF y describe cómo cargarlo.
-pub fn parse(b: &[u8]) -> Result<Image, ElfError> {
+/// Cabecera validada: dónde está la tabla de cabeceras de programa.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Header {
+    entry: u64,
+    phoff: usize,
+    phentsize: usize,
+    phnum: usize,
+}
+
+/// Valida la cabecera. Si la acepta, la tabla de cabeceras de programa
+/// entra entera en el archivo y cada entrada tiene al menos 56 bytes, así
+/// que leer los campos de cualquier entrada nunca se sale de `b`.
+fn header(b: &[u8]) -> Result<Header, ElfError> {
     if b.len() < 64 {
         return Err(ElfError::Truncated);
     }
@@ -120,76 +131,252 @@ pub fn parse(b: &[u8]) -> Result<Image, ElfError> {
         return Err(ElfError::BadHeader);
     }
     let entry = u64_at(b, 24)?;
-    let phoff = u64_at(b, 32)? as usize;
+    let phoff = u64_at(b, 32)?;
     let phentsize = u16_at(b, 54)? as usize;
     let phnum = u16_at(b, 56)? as usize;
     if phentsize < 56 {
         return Err(ElfError::BadHeader);
     }
-    let table_end = phnum
-        .checked_mul(phentsize)
+    table(phoff, phentsize, phnum, b.len() as u64)?;
+    Ok(Header {
+        entry,
+        phoff: phoff as usize,
+        phentsize,
+        phnum,
+    })
+}
+
+/// La tabla de cabeceras de programa entra entera en un archivo de
+/// `file_len` bytes. Se cuenta en 64 bits: en un objetivo de 32 bits,
+/// convertir `phoff` antes a `usize` podría truncarlo.
+fn table(phoff: u64, phentsize: usize, phnum: usize, file_len: u64) -> Result<(), ElfError> {
+    let table_end = (phnum as u64)
+        .checked_mul(phentsize as u64)
         .and_then(|n| n.checked_add(phoff))
         .ok_or(ElfError::Truncated)?;
-    if table_end > b.len() {
+    if table_end > file_len {
         return Err(ElfError::Truncated);
     }
+    Ok(())
+}
 
-    let mut segments: Vec<Segment> = Vec::new();
-    for i in 0..phnum {
-        let o = phoff + i * phentsize;
-        if u32_at(b, o)? != 1 {
-            continue; // solo PT_LOAD
-        }
-        let flags = u32_at(b, o + 4)?;
-        let offset = u64_at(b, o + 8)?;
-        let vaddr = u64_at(b, o + 16)?;
-        let filesz = u64_at(b, o + 32)?;
-        let memsz = u64_at(b, o + 40)?;
-        if memsz == 0 {
-            continue;
-        }
-        if segments.len() == MAX_SEGMENTS {
-            return Err(ElfError::TooManySegments);
-        }
-        let end = vaddr.checked_add(memsz).ok_or(ElfError::BadSegment)?;
-        // El desplazamiento dentro de la página debe coincidir en archivo y
-        // memoria; normalizamos ambos a inicio de página.
-        if vaddr % PAGE != offset % PAGE || filesz > memsz || vaddr < USER_MIN || end > USER_MAX {
-            return Err(ElfError::BadSegment);
-        }
-        let file_end = offset.checked_add(filesz).ok_or(ElfError::Truncated)?;
-        if file_end > b.len() as u64 {
-            return Err(ElfError::Truncated);
-        }
-        let write = flags & 2 != 0;
-        let exec = flags & 1 != 0;
-        if write && exec {
-            return Err(ElfError::WriteExec);
-        }
-        let lead = vaddr % PAGE;
-        let seg = Segment {
-            vaddr: vaddr - lead,
-            memsz: (memsz + lead).div_ceil(PAGE) * PAGE,
-            offset: offset - lead,
-            filesz: filesz + lead,
-            write,
-            exec,
-        };
-        for s in &segments {
-            if seg.vaddr < s.vaddr + s.memsz && s.vaddr < seg.vaddr + seg.memsz {
-                return Err(ElfError::Overlap);
-            }
-        }
-        segments.push(seg);
+/// Valida un `PT_LOAD` (sus campos tal como vienen en el archivo) y lo
+/// normaliza a páginas enteras. `Ok(None)` si está vacío (`memsz == 0`).
+fn segment(
+    flags: u32,
+    offset: u64,
+    vaddr: u64,
+    filesz: u64,
+    memsz: u64,
+    file_len: u64,
+) -> Result<Option<Segment>, ElfError> {
+    if memsz == 0 {
+        return Ok(None);
     }
+    let end = vaddr.checked_add(memsz).ok_or(ElfError::BadSegment)?;
+    // El desplazamiento dentro de la página debe coincidir en archivo y
+    // memoria; normalizamos ambos a inicio de página.
+    if vaddr % PAGE != offset % PAGE || filesz > memsz || vaddr < USER_MIN || end > USER_MAX {
+        return Err(ElfError::BadSegment);
+    }
+    let file_end = offset.checked_add(filesz).ok_or(ElfError::Truncated)?;
+    if file_end > file_len {
+        return Err(ElfError::Truncated);
+    }
+    let write = flags & 2 != 0;
+    let exec = flags & 1 != 0;
+    if write && exec {
+        return Err(ElfError::WriteExec);
+    }
+    let lead = vaddr % PAGE;
+    Ok(Some(Segment {
+        vaddr: vaddr - lead,
+        memsz: (memsz + lead).div_ceil(PAGE) * PAGE,
+        offset: offset - lead,
+        filesz: filesz + lead,
+        write,
+        exec,
+    }))
+}
 
-    if !segments
+/// Agrega `seg` si no se solapa con ninguno de los anteriores.
+fn push_disjoint(segments: &mut Vec<Segment>, seg: Segment) -> Result<(), ElfError> {
+    if segments.len() == MAX_SEGMENTS {
+        return Err(ElfError::TooManySegments);
+    }
+    if overlaps_any(segments, &seg) {
+        return Err(ElfError::Overlap);
+    }
+    segments.push(seg);
+    Ok(())
+}
+
+/// `seg` comparte alguna dirección con alguno de `segments`.
+fn overlaps_any(segments: &[Segment], seg: &Segment) -> bool {
+    segments
+        .iter()
+        .any(|s| seg.vaddr < s.vaddr + s.memsz && s.vaddr < seg.vaddr + seg.memsz)
+}
+
+/// El punto de entrada cae dentro de un segmento ejecutable.
+fn check_entry(segments: &[Segment], entry: u64) -> Result<(), ElfError> {
+    if segments
         .iter()
         .any(|s| s.exec && entry >= s.vaddr && entry < s.vaddr + s.memsz)
     {
-        return Err(ElfError::BadEntry);
+        Ok(())
+    } else {
+        Err(ElfError::BadEntry)
     }
-    Ok(Image { entry, segments })
+}
+
+/// Valida un ELF y describe cómo cargarlo.
+pub fn parse(b: &[u8]) -> Result<Image, ElfError> {
+    let h = header(b)?;
+    let mut segments: Vec<Segment> = Vec::new();
+    for i in 0..h.phnum {
+        // `header` ya garantiza que la tabla entra en el archivo; igual se
+        // cuenta con aritmética comprobada para que leer nunca entre en
+        // pánico, sea cual sea la cabecera.
+        let e = i
+            .checked_mul(h.phentsize)
+            .and_then(|n| n.checked_add(h.phoff))
+            .and_then(|o| b.get(o..))
+            .ok_or(ElfError::Truncated)?;
+        if u32_at(e, 0)? != 1 {
+            continue; // solo PT_LOAD
+        }
+        let seg = segment(
+            u32_at(e, 4)?,
+            u64_at(e, 8)?,
+            u64_at(e, 16)?,
+            u64_at(e, 32)?,
+            u64_at(e, 40)?,
+            b.len() as u64,
+        )?;
+        if let Some(seg) = seg {
+            push_disjoint(&mut segments, seg)?;
+        }
+    }
+    check_entry(&segments, h.entry)?;
+    Ok(Image {
+        entry: h.entry,
+        segments,
+    })
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// Un segmento cualquiera de los que puede devolver `segment`: en páginas
+    /// enteras y dentro del espacio de usuario.
+    fn any_valid_segment() -> Segment {
+        let s = Segment {
+            vaddr: kani::any(),
+            memsz: kani::any(),
+            offset: kani::any(),
+            filesz: kani::any(),
+            write: kani::any(),
+            exec: kani::any(),
+        };
+        kani::assume(s.vaddr % PAGE == 0 && s.memsz % PAGE == 0 && s.memsz > 0);
+        kani::assume(s.vaddr >= USER_MIN && s.vaddr <= USER_MAX && s.memsz <= USER_MAX - s.vaddr);
+        s
+    }
+
+    fn disjoint(a: &Segment, b: &Segment) -> bool {
+        a.vaddr + a.memsz <= b.vaddr || b.vaddr + b.memsz <= a.vaddr
+    }
+
+    /// Con cualquier cabecera y cualquier largo de archivo: sin pánicos ni
+    /// desbordes.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn header_any() {
+        let bytes: [u8; 64] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= bytes.len());
+        let _ = header(&bytes[..len]);
+    }
+
+    /// Con cualesquiera campos de un `PT_LOAD` y cualquier largo de archivo:
+    /// sin pánicos ni desbordes; si se acepta, el segmento cumple lo que el
+    /// cargador (`spawn` en `kernel/src/cell.rs`) da por cierto para mapearlo
+    /// y copiarlo sin más controles.
+    #[kani::proof]
+    fn segment_any() {
+        let (flags, offset, vaddr, filesz, memsz, file_len): (u32, u64, u64, u64, u64, u64) = (
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+        );
+        let Ok(Some(s)) = segment(flags, offset, vaddr, filesz, memsz, file_len) else {
+            return;
+        };
+        // Páginas enteras: ninguna página del segmento es de otro.
+        assert!(s.vaddr % PAGE == 0 && s.memsz % PAGE == 0 && s.memsz > 0);
+        assert!(s.offset % PAGE == 0);
+        // Dentro del espacio de usuario, sin la página nula ni la mitad del
+        // kernel, y sin desbordar al sumar.
+        assert!(s.vaddr >= USER_MIN);
+        assert!(s.vaddr.checked_add(s.memsz).is_some_and(|e| e <= USER_MAX));
+        // Lo que se copia sale del archivo y entra en el segmento.
+        assert!(s.filesz <= s.memsz);
+        assert!(s
+            .offset
+            .checked_add(s.filesz)
+            .is_some_and(|e| e <= file_len));
+        // W^X, y los permisos son los que pidió el ELF.
+        assert!(!(s.write && s.exec));
+        assert!(s.write == (flags & 2 != 0) && s.exec == (flags & 1 != 0));
+        // La normalización no mueve nada: cubre lo que pidió el ELF y cada
+        // byte del archivo cae en la dirección que pidió.
+        assert!(s.vaddr <= vaddr && vaddr + memsz <= s.vaddr + s.memsz);
+        assert!(vaddr - s.vaddr == offset - s.offset);
+        assert!(s.offset + s.filesz == offset + filesz);
+    }
+
+    /// Con cualquier lista de hasta dos segmentos válidos y cualquier
+    /// segmento válido nuevo: si `overlaps_any` dice que no se solapa, es
+    /// disjunto de cada uno. `push_disjoint` solo agrega con esa respuesta,
+    /// así que, por inducción, los segmentos de toda imagen aceptada son
+    /// disjuntos: ninguna página se mapea dos veces.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn overlaps_any_sound() {
+        let segments = [any_valid_segment(), any_valid_segment()];
+        let n: usize = kani::any();
+        kani::assume(n <= 2);
+        let c = any_valid_segment();
+        if !overlaps_any(&segments[..n], &c) {
+            let i: usize = kani::any();
+            kani::assume(i < n);
+            assert!(disjoint(&segments[i], &c));
+        }
+    }
+
+    /// Si `check_entry` acepta, la entrada cae en un segmento ejecutable.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn check_entry_any() {
+        let segments = [any_valid_segment(), any_valid_segment()];
+        let n: usize = kani::any();
+        kani::assume(n <= 2);
+        let entry: u64 = kani::any();
+        if check_entry(&segments[..n], entry).is_ok() {
+            let i: usize = kani::any();
+            kani::assume(i < n);
+            let s = segments[i];
+            kani::cover!(s.exec && s.vaddr <= entry && entry < s.vaddr + s.memsz);
+            assert!(segments[..n]
+                .iter()
+                .any(|s| s.exec && s.vaddr <= entry && entry < s.vaddr + s.memsz));
+        }
+    }
 }
 
 #[cfg(test)]
