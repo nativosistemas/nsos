@@ -21,8 +21,14 @@ jobs:
         run: make lint
       - name: Tests unitarios
         run: make test
+      # `caos` usa una semilla distinta en cada corrida y la imprime
+      # ("caos: semilla N"); para repetirla: CAOS_SEED=N make smoke.
       - name: Arranque en QEMU (BIOS)
-        run: make smoke
+        env:
+          CAOS_SEED: ${{ github.run_id }}
+        run: |
+          echo "semilla de caos: $CAOS_SEED"
+          make smoke
       - name: Benchmarks
         if: always()
         run: |
@@ -44,7 +50,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-arm qemu-efi-aarch64 mtools dosfstools
       - name: Arranque en QEMU virt (aarch64, UEFI)
-        run: make smoke-arm
+        env:
+          CAOS_SEED: ${{ github.run_id }}
+        run: |
+          echo "semilla de caos: $CAOS_SEED"
+          make smoke-arm
       - name: Benchmarks
         if: always()
         run: |
