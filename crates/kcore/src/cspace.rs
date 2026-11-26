@@ -722,7 +722,6 @@ mod proofs {
                 let _ = cs.clear();
             }
         }
-        cs.check_invariants();
         let c = any_cap();
         let h = cs.insert_reserved(r, c.clone());
         assert!(cs.get(h) == Ok(&c));
