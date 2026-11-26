@@ -153,6 +153,202 @@ impl<'a> FrameBitmap<'a> {
     }
 }
 
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// Palabras del bitmap en las pruebas: hasta 128 marcos, así entran una
+    /// palabra llena, una a medias y la vuelta del `hint` entre palabras.
+    const W: usize = 2;
+
+    /// Bits de la palabra `w` que corresponden a marcos `< n`.
+    fn below(w: usize, n: usize) -> u64 {
+        let lo = w * 64;
+        if n >= lo + 64 {
+            u64::MAX
+        } else if n <= lo {
+            0
+        } else {
+            (1u64 << (n - lo)) - 1
+        }
+    }
+
+    /// Bits de la palabra `w` que corresponden a marcos en `[lo, hi)`.
+    fn range(w: usize, lo: usize, hi: usize) -> u64 {
+        below(w, hi) & !below(w, lo)
+    }
+
+    fn used_in(bits: &[u64], f: usize) -> bool {
+        bits[f / 64] & (1 << (f % 64)) != 0
+    }
+
+    /// Marcos libres entre los primeros `nframes`, contados por palabra.
+    fn free_in(bits: &[u64], nframes: usize) -> usize {
+        (0..W)
+            .map(|w| (!bits[w] & below(w, nframes)).count_ones() as usize)
+            .sum()
+    }
+
+    /// Un bitmap cualquiera que cumpla el invariante: bits arbitrarios
+    /// (también los que sobran después de `nframes`), `free` igual a la
+    /// cantidad de marcos libres y `hint` cualquiera.
+    fn any_state(bits: &mut [u64; W], max: usize) -> FrameBitmap<'_> {
+        let nframes: usize = kani::any();
+        kani::assume(nframes <= max);
+        let free = free_in(bits, nframes);
+        FrameBitmap {
+            bits,
+            nframes,
+            free,
+            hint: kani::any(),
+        }
+    }
+
+    /// El invariante: `free` cuenta exactamente los marcos libres.
+    fn invariant(b: &FrameBitmap<'_>) -> bool {
+        b.nframes <= b.bits.len() * 64 && b.free == free_in(b.bits, b.nframes)
+    }
+
+    /// Ningún marco gestionado fuera de `[lo, hi)` cambió.
+    fn same_outside(b: &FrameBitmap<'_>, before: &[u64; W], lo: usize, hi: usize) -> bool {
+        (0..W).all(|w| (b.bits[w] ^ before[w]) & below(w, b.nframes) & !range(w, lo, hi) == 0)
+    }
+
+    /// Todos los marcos de `[lo, hi)` estaban libres antes y están ocupados
+    /// ahora.
+    fn taken(b: &FrameBitmap<'_>, before: &[u64; W], lo: usize, hi: usize) -> bool {
+        (0..W).all(|w| {
+            let r = range(w, lo, hi);
+            before[w] & r == 0 && b.bits[w] & r == r
+        })
+    }
+
+    /// `alloc` nunca entrega un marco ocupado: si devuelve `f`, `f` estaba
+    /// libre, ahora está ocupado y ningún otro cambió. Si no devuelve nada,
+    /// no había marcos libres. Así dos cells nunca reciben el mismo marco.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn alloc_any() {
+        let before: [u64; W] = kani::any();
+        let mut bits = before;
+        let mut b = any_state(&mut bits, W * 64);
+        let free0 = b.free;
+        match b.alloc() {
+            Some(f) => {
+                assert!(f < b.nframes);
+                assert!(taken(&b, &before, f, f + 1));
+                assert!(same_outside(&b, &before, f, f + 1));
+                assert!(b.free == free0 - 1);
+            }
+            None => {
+                assert!(free0 == 0);
+                assert!(same_outside(&b, &before, 0, 0));
+            }
+        }
+        assert!(invariant(&b));
+    }
+
+    /// `free_frame` solo libera un marco ocupado y dentro del rango. Un
+    /// marco libre o fuera de rango se rechaza sin cambiar nada.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn free_any() {
+        let before: [u64; W] = kani::any();
+        let mut bits = before;
+        let mut b = any_state(&mut bits, W * 64);
+        let free0 = b.free;
+        let f: usize = kani::any();
+        match b.free_frame(f) {
+            Ok(()) => {
+                assert!(f < b.nframes);
+                assert!(used_in(&before, f));
+                assert!(!b.is_used(f));
+                assert!(same_outside(&b, &before, f, f + 1));
+                assert!(b.free == free0 + 1);
+            }
+            Err(e) => {
+                if f >= b.nframes {
+                    assert!(e == FrameError::OutOfRange);
+                } else {
+                    assert!(e == FrameError::DoubleFree && !used_in(&before, f));
+                }
+                assert!(same_outside(&b, &before, 0, 0));
+            }
+        }
+        assert!(invariant(&b));
+    }
+
+    /// Marcos en las pruebas que recorren el bitmap marco a marco: cruzan
+    /// el borde entre palabras sin que CBMC explote.
+    const SMALL: usize = 72;
+
+    /// `alloc_contiguous` entrega `n` marcos que estaban todos libres,
+    /// alineados y dentro del rango, y no toca ningún otro.
+    #[kani::proof]
+    #[kani::unwind(74)]
+    fn alloc_contiguous_any() {
+        let before: [u64; W] = kani::any();
+        let mut bits = before;
+        let mut b = any_state(&mut bits, SMALL);
+        let free0 = b.free;
+        let n: usize = kani::any();
+        let align: usize = kani::any();
+        kani::assume(n <= 3 && align <= 8);
+        match b.alloc_contiguous(n, align) {
+            Some(f) => {
+                assert!(n > 0 && f % align == 0);
+                assert!(f + n <= b.nframes);
+                assert!(taken(&b, &before, f, f + n));
+                assert!(same_outside(&b, &before, f, f + n));
+                assert!(b.free == free0 - n);
+            }
+            None => assert!(same_outside(&b, &before, 0, 0)),
+        }
+        assert!(invariant(&b));
+    }
+
+    /// Las regiones del mapa de memoria (solo al arrancar), con cualquier
+    /// dirección y largo: sin pánicos ni desbordes, el invariante se
+    /// mantiene, `reserve_region` ocupa todo marco que toca la región y
+    /// `release_region` solo libera marcos enteros dentro de ella.
+    #[kani::proof]
+    #[kani::unwind(74)]
+    fn regions_any() {
+        let before: [u64; W] = kani::any();
+        let mut bits = before;
+        let mut b = any_state(&mut bits, SMALL);
+        let base: u64 = kani::any();
+        let len: u64 = kani::any();
+        let f: usize = kani::any();
+        kani::assume(f < b.nframes);
+        let (start, end) = (f as u64 * FRAME_SIZE, (f as u64 + 1) * FRAME_SIZE);
+        let reserve = kani::any();
+        if reserve {
+            b.reserve_region(base, len);
+        } else {
+            b.release_region(base, len);
+        }
+        let inside = base <= start && end <= base.saturating_add(len);
+        let touches = base < end && start < base.saturating_add(len);
+        if reserve {
+            assert!(b.is_used(f) == (used_in(&before, f) || touches));
+        } else {
+            assert!(b.is_used(f) == (used_in(&before, f) && !inside));
+        }
+        assert!(invariant(&b));
+    }
+
+    /// `new` con cualquier tamaño: todo ocupado y sin marcos libres.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn new_any() {
+        let mut bits: [u64; W] = kani::any();
+        let b = FrameBitmap::new(&mut bits, kani::any());
+        assert!(b.total() <= W * 64 && b.free_count() == 0);
+        assert!(invariant(&b));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
