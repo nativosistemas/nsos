@@ -354,21 +354,22 @@ mod proofs {
         assert!(s % align == 0 && s > used && s - used <= align);
     }
 
-    /// Marcos de las pruebas de `mark` y de `alloc_contiguous` chico.
-    const SMALL: usize = 72;
-
     /// `mark` deja exactamente los marcos de `[start, end)` (dentro del
     /// rango) con el estado pedido, no toca ningún otro y mantiene la cuenta
-    /// de libres. Con cualquier `start` y `end`, sin pánicos ni desbordes.
+    /// de libres. Con hasta 128 marcos, `start` cualquiera y cualquier `end`
+    /// tal que la ventana recorrida tenga hasta 4 marcos (puede cruzar el
+    /// borde entre palabras): con ventanas de 128, CBMC no termina en 25
+    /// minutos. Sin pánicos ni desbordes.
     #[kani::proof]
-    #[kani::unwind(74)]
+    #[kani::unwind(6)]
     fn mark_any() {
         let before: [u64; W] = kani::any();
         let mut bits = before;
-        let mut b = any_state(&mut bits, SMALL);
+        let mut b = any_state(&mut bits, W * 64);
         let (start, end, used): (usize, usize, bool) = (kani::any(), kani::any(), kani::any());
-        b.mark(start, end, used);
         let hi = end.min(b.nframes);
+        kani::assume(hi <= start.saturating_add(4));
+        b.mark(start, end, used);
         assert!(same_outside(&b, &before, start, hi));
         let full = if used { u64::MAX } else { 0 };
         assert!((0..W).all(|w| b.bits[w] & range(w, start, hi) == full & range(w, start, hi)));
