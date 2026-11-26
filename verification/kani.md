@@ -95,6 +95,13 @@ aun con `n` y la alineación concretos (CBMC desenrolla el bucle interno en
 cada vuelta del externo), por eso se prueba por piezas y entero solo con 8
 marcos. El host lo recorre con más marcos en `matches_reference_model`.
 
+### Mutaciones del CSpace
+
+Que `insert` no tenga en cuenta las reservas (el control de antes) hace
+fallar `reserved_after_insert`: la reserva se queda sin lugar en el límite
+y en los slots. Que `index_nospec` no enmascare el índice hace fallar
+`index_nospec_any`.
+
 ### Mutación de `wait`
 
 Activar `WRITABLE` aunque el peer esté cerrado (cambiar el `else if` de
