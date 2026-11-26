@@ -17,6 +17,8 @@ casos borde.
 | `attenuate_any` | `crates/abi/src/cap.rs` | Atenuar nunca agrega derechos; sin `DUPLICATE` falla. |
 | `from_bytes_any_input` | `crates/abi/src/msg.rs` | Cualquier buffer de 256 bytes: sin panics; si es válido, como mucho `MAX_CAPS` handles no nulos y `to_bytes` lo reproduce. |
 | `insert_any`, `get_with_any`, `remove_any`, `dup_any`, `remove_all_any`, `insert_all_any`, `clear_any` | `crates/kcore/src/cspace.rs` | Desde **cualquier** CSpace que cumpla los invariantes (generaciones arbitrarias, slots retirados, lista libre en cualquier orden, límites arbitrarios), cada operación con argumentos cualesquiera, incluidos handles fabricados: sin panics ni overflows, mantiene los invariantes (`check_invariants`), y cumple su contrato (un handle quitado deja de valer, `dup` no agrega derechos, `remove_all`/`insert_all` son atómicos, etc.). |
+| `reserve_any`, `insert_reserved_any`, `reserved_after_*` | `crates/kcore/src/cspace.rs` | Desde cualquier CSpace, también con reservas pendientes: `reserve` mantiene los invariantes (las vivas más las reservadas no pasan el límite y cada reserva tiene un slot). Desde cualquier CSpace con una reserva pendiente, `insert_reserved` no falla y su handle nombra la capacidad insertada; como toda operación mantiene los invariantes (las pruebas de arriba parten de estados con reservas), por inducción la reserva tiene lugar después de cualquier secuencia. `reserved_after_insert`, `_remove` y `_dup` lo comprueban componiendo la operación. Es lo que usa `cell_spawn` para no dejar una hija sin supervisor. Que `insert` no tenga en cuenta las reservas lo hace fallar. |
+| `index_nospec_any` | `crates/kcore/src/cspace.rs` | El índice enmascarado contra Spectre v1 da exactamente el slot pedido dentro de la tabla y el 0 (siempre vacío) fuera, con cualquier slot de 32 bits y cualquier largo. |
 | `cspace_get_any_handle` | `crates/kcore/src/cspace.rs` | `get` con cualquier valor de 32 bits nunca entra en pánico. |
 | `cspace_generation_never_wraps` | `crates/kcore/src/cspace.rs` | Un slot en su última generación se retira; el handle viejo no revive. |
 | `cspace_new_any_limit` | `crates/kcore/src/cspace.rs` | `CSpace::new` con cualquier límite. |
@@ -41,7 +43,15 @@ casos borde.
 | `io_ranges_disjoint` | `crates/kcore/src/platform.rs` | Un paso del asignador de E/S desde cualquier estado alcanzable y con cualquier tamaño: el rango empieza en o después del primer puerto libre, el nuevo primer libre es su fin, está alineado y cabe en la ventana y en 16 bits. Por inducción, todos los rangos que entrega son disjuntos. |
 | `io_two_ranges_disjoint` | `crates/kcore/src/platform.rs` | Dos rangos seguidos con tamaños cualesquiera no se solapan (el caso concreto de la inducción). |
 | `pio_access_in_range` | `crates/kcore/src/platform.rs` | Un acceso de una cell a sus puertos que acepta `pio_offset` cae entero en su rango y en la ventana de E/S. |
-| `segment_any` | `crates/kcore/src/elf.rs` | Con cualesquiera campos de un `PT_LOAD` y cualquier largo de archivo, sin pánicos ni desbordes. Si se acepta, el segmento cumple todo lo que `cell::spawn` da por cierto para mapearlo y copiarlo sin más controles: páginas enteras, dentro de `[USER_MIN, USER_MAX)` sin desbordar, los datos dentro del archivo con `filesz <= memsz`, nunca W+X, permisos iguales a los del ELF, y cada byte del archivo en la dirección que pidió el ELF. |
+| `alloc_any` | `crates/kcore/src/frame_bitmap.rs` | Desde cualquier bitmap de hasta 128 marcos que cumpla el invariante (`free` cuenta los marcos libres; bits y `hint` cualesquiera, también los que sobran al final de la última palabra): `alloc` entrega un marco que estaba libre y dentro del rango, lo marca ocupado y no toca ningún otro; si no entrega nada, no había libres. Dos cells nunca reciben el mismo marco. |
+| `free_any` | `crates/kcore/src/frame_bitmap.rs` | `free_frame` con cualquier número de marco: solo libera uno ocupado y dentro del rango; uno libre da `DoubleFree` y uno fuera de rango `OutOfRange`, sin cambiar nada. |
+| `alloc_contiguous_0` | `crates/kcore/src/frame_bitmap.rs` | `alloc_contiguous` con `n = 0` o con una alineación que no es potencia de 2 no entrega nada. |
+| `last_used_any`, `next_start_any` | `crates/kcore/src/frame_bitmap.rs` | Las piezas del bucle de `alloc_contiguous`. `last_used` da el último marco ocupado de la ventana, o ninguno si está entera libre. `next_start` salta a un comienzo alineado, mayor que ese marco, sin saltear ningún comienzo alineado. Todo comienzo que se saltea contiene un marco ocupado, así que el bucle solo devuelve ventanas libres y alineadas. |
+| `mark_any` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 128 marcos y cualquier `[start, end)` que recorra hasta 4 marcos (en cualquier lugar, también cruzando el borde entre palabras): `mark` deja exactamente esos marcos (dentro del rango) en el estado pedido, no toca ningún otro y mantiene la cuenta de libres. Lo usan `alloc_contiguous` y las regiones. Es la más lenta de `kcore` (unos 14 minutos). |
+| `frames_any` | `crates/kcore/src/frame_bitmap.rs` | Con cualquier dirección y largo de 64 bits: `inner_frames` da exactamente los marcos enteros dentro de la región (`release_region`) y `outer_frames` los que la tocan (`reserve_region`). |
+| `alloc_contiguous_small` | `crates/kcore/src/frame_bitmap.rs` | `alloc_contiguous` entero con hasta 8 marcos y cualquier `n` y alineación `<= 8`: entrega marcos que estaban libres, alineados y dentro del rango, y no toca ningún otro. |
+| `new_any` (bitmap) | `crates/kcore/src/frame_bitmap.rs` | `FrameBitmap::new` con cualquier tamaño: todo ocupado, sin libres y con el invariante. |
+| `segment_any` | `crates/kcore/src/elf.rs` | Con cualesquiera campos de un `PT_LOAD` y cualquier largo de archivo, sin pánicos ni desbordes. Si se acepta, el segmento cumple todo lo que `cell::spawn` da por cierto para mapearlo y copiarlo sin más controles: páginas enteras, dentro de `[USER_MIN, IMAGE_MAX)` sin desbordar (debajo de la pila de usuario y de su página de guarda), los datos dentro del archivo con `filesz <= memsz`, nunca W+X, permisos iguales a los del ELF, y cada byte del archivo en la dirección que pidió el ELF. |
 | `header_any` | `crates/kcore/src/elf.rs` | Validar cualquier cabecera de hasta 64 bytes nunca entra en pánico. |
 | `overlaps_any_sound` | `crates/kcore/src/elf.rs` | Si `overlaps_any` dice que un segmento válido no se solapa con los anteriores (hasta dos), es disjunto de cada uno. `push_disjoint` solo agrega con esa respuesta, así que, por inducción, los segmentos de una imagen aceptada son disjuntos y ninguna página se mapea dos veces. |
 | `check_entry_any` | `crates/kcore/src/elf.rs` | Si `check_entry` acepta, la entrada cae en un segmento ejecutable. |
@@ -69,6 +79,28 @@ cada una de estas mutaciones del codec las hace fallar: quitar PXN de las
 páginas de cells (`hw_agrees_with_view` y `map_then_hw`), no poner
 `APTable[0]` en las tablas del kernel, no poner `APTable[1]` en las de
 solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
+
+### Mutaciones del allocador de marcos
+
+Cada una hace fallar la prueba indicada: no saltear en `alloc` los bits que
+sobran después del último marco (`alloc_any`), quitar el control de
+`DoubleFree` (`free_any`), saltar un hueco sin redondear a la alineación
+(`next_start_any`) y redondear `release_region` hacia afuera
+(`frames_any`).
+
+Los invariantes se cuentan por palabra (`count_ones` sobre máscaras), no
+marco a marco: con un recuento marco a marco CBMC pasó los 6 GB en
+`free_any`. `alloc_contiguous` entero con 72 marcos se queda sin memoria
+aun con `n` y la alineación concretos (CBMC desenrolla el bucle interno en
+cada vuelta del externo), por eso se prueba por piezas y entero solo con 8
+marcos. El host lo recorre con más marcos en `matches_reference_model`.
+
+### Mutaciones del CSpace
+
+Que `insert` no tenga en cuenta las reservas (el control de antes) hace
+fallar `reserved_after_insert`: la reserva se queda sin lugar en el límite
+y en los slots. Que `index_nospec` no enmascare el índice hace fallar
+`index_nospec_any`.
 
 ### Mutación de `wait`
 
@@ -106,9 +138,10 @@ QEMU).
 
 ### Mutaciones del validador ELF
 
-Cada una hace fallar la prueba indicada: quitar el control W^X, el tope
-`USER_MAX`, `filesz <= memsz` o el control de que los datos estén dentro
-del archivo, y redondear `memsz` sin sumar el desplazamiento dentro de la
+Cada una hace fallar la prueba indicada: quitar el control W^X,
+`filesz <= memsz` o el control de que los datos estén dentro del archivo;
+cambiar el tope `IMAGE_MAX` por `USER_MAX` (un segmento podría pisar la
+pila); y redondear `memsz` sin sumar el desplazamiento dentro de la
 página (`segment_any`); comparar solapes solo por el inicio del segmento
 (`overlaps_any_sound`); y aceptar una entrada en un segmento no ejecutable
 (`check_entry_any`).

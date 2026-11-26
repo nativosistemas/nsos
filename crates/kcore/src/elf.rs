@@ -6,9 +6,9 @@
 //!
 //! * ELF64, little-endian, de la arquitectura del kernel ([`MACHINE`]),
 //!   ejecutable estático (`ET_EXEC`).
-//! * Cada `PT_LOAD` vive en la mitad baja de usuario, por encima de
-//!   [`USER_MIN`], alineado a página, con `filesz <= memsz` y datos dentro
-//!   del archivo.
+//! * Cada `PT_LOAD` vive en la mitad baja de usuario, entre [`USER_MIN`] e
+//!   [`IMAGE_MAX`] (debajo de la pila de usuario y de su página de guarda),
+//!   alineado a página, con `filesz <= memsz` y datos dentro del archivo.
 //! * Ningún segmento es escribible y ejecutable a la vez (W^X).
 //! * Los segmentos no se solapan.
 //! * El punto de entrada cae dentro de un segmento ejecutable.
@@ -20,6 +20,16 @@ use alloc::vec::Vec;
 pub const USER_MIN: u64 = 0x10_0000;
 /// Tope (excluido) del espacio de usuario.
 pub const USER_MAX: u64 = 0x0000_7fff_ffff_0000;
+/// Tope (excluido) de la pila de usuario que arma `cell::spawn`.
+pub const USER_STACK_TOP: u64 = 0x0000_7fff_fff0_0000;
+/// Tamaño de la pila de usuario.
+pub const USER_STACK_SIZE: u64 = 64 * 1024;
+/// Tope (excluido) de los segmentos del ELF: deja libres la pila de usuario
+/// y la página de guarda sin mapear que tiene debajo. Un segmento que las
+/// pise se rechaza acá con [`ElfError::BadSegment`].
+pub const IMAGE_MAX: u64 = USER_STACK_TOP - USER_STACK_SIZE - PAGE;
+const _: () =
+    assert!(USER_MIN < IMAGE_MAX && USER_STACK_TOP <= USER_MAX && IMAGE_MAX.is_multiple_of(PAGE));
 /// Máximo de segmentos cargables aceptados.
 pub const MAX_SEGMENTS: usize = 16;
 const PAGE: u64 = 4096;
@@ -176,7 +186,7 @@ fn segment(
     let end = vaddr.checked_add(memsz).ok_or(ElfError::BadSegment)?;
     // El desplazamiento dentro de la página debe coincidir en archivo y
     // memoria; normalizamos ambos a inicio de página.
-    if vaddr % PAGE != offset % PAGE || filesz > memsz || vaddr < USER_MIN || end > USER_MAX {
+    if vaddr % PAGE != offset % PAGE || filesz > memsz || vaddr < USER_MIN || end > IMAGE_MAX {
         return Err(ElfError::BadSegment);
     }
     let file_end = offset.checked_add(filesz).ok_or(ElfError::Truncated)?;
@@ -324,6 +334,8 @@ mod proofs {
         // kernel, y sin desbordar al sumar.
         assert!(s.vaddr >= USER_MIN);
         assert!(s.vaddr.checked_add(s.memsz).is_some_and(|e| e <= USER_MAX));
+        // Ninguna página cae en la pila de usuario ni en su guarda.
+        assert!(s.vaddr + s.memsz <= USER_STACK_TOP - USER_STACK_SIZE - PAGE);
         // Lo que se copia sale del archivo y entra en el segmento.
         assert!(s.filesz <= s.memsz);
         assert!(s
@@ -448,6 +460,28 @@ mod tests {
     }
 
     #[test]
+    fn rejects_segments_on_user_stack() {
+        // Termina justo en el tope permitido: se acepta.
+        let v = IMAGE_MAX - 0x1000;
+        let b = build(v, &[(v, 0x1000, 1, 0x1000, RX)], 0x2000);
+        assert!(parse(&b).is_ok());
+        // Un byte más pisa la página de guarda; más arriba, la pila.
+        let b = build(v, &[(v, 0x1000, 1, 0x1001, RX)], 0x2000);
+        assert_eq!(parse(&b), Err(ElfError::BadSegment));
+        let v = USER_STACK_TOP - 0x1000;
+        let b = build(
+            v,
+            &[(v, 0x1000, 1, 0x1000, RW), (0x40_1000, 0x1000, 1, 1, RX)],
+            0x2000,
+        );
+        assert_eq!(parse(&b), Err(ElfError::BadSegment));
+        // Por encima de la pila, también.
+        let v = USER_STACK_TOP;
+        let b = build(v, &[(v, 0x1000, 1, 0x1000, RX)], 0x2000);
+        assert_eq!(parse(&b), Err(ElfError::BadSegment));
+    }
+
+    #[test]
     fn rejects_kernel_addresses_and_null_page() {
         let b = build(
             0xffff_ffff_8000_0000,
@@ -521,8 +555,8 @@ mod tests {
                     assert!(!(s.write && s.exec), "segmento W+X");
                     assert!(s.vaddr >= USER_MIN, "segmento bajo USER_MIN");
                     assert!(
-                        s.vaddr.checked_add(s.memsz).is_some_and(|e| e <= USER_MAX),
-                        "segmento fuera del espacio de usuario"
+                        s.vaddr.checked_add(s.memsz).is_some_and(|e| e <= IMAGE_MAX),
+                        "segmento fuera del espacio de usuario o sobre la pila"
                     );
                     assert!(s.filesz <= s.memsz);
                     assert!(

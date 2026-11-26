@@ -1,7 +1,10 @@
 //! Cell `caos`: fuzzer de syscalls dentro de QEMU.
 //!
 //! Arranca sin capacidades y hace `ROUNDS` syscalls con números y
-//! argumentos pseudoaleatorios (semilla fija, así cada corrida es igual):
+//! argumentos pseudoaleatorios. La semilla sale de `CAOS_SEED` (un número
+//! decimal) al compilar, y si no está, es fija. La imprime al empezar: para
+//! repetir una corrida, `CAOS_SEED=<semilla> make smoke`. La CI usa una
+//! semilla distinta en cada corrida:
 //! handles inventados o propios, punteros al kernel, a su código, a su pila
 //! o sin mapear, tamaños y flags arbitrarios. Lo único que se acota es lo
 //! que la dejaría bloqueada para siempre (las esperas van con `NONBLOCK` o
@@ -21,6 +24,34 @@ use nsos_rt::abi::Error;
 use nsos_rt::{println, raw_syscall};
 
 const ROUNDS: u32 = 50_000;
+/// Semilla por omisión: "nsos-cao".
+const DEFAULT_SEED: u64 = 0x6e73_6f73_2d63_616f;
+/// Semilla de esta compilación (ver el comentario del módulo).
+const SEED: u64 = match option_env!("CAOS_SEED") {
+    Some(s) => parse_seed(s.as_bytes()),
+    None => DEFAULT_SEED,
+};
+
+/// Lee un número decimal. Si no lo es, no compila. xorshift no puede
+/// empezar en 0, así que el 0 se cambia por la semilla por omisión.
+const fn parse_seed(b: &[u8]) -> u64 {
+    assert!(!b.is_empty(), "CAOS_SEED vacía");
+    let mut n: u64 = 0;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(
+            b[i].is_ascii_digit(),
+            "CAOS_SEED tiene que ser un número decimal"
+        );
+        n = n.wrapping_mul(10).wrapping_add((b[i] - b'0') as u64);
+        i += 1;
+    }
+    if n == 0 {
+        DEFAULT_SEED
+    } else {
+        n
+    }
+}
 const KERNEL_ADDR: u64 = 0xffff_ffff_8000_0000;
 
 nsos_rt::entry!(main);
@@ -65,8 +96,8 @@ fn arg(r: &mut Rng, buf: u64) -> u64 {
 fn main() -> i32 {
     let mut buf = [0u8; 1024];
     let base = buf.as_mut_ptr() as u64;
-    // Semilla fija: "nsos-cao".
-    let mut rng = Rng(0x6e73_6f73_2d63_616f);
+    println!("caos: semilla {}", SEED);
+    let mut rng = Rng(SEED);
     // Resultados: éxitos, NoSys, BadHandle, WrongType, AccessDenied,
     // InvalidArgs, WouldBlock, PeerClosed, NoMemory, Unsupported, BadMessage,
     // TimedOut y otros.

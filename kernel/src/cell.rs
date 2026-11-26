@@ -26,10 +26,9 @@ use nsos_kcore::elf;
 pub const CSPACE_LIMIT: u32 = 1024;
 /// Mensajes máximos encolados por extremo.
 pub const QUEUE_LIMIT: usize = 64;
-/// Tope de la pila de usuario.
-pub const USER_STACK_TOP: u64 = 0x0000_7fff_fff0_0000;
-/// Tamaño de la pila de usuario.
-pub const USER_STACK_SIZE: u64 = 64 * 1024;
+/// Tope de la pila de usuario. Vive en `kcore::elf`, que rechaza los
+/// segmentos que la pisen.
+pub use elf::{USER_STACK_SIZE, USER_STACK_TOP};
 
 // ---------------------------------------------------------------- objetos
 

@@ -23,8 +23,8 @@ físico.
 
 | Propiedad | Mecanismo | Evidencia |
 |---|---|---|
-| Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells; `mem_unmap` solo quita un objeto entero mapeado por la cell | `intruso` (lectura del kernel → #PF), `fragil`, `desmapeo` (página desmapeada → #PF, y 9 rangos rechazados); ktest de W^X; Lean: `Mem.step_iso`, `Mem.never_maps_foreign`, `Mem.unmap_removes`, `Mem.unmap_only_shrinks`; Kani: `map_then_translate`, `user_range_stays_low`, `unmap_target_exact` |
-| Las cells están selladas: una cell solo ejecuta el código de su imagen ELF; no genera código ni toca el código de otra | Las páginas ejecutables salen solo de `cell::spawn` (segmentos del ELF: nunca W+X, sin solaparse, un marco nuevo por página). `EXEC` no es un derecho de un objeto `Memory` y `mem_map` lo rechaza (`kcore::paging::map_request`), así que todo objeto se mapea NX: W^X vale por marco, no solo por mapeo. No hay syscall que cree una imagen ni que cambie permisos | Lean: `Mem.step_sealed`, `Mem.exec_is_own_code`, `Mem.code_never_writable`, `Mem.obj_never_exec`; contraejemplo `Mem.exec_obj_breaks` (el `mem_map` de antes: el mismo objeto RW y RX); 3 mutaciones lo rompen. Kani: `map_request_never_exec`; del validador ELF, `segment_any` (nunca W+X, en páginas de usuario, datos dentro del archivo), `overlaps_any_sound` (sin solapes) y `check_entry_any` (7 mutaciones las rompen). QEMU: `sellada` (pedir RX o RWX, también con una copia de la capacidad, se rechaza; saltar a una página que escribió → #PF o instruction abort; si el kernel la mapeara sin NX, ejecuta lo que escribió y ktest falla); `intruso`: `mem_map` RX y RWX |
+| Una cell no lee ni escribe memoria del kernel ni de otra cell | Tablas de páginas propias por cell; la mitad alta sin bit USER; W^X en kernel y cells; `mem_unmap` solo quita un objeto entero mapeado por la cell | `intruso` (lectura del kernel → #PF), `fragil`, `desmapeo` (página desmapeada → #PF, y 9 rangos rechazados); ktest de W^X; Lean: `Mem.step_iso`, `Mem.never_maps_foreign`, `Mem.unmap_removes`, `Mem.unmap_only_shrinks`; Kani: `map_then_translate`, `user_range_stays_low`, `unmap_target_exact`; el allocador de marcos nunca entrega un marco ocupado ni libera uno libre (`alloc_any`, `free_any`, `last_used_any`, `next_start_any`, `mark_any`, `alloc_contiguous_small`), así que dos cells no comparten un marco por error del allocador |
+| Las cells están selladas: una cell solo ejecuta el código de su imagen ELF; no genera código ni toca el código de otra | Las páginas ejecutables salen solo de `cell::spawn` (segmentos del ELF: nunca W+X, sin solaparse, debajo de la pila de usuario, un marco nuevo por página). `EXEC` no es un derecho de un objeto `Memory` y `mem_map` lo rechaza (`kcore::paging::map_request`), así que todo objeto se mapea NX: W^X vale por marco, no solo por mapeo. No hay syscall que cree una imagen ni que cambie permisos | Lean: `Mem.step_sealed`, `Mem.exec_is_own_code`, `Mem.code_never_writable`, `Mem.obj_never_exec`; contraejemplo `Mem.exec_obj_breaks` (el `mem_map` de antes: el mismo objeto RW y RX); 3 mutaciones lo rompen. Kani: `map_request_never_exec`; del validador ELF, `segment_any` (nunca W+X, en páginas de usuario, datos dentro del archivo), `overlaps_any_sound` (sin solapes) y `check_entry_any` (7 mutaciones las rompen). QEMU: `sellada` (pedir RX o RWX, también con una copia de la capacidad, se rechaza; saltar a una página que escribió → #PF o instruction abort; si el kernel la mapeara sin NX, ejecuta lo que escribió y ktest falla); `intruso`: `mem_map` RX y RWX |
 | El kernel no puede ser engañado para tocar memoria ajena en nombre de una cell | `usercopy` traduce cada página con las tablas de la cell y exige USER (y WRITABLE); nunca desreferencia punteros de usuario | `intruso`: punteros al kernel y a código propio; `caos`: 50 000 syscalls al azar |
 | …y eso lo hace cumplir la CPU | **SMAP**: el kernel no puede acceder a páginas de usuario; **SMEP**: no puede ejecutarlas. `AC` se limpia en cada entrada (SFMASK y `clac`). En ARM64: **PAN** (se repone en cada excepción) y **PXN** en toda página de cell | `test-smap-fault`: una lectura directa del kernel a una página de usuario termina en #PF (en ARM64, en un permission fault) |
 | En ARM64, lo que ve el kernel es lo que hace cumplir la MMU | Codec entre entradas neutras y descriptores ARM64 (`kcore::paging_arm64`); `TCR_EL1` con permisos jerárquicos y sin PBHA; `SCTLR_EL1.WXN` | Kani: `codec_roundtrip`, `hw_agrees_with_view`, `map_then_hw` contra un modelo de la MMU escrito desde el manual (4 mutaciones las rompen); `intruso`, `fragil` y `test-wx-fault` en QEMU `virt` |
@@ -34,7 +34,7 @@ físico.
 | Una cell solo toca el hardware que se le dio | `IoPorts` con desplazamientos relativos al rango; sin acceso a puertos fuera de él. En ARM64 el kernel asigna él mismo los BAR de E/S, y el acceso pasa por la ventana de E/S mapeada | `intruso`: puertos sin capacidad, con objetos de otro tipo. Kani: `io_ranges_disjoint` (dos rangos asignados nunca se solapan y caben en la ventana) y `pio_access_in_range` (el acceso cae entero en el rango y en la ventana) |
 | Un device tree roto o malicioso no rompe el kernel ni lo hace mapear memoria propia o de una cell como dispositivo (ARM64) | Lector sin índices sin verificar (`kcore::fdt`); toda región de dispositivo (UART, GIC, ECAM, ventana de E/S) se descarta si, redondeada a páginas, toca alguna región no reservada del mapa de memoria (`platform::mmio_allowed`) | Kani: `token_any`, `new_any`, `read_cells_any`, `reg_entry_any`, `translate_any` (sin pánicos, cada token avanza: todo recorrido termina), `mmio_never_touches_ram`, `ecam_addr_in_region`; tests en el host con cada byte de un árbol alterado, cada truncamiento y miles de árboles al azar (el iterador de nodos no entra en Kani) |
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
-| Una cell colgada se puede terminar | `cell_kill` con `CONTROL`; la cell muere desde su hilo, nunca a mitad de una syscall | `dormilona` (bloqueada, girando y dormida en `wait`) |
+| Una cell colgada se puede terminar, y toda cell creada tiene quien la termine | `cell_kill` con `CONTROL`; la cell muere desde su hilo, nunca a mitad de una syscall. `cell_spawn` reserva el lugar de la capacidad `Cell` antes de crear la hija (`CSpace::reserve`), así que nunca queda una hija sin supervisor | `dormilona` (bloqueada, girando y dormida en `wait`); Kani: `reserve_any`, `insert_reserved_any`, `reserved_after_*` (después de cualquier operación, la reserva sigue teniendo lugar) |
 | `wait` no deja a una cell dormida con un evento que le interesa, y solo observa lo que puede | El hilo se marca bloqueado **antes** de registrarse y mirar cada ítem bajo el lock de su objeto; quien activa una señal despierta a todos los registrados; cada handle necesita `WAIT` y señales que su tipo emita | Lean: `WaitModel.no_lost_wakeup`, `run_no_lost_wakeup` (4 mutaciones la rompen); Kani: `check_item_any`, `channel_signals_any`, `deadline_any`; `espera`, `init` y `contador-v1` en QEMU; `intruso`: 11 abusos de `wait`; `caos` |
 | Un servicio se actualiza sin que el cliente note saltos | Protocolo de supervisor con rollback, escrito con los contratos `handover` y `restore`; la versión nueva solo recibe el estado como `Mem<RO>` (sin `WRITE`, comprobado al recibir) | Lean: `Upgrade.client_sees_consecutive`, `UpgradeContract.upgrade_contract_safe` (el modelo sigue los contratos; 8 mutaciones lo rompen); Kani: `restore_decode_any`; test en QEMU con rechazo, caída y aceptación |
 | Un servicio se muda a otra máquina sin que el cliente note saltos, y un rechazo remoto no daña el estado local | El enlace manda una *copia* del estado; la decisión vuelve por la red; rollback local | Lean: `Migration.client_sees_consecutive`, `one_server`, `rollback_resumes`; `tools/migrate-test.sh` con dos QEMU |
@@ -54,10 +54,15 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    bit USER) en el espacio de cada cell (en ARM64, en `TTBR1_EL1`, siempre
    activo) y no hay KPTI: en una CPU vulnerable
    a Meltdown, una cell podría leer memoria del kernel por ejecución
-   especulativa. Tampoco hay mitigaciones de Spectre (retpolines, IBRS,
-   barreras tras validar índices de syscalls). `clock_monotonic` da
-   resolución de nanosegundos, útil para medir tiempos. *Mitigación futura*:
-   KPTI con PCID, `lfence` tras las comprobaciones de rango, reducir la
+   especulativa. Contra Spectre v1 hay una mitigación parcial: una barrera
+   de especulación después de decodificar el número de syscall (`lfence`;
+   en ARM64, `dsb nsh; isb`) y el índice del CSpace enmascarado sin ramas
+   (`index_nospec`, Kani: `index_nospec_any`), así que una predicción
+   equivocada no lee un slot fuera de la tabla. No hay retpolines, IBRS ni
+   barreras en el resto de los controles de rango (colas, tablas de
+   páginas, el almacén). `clock_monotonic` da resolución de nanosegundos,
+   útil para medir tiempos. *Mitigación futura*: KPTI con PCID, barreras
+   en el resto de los índices que vienen de una cell, reducir la
    resolución del reloj para cells sin un derecho específico.
 2. **DMA sin IOMMU.** Un driver con capacidades `Memory` con `CONTROL`
    conoce direcciones físicas y el dispositivo puede escribir en cualquier
@@ -179,6 +184,19 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    inundación, que el enlace ya trata como pérdida. No hay prueba en QEMU
    que inunde la red; lo cubren el modelo, el test
    `net_try_send_drops_when_full` y Kani (`try_send_any`).
+16. **Latencia en el peor caso: syscalls largas con interrupciones
+   apagadas.** Toda syscall corre con interrupciones deshabilitadas (el
+   kernel no es apropiable dentro de una syscall), y `debug_log` escribe
+   hasta 1024 bytes esperando al UART byte a byte. En QEMU el UART es
+   instantáneo, pero en hardware real a 115200 baudios son unos 89 ms sin
+   atender interrupciones ni cambiar de hilo: cualquier cell puede frenar
+   así al resto (y a los drivers) cada vez que escribe. En menor escala,
+   `cap_drop` y cada `send` con capacidades corren el recolector `ipc_gc`,
+   que recorre todos los extremos con mensajes en vuelo. No rompe el aislamiento de memoria ni de
+   capacidades, pero no hay cota de latencia. *Mitigación futura*: un búfer
+   de consola que se vacíe por la interrupción de transmisión del UART (o
+   la consola en una cell, ver punto 5), y medir en `bench` la latencia
+   máxima de syscall mientras corre `caos`.
 
 ## Supuestos de confianza
 

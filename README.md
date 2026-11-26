@@ -6,6 +6,17 @@ que se comunican por IPC basado en capacidades. Toma ideas de Singularity
 pragmatismo), con la MMU como segunda barrera. Es un prototipo para
 investigar en QEMU, no un reemplazo de Linux.
 
+> **In English.** nsos is an experimental microkernel written in Rust.
+> Programs run as isolated *cells* in user mode, each with its own address
+> space and capability table, and talk only through capability-based IPC
+> channels. It draws on Singularity and Midori, with the MMU as a second
+> barrier. It boots on QEMU (x86_64 and ARM64) and has virtio drivers as
+> cells, live update with rollback, migration between machines and its own
+> copy-on-write object store. Isolation properties are verified: the design
+> is modelled and proved in Lean, and critical kernel code is checked with
+> Kani. Documentation and commit messages are in Spanish; identifiers are
+> in English. Contributions are welcome: see `CONTRIBUTING.md`.
+
 ## Estado
 
 El kernel arranca en QEMU x86_64 (BIOS y UEFI) con Limine, tiene tablas de
@@ -23,6 +34,10 @@ los mismos drivers, almacén y migración; ver [docs/arm64.md](docs/arm64.md)). 
 (incluye la regla de verificación formal).
 
 ## Requisitos
+
+Lo más simple: abrir el repositorio en el contenedor de
+[`.devcontainer/`](.devcontainer) (VS Code, GitHub Codespaces o
+`devcontainer up`), que trae todo lo de esta sección, Lean y Kani. Si no:
 
 * Rust estable, con la versión fija en `rust-toolchain.toml` (incluye el target
   `x86_64-unknown-none`).
@@ -83,7 +98,7 @@ además el mapa de memoria de Limine.
 * [Arquitectura](docs/arquitectura.md)
 * [ABI de IPC y modelo de capacidades](docs/abi-ipc-capacidades.md)
 * [Contratos de canal tipados](docs/contratos.md)
-* [Hoja de ruta](docs/hoja-de-ruta.md)
+* [Hoja de ruta](docs/hoja-de-ruta.md) e [historial de hitos](docs/historial.md)
 * [Almacenamiento propio](docs/almacenamiento.md)
 * [Registro de `unsafe`](docs/unsafe.md)
 * [Verificación formal en Lean](verification/lean/README.md)

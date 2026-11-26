@@ -162,6 +162,15 @@ pub fn wait_for_interrupt() {
     unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
 }
 
+/// Barrera de especulación (Spectre v1): ninguna instrucción posterior se
+/// ejecuta, ni especulativamente, hasta que terminen las anteriores
+/// (incluidas las comparaciones de un control de rango). También es barrera
+/// del compilador: sin `nomem`, no mueve accesos a memoria de un lado al otro.
+pub fn speculation_barrier() {
+    // SAFETY: `lfence` solo ordena la ejecución; no cambia estado.
+    unsafe { asm!("lfence", options(nostack, preserves_flags)) };
+}
+
 /// Invalida la entrada TLB de una dirección.
 pub fn invlpg(addr: u64) {
     // SAFETY: invalidar TLB nunca rompe invariantes (solo cuesta rendimiento).

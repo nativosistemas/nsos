@@ -32,7 +32,7 @@ use core::panic::PanicInfo;
 /// Marca que los tests de humo buscan en la salida serie.
 const BOOT_OK: &str = "nsos: arranque OK";
 /// Frecuencia del timer del scheduler.
-const TIMER_HZ: u32 = 100;
+pub const TIMER_HZ: u32 = 100;
 
 /// Punto de entrada que invoca Limine (ver `ENTRY` en el linker script).
 #[no_mangle]

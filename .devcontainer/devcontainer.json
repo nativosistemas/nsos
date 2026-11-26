@@ -1,0 +1,11 @@
+{
+  "name": "nsos",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "dev",
+  "postCreateCommand": "rustup show && cd verification/lean && lake build",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "leanprover.lean4"]
+    }
+  }
+}

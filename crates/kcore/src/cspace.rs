@@ -30,6 +30,20 @@ fn retire<T>(s: &mut Slot<T>) -> bool {
     s.generation < GEN_LIMIT
 }
 
+/// `i` si `i < len`, y si no `0`, calculado sin ramas (como
+/// `array_index_nospec` de Linux). Mitigación parcial de Spectre v1: aunque
+/// la CPU prediga mal el control de rango que sigue, el índice que usa
+/// especulativamente ya está dentro de la tabla. Vale para `i` y `len`
+/// menores que 2^63 (un slot es de 32 bits). No es una barrera: el
+/// compilador podría, en teoría, volver a poner una rama; la barrera de
+/// verdad (`lfence`) está en la entrada de las syscalls.
+fn index_nospec(i: usize, len: usize) -> usize {
+    // Bit alto en 0 sii i < len (con i, len < 2^63): entonces la máscara es
+    // todo unos; si no, todo ceros.
+    let mask = (!(i | len.wrapping_sub(1).wrapping_sub(i)) as isize >> (usize::BITS - 1)) as usize;
+    i & mask
+}
+
 /// Tabla de capacidades.
 pub struct CSpace<T> {
     // slots[0] existe pero nunca se usa (el handle 0 es inválido).
@@ -40,7 +54,17 @@ pub struct CSpace<T> {
     /// cell puede consumir reciclando handles.
     slot_limit: u32,
     live: usize,
+    /// Inserciones reservadas con [`CSpace::reserve`] y todavía sin hacer.
+    /// Cuentan contra `limit` y tienen un slot asegurado.
+    reserved: usize,
 }
+
+/// Una inserción reservada: [`CSpace::insert_reserved`] la usa sin poder
+/// fallar. Hay que usarla o devolverla con [`CSpace::cancel`] en la misma
+/// `CSpace` que la dio.
+#[must_use]
+#[derive(Debug)]
+pub struct Reservation(());
 
 impl<T> CSpace<T> {
     /// Crea un CSpace con como mucho `limit` capacidades vivas.
@@ -61,6 +85,7 @@ impl<T> CSpace<T> {
             limit,
             slot_limit: (limit.saturating_mul(4) + 1).min(MAX_SLOTS),
             live: 0,
+            reserved: 0,
         }
     }
 
@@ -74,17 +99,30 @@ impl<T> CSpace<T> {
         self.live == 0
     }
 
+    /// Slots que todavía se pueden ocupar: libres más los que faltan crear.
+    fn available(&self) -> usize {
+        self.free.len() + (self.slot_limit as usize).saturating_sub(self.slots.len())
+    }
+
+    /// `true` si entran `n` capacidades más sin tocar lo reservado.
+    fn room_for(&self, n: usize) -> bool {
+        self.live + self.reserved + n <= self.limit as usize
+            && self.reserved + n <= self.available()
+    }
+
     /// Inserta una capacidad y devuelve su handle.
     pub fn insert(&mut self, cap: Cap<T>) -> Result<CapHandle, Error> {
-        if self.live as u32 >= self.limit {
+        if !self.room_for(1) {
             return Err(Error::NoMemory);
         }
+        Ok(self.place(cap))
+    }
+
+    /// Ocupa un slot con `cap`. Quien llama ya comprobó que hay lugar.
+    fn place(&mut self, cap: Cap<T>) -> CapHandle {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
-                if self.slots.len() as u32 >= self.slot_limit {
-                    return Err(Error::NoMemory);
-                }
                 self.slots.push(Slot {
                     generation: 0,
                     cap: None,
@@ -95,11 +133,39 @@ impl<T> CSpace<T> {
         let s = &mut self.slots[slot as usize];
         s.cap = Some(cap);
         self.live += 1;
-        Ok(CapHandle::new(slot, s.generation).expect("slot dentro de rango"))
+        CapHandle::new(slot, s.generation).expect("slot dentro de rango")
+    }
+
+    /// Reserva lugar para una capacidad. Hasta usarla o devolverla, ninguna
+    /// otra inserción le quita el lugar. `cell_spawn` la pide antes de crear
+    /// la cell, para no tener que dejarla corriendo sin supervisor.
+    pub fn reserve(&mut self) -> Result<Reservation, Error> {
+        if !self.room_for(1) {
+            return Err(Error::NoMemory);
+        }
+        self.reserved += 1;
+        Ok(Reservation(()))
+    }
+
+    /// Inserta en el lugar reservado. No falla.
+    pub fn insert_reserved(&mut self, r: Reservation, cap: Cap<T>) -> CapHandle {
+        let Reservation(()) = r;
+        assert!(self.reserved > 0, "reserva de otra CSpace");
+        self.reserved -= 1;
+        self.place(cap)
+    }
+
+    /// Devuelve una reserva sin usarla.
+    pub fn cancel(&mut self, r: Reservation) {
+        let Reservation(()) = r;
+        assert!(self.reserved > 0, "reserva de otra CSpace");
+        self.reserved -= 1;
     }
 
     fn slot(&self, h: CapHandle) -> Result<&Slot<T>, Error> {
-        let s = self.slots.get(h.slot() as usize).ok_or(Error::BadHandle)?;
+        // Fuera de rango, el índice pasa a ser el del slot 0, que siempre
+        // está vacío: da `BadHandle`, como si no existiera.
+        let s = &self.slots[index_nospec(h.slot() as usize, self.slots.len())];
         if !h.is_valid() || s.generation != h.generation() || s.cap.is_none() {
             return Err(Error::BadHandle);
         }
@@ -124,7 +190,8 @@ impl<T> CSpace<T> {
     /// generación nueva, así el handle viejo deja de valer.
     pub fn remove(&mut self, h: CapHandle) -> Result<Cap<T>, Error> {
         self.slot(h)?;
-        let s = &mut self.slots[h.slot() as usize];
+        let i = index_nospec(h.slot() as usize, self.slots.len());
+        let s = &mut self.slots[i];
         let cap = s.cap.take().unwrap();
         if retire(s) {
             self.free.push(h.slot());
@@ -159,15 +226,12 @@ impl<T> CSpace<T> {
         &mut self,
         caps: Vec<Cap<T>>,
     ) -> Result<Vec<CapHandle>, (Error, Vec<Cap<T>>)> {
-        let fresh = caps.len().saturating_sub(self.free.len());
-        if self.live as u32 + caps.len() as u32 > self.limit
-            || self.slots.len() + fresh > self.slot_limit as usize
-        {
+        if !self.room_for(caps.len()) {
             return Err((Error::NoMemory, caps));
         }
         let mut hs = Vec::with_capacity(caps.len());
         for c in caps {
-            hs.push(self.insert(c).unwrap());
+            hs.push(self.place(c));
         }
         Ok(hs)
     }
@@ -207,7 +271,9 @@ impl<T> CSpace<T> {
                 live += 1;
             }
         }
-        assert!(live == self.live && self.live <= self.limit as usize);
+        assert!(live == self.live && self.live + self.reserved <= self.limit as usize);
+        // Cada reserva tiene un slot asegurado.
+        assert!(self.reserved <= self.available());
         for i in 0..self.free.len() {
             let f = self.free[i] as usize;
             assert!(f != 0 && f < n);
@@ -360,6 +426,45 @@ mod tests {
     }
 
     #[test]
+    fn reservation_keeps_its_place() {
+        let mut cs = CSpace::new(2);
+        cs.insert(cap(1, Rights::NONE)).unwrap();
+        let r = cs.reserve().unwrap();
+        // El único lugar que queda es de la reserva.
+        assert_eq!(cs.insert(cap(2, Rights::NONE)), Err(Error::NoMemory));
+        assert!(cs.reserve().is_err());
+        let (e, _) = cs
+            .insert_all(alloc::vec![cap(2, Rights::NONE)])
+            .unwrap_err();
+        assert_eq!(e, Error::NoMemory);
+        let h = cs.insert_reserved(r, cap(3, Rights::NONE));
+        assert_eq!(cs.get(h).unwrap().object, 3);
+        cs.check_invariants();
+        // Cancelar devuelve el lugar.
+        let mut cs = CSpace::new(1);
+        let r = cs.reserve().unwrap();
+        cs.cancel(r);
+        assert!(cs.insert(cap(1, Rights::NONE)).is_ok());
+        cs.check_invariants();
+    }
+
+    #[test]
+    fn reservation_counts_slots() {
+        // limit 1 → 4 slots usables. Se gastan las generaciones de 3 y queda
+        // uno: la reserva se lo queda aunque el límite de vivas lo permita.
+        let mut cs = CSpace::new(1);
+        for _ in 0..3 * GEN_LIMIT {
+            let h = cs.insert(cap(1, Rights::NONE)).unwrap();
+            cs.remove(h).unwrap();
+        }
+        let r = cs.reserve().unwrap();
+        assert!(cs.reserve().is_err());
+        let h = cs.insert_reserved(r, cap(2, Rights::NONE));
+        cs.remove(h).unwrap();
+        cs.check_invariants();
+    }
+
+    #[test]
     fn clear_invalidates_everything() {
         let mut cs = CSpace::new(16);
         let hs: Vec<_> = (0..5)
@@ -434,16 +539,22 @@ mod proofs {
             free.swap(0, 1);
         }
         let limit: u32 = kani::any();
-        kani::assume(limit as usize >= live && limit <= 3);
+        kani::assume(limit <= 3);
         let extra: u32 = kani::any();
         kani::assume(extra <= 2);
+        let reserved: usize = kani::any();
+        kani::assume(reserved <= 2);
         let cs = CSpace {
             slots,
             free,
             limit,
             slot_limit: N as u32 + extra,
             live,
+            reserved,
         };
+        // Reservas compatibles: cuentan contra el límite y tienen slot.
+        kani::assume(cs.live + cs.reserved <= cs.limit as usize);
+        kani::assume(cs.reserved <= cs.available());
         cs.check_invariants();
         (cs, issued)
     }
@@ -562,6 +673,104 @@ mod proofs {
         cs.check_invariants();
     }
 
+    /// `reserve` desde cualquier CSpace (también con reservas pendientes):
+    /// si la da, mantiene los invariantes, así que la reserva tiene lugar
+    /// asegurado en el límite y en los slots.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserve_any() {
+        let (mut cs, _) = any_state();
+        let (live, reserved) = (cs.live, cs.reserved);
+        match cs.reserve() {
+            Ok(r) => {
+                assert!(cs.reserved == reserved + 1 && cs.live == live);
+                cs.check_invariants();
+                cs.cancel(r);
+                assert!(cs.reserved == reserved);
+            }
+            Err(e) => assert!(e == Error::NoMemory && cs.reserved == reserved),
+        }
+        cs.check_invariants();
+    }
+
+    /// Con una reserva pendiente, la operación `op` (insertar, quitar o
+    /// duplicar) deja lugar para ella:
+    /// `insert_reserved` después no entra en pánico, el handle vale y nombra
+    /// la capacidad insertada. Es lo que necesita `cell_spawn`. Una prueba
+    /// por operación: juntas, CBMC se queda sin memoria. Con `insert_all` y
+    /// `clear` se queda sin memoria aun por separado; esos casos los cubre
+    /// `insert_reserved_any`.
+    fn reserved_then(op: u8) {
+        let (mut cs, issued) = any_state();
+        let Ok(r) = cs.reserve() else { return };
+        match op {
+            0 => {
+                let _ = cs.insert(any_cap());
+            }
+            1 => {
+                let _ = cs.remove(any_handle(&issued));
+            }
+            _ => {
+                let _ = cs.dup(any_handle(&issued), Rights(kani::any()));
+            }
+        }
+        let c = any_cap();
+        let h = cs.insert_reserved(r, c.clone());
+        assert!(cs.get(h) == Ok(&c));
+        cs.check_invariants();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_insert() {
+        reserved_then(0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_remove() {
+        reserved_then(1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn reserved_after_dup() {
+        reserved_then(2);
+    }
+
+    /// El paso de la inducción: desde cualquier CSpace que cumpla los
+    /// invariantes con al menos una reserva pendiente, `insert_reserved` no
+    /// falla, nombra la capacidad y mantiene los invariantes. Como toda
+    /// operación los mantiene (`insert_any`, `insert_all_any`, `remove_any`,
+    /// `clear_any`, … parten de estados con reservas), una reserva sigue
+    /// teniendo lugar después de cualquier secuencia de operaciones.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(cadical)]
+    fn insert_reserved_any() {
+        let (mut cs, _) = any_state();
+        kani::assume(cs.reserved >= 1);
+        let c = any_cap();
+        let h = cs.insert_reserved(Reservation(()), c.clone());
+        assert!(cs.get(h) == Ok(&c));
+        cs.check_invariants();
+    }
+
+    /// `index_nospec` da exactamente `i` dentro de la tabla y `0` fuera,
+    /// con cualquier `i` de 32 bits (un slot) y cualquier largo hasta 2^63.
+    #[kani::proof]
+    fn index_nospec_any() {
+        let i: u32 = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len < 1 << 63);
+        let r = index_nospec(i as usize, len);
+        assert!(r == if (i as usize) < len { i as usize } else { 0 });
+    }
+
     /// Un handle cualquiera (incluso fabricado) nunca hace fallar a `get`.
     #[kani::proof]
     #[kani::unwind(4)]
@@ -597,6 +806,7 @@ mod proofs {
             limit: 2,
             slot_limit: 3,
             live: 1,
+            reserved: 0,
         };
         cs.check_invariants();
         let old = CapHandle::new(1, g).unwrap();
