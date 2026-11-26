@@ -16,6 +16,26 @@ pub enum FrameError {
     DoubleFree,
 }
 
+/// Marcos completamente contenidos en `[base, base+len)`: `[start, end)`.
+fn inner_frames(base: u64, len: u64) -> (usize, usize) {
+    let start = base.div_ceil(FRAME_SIZE) as usize;
+    let end = (base.saturating_add(len) / FRAME_SIZE) as usize;
+    (start, end)
+}
+
+/// Marcos que tocan `[base, base+len)`: `[start, end)`.
+fn outer_frames(base: u64, len: u64) -> (usize, usize) {
+    let start = (base / FRAME_SIZE) as usize;
+    let end = base.saturating_add(len).div_ceil(FRAME_SIZE) as usize;
+    (start, end)
+}
+
+/// Primer comienzo alineado a `align` después del marco ocupado `used`.
+/// Todo comienzo entre `used + 1` y el resultado está desalineado.
+fn next_start(used: usize, align: usize) -> usize {
+    (used + 1).next_multiple_of(align)
+}
+
 /// Bitmap de marcos físicos sobre un almacenamiento prestado.
 pub struct FrameBitmap<'a> {
     bits: &'a mut [u64],
@@ -70,24 +90,27 @@ impl<'a> FrameBitmap<'a> {
     /// Marca como libres los marcos completamente contenidos en
     /// `[base, base+len)` (direcciones físicas en bytes).
     pub fn release_region(&mut self, base: u64, len: u64) {
-        let start = base.div_ceil(FRAME_SIZE) as usize;
-        let end = ((base.saturating_add(len)) / FRAME_SIZE) as usize;
-        for f in start..end.min(self.nframes) {
-            if self.is_used(f) {
-                self.set(f, false);
-                self.free += 1;
-            }
-        }
+        let (start, end) = inner_frames(base, len);
+        self.mark(start, end, false);
     }
 
     /// Marca como ocupados los marcos que tocan `[base, base+len)`.
     pub fn reserve_region(&mut self, base: u64, len: u64) {
-        let start = (base / FRAME_SIZE) as usize;
-        let end = base.saturating_add(len).div_ceil(FRAME_SIZE) as usize;
+        let (start, end) = outer_frames(base, len);
+        self.mark(start, end, true);
+    }
+
+    /// Deja los marcos de `[start, end)` que gestiona el bitmap ocupados
+    /// (`used`) o libres, y lleva la cuenta de libres.
+    fn mark(&mut self, start: usize, end: usize, used: bool) {
         for f in start..end.min(self.nframes) {
-            if !self.is_used(f) {
-                self.set(f, true);
-                self.free -= 1;
+            if self.is_used(f) != used {
+                self.set(f, used);
+                if used {
+                    self.free -= 1;
+                } else {
+                    self.free += 1;
+                }
             }
         }
     }
@@ -122,18 +145,20 @@ impl<'a> FrameBitmap<'a> {
         }
         let mut f = 0;
         while f + n <= self.nframes {
-            match (f..f + n).rev().find(|&g| self.is_used(g)) {
-                Some(used) => f = (used + 1).next_multiple_of(align),
+            match self.last_used(f, n) {
+                Some(used) => f = next_start(used, align),
                 None => {
-                    for g in f..f + n {
-                        self.set(g, true);
-                    }
-                    self.free -= n;
+                    self.mark(f, f + n, true);
                     return Some(f);
                 }
             }
         }
         None
+    }
+
+    /// El último marco ocupado de `[f, f+n)`, si hay alguno.
+    fn last_used(&self, f: usize, n: usize) -> Option<usize> {
+        (f..f + n).rev().find(|&g| self.is_used(g))
     }
 
     /// Libera un marco.
@@ -278,85 +303,113 @@ mod proofs {
         assert!(invariant(&b));
     }
 
-    /// Marcos en las pruebas que recorren el bitmap marco a marco: cruzan
-    /// el borde entre palabras sin que CBMC explote.
-    const SMALL: usize = 72;
-
-    /// `alloc_contiguous` entrega `n` marcos que estaban todos libres,
-    /// alineados y dentro del rango, y no toca ningún otro. `n` y `align`
-    /// son concretos en cada prueba: con `n` simbólico CBMC desenrolla el
-    /// bucle interno tantas veces como el externo, y con `align` simbólico
-    /// cada vuelta lleva una división de 64 bits; en los dos casos se queda
-    /// sin memoria.
-    fn alloc_contiguous_n(n: usize, align: usize) {
-        let before: [u64; W] = kani::any();
-        let mut bits = before;
-        let mut b = any_state(&mut bits, SMALL);
-        let free0 = b.free;
-        match b.alloc_contiguous(n, align) {
-            Some(f) => {
-                assert!(f % align == 0);
-                assert!(f + n <= b.nframes);
-                assert!(taken(&b, &before, f, f + n));
-                assert!(same_outside(&b, &before, f, f + n));
-                assert!(b.free == free0 - n);
-            }
-            None => assert!(same_outside(&b, &before, 0, 0)),
-        }
-        assert!(invariant(&b));
-    }
-
-    #[kani::proof]
-    #[kani::unwind(74)]
-    fn alloc_contiguous_2() {
-        alloc_contiguous_n(2, 1);
-    }
-
-    #[kani::proof]
-    #[kani::unwind(74)]
-    fn alloc_contiguous_3() {
-        alloc_contiguous_n(3, 4);
-    }
-
     /// `n == 0` o una alineación que no es potencia de 2 nunca entregan
     /// nada.
     #[kani::proof]
     #[kani::unwind(3)]
     fn alloc_contiguous_0() {
         let mut bits: [u64; W] = kani::any();
-        let mut b = any_state(&mut bits, SMALL);
+        let mut b = any_state(&mut bits, W * 64);
         let (n, align): (usize, usize) = (kani::any(), kani::any());
         kani::assume(n == 0 || !align.is_power_of_two());
         assert!(b.alloc_contiguous(n, align).is_none());
     }
 
-    /// Las regiones del mapa de memoria (solo al arrancar), con cualquier
-    /// dirección y largo: sin pánicos ni desbordes, el invariante se
-    /// mantiene, `reserve_region` ocupa todo marco que toca la región y
-    /// `release_region` solo libera marcos enteros dentro de ella.
+    // `alloc_contiguous` entero con 128 marcos es demasiado para CBMC:
+    // desenrolla el bucle interno en cada vuelta del externo y se queda sin
+    // memoria (también con `n` y `align` concretos). Se prueba por piezas;
+    // juntas dan la propiedad del bucle (ver `verification/kani.md`).
+
+    /// `last_used`: si no hay marco ocupado, toda la ventana está libre; si
+    /// lo hay, está en la ventana, está ocupado y después de él (dentro de
+    /// la ventana) todo está libre. Saltar a `next_start` desde ahí no
+    /// saltea ningún comienzo posible: todo comienzo hasta `used` contiene
+    /// a `used`.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn last_used_any() {
+        let mut bits: [u64; W] = kani::any();
+        let b = any_state(&mut bits, W * 64);
+        let (f, n): (usize, usize) = (kani::any(), kani::any());
+        kani::assume(n <= 3 && f + n <= b.nframes);
+        match b.last_used(f, n) {
+            None => assert!((0..W).all(|w| b.bits[w] & range(w, f, f + n) == 0)),
+            Some(u) => {
+                assert!(f <= u && u < f + n && b.is_used(u));
+                assert!((0..W).all(|w| b.bits[w] & range(w, u + 1, f + n) == 0));
+            }
+        }
+    }
+
+    /// `next_start`: el resultado está alineado, es mayor que `used`, y
+    /// entre `used` y el resultado no hay ningún comienzo alineado. Así el
+    /// bucle solo prueba comienzos alineados y no se saltea ninguno.
+    #[kani::proof]
+    fn next_start_any() {
+        let used: usize = kani::any();
+        let k: u32 = kani::any();
+        kani::assume(used < W * 64 && k < 8);
+        let align = 1usize << k;
+        let s = next_start(used, align);
+        assert!(s % align == 0 && s > used && s - used <= align);
+    }
+
+    /// Marcos de las pruebas de `mark` y de `alloc_contiguous` chico.
+    const SMALL: usize = 72;
+
+    /// `mark` deja exactamente los marcos de `[start, end)` (dentro del
+    /// rango) con el estado pedido, no toca ningún otro y mantiene la cuenta
+    /// de libres. Con cualquier `start` y `end`, sin pánicos ni desbordes.
     #[kani::proof]
     #[kani::unwind(74)]
-    fn regions_any() {
+    fn mark_any() {
         let before: [u64; W] = kani::any();
         let mut bits = before;
         let mut b = any_state(&mut bits, SMALL);
-        let base: u64 = kani::any();
-        let len: u64 = kani::any();
-        let f: usize = kani::any();
-        kani::assume(f < b.nframes);
-        let (start, end) = (f as u64 * FRAME_SIZE, (f as u64 + 1) * FRAME_SIZE);
-        let reserve = kani::any();
-        if reserve {
-            b.reserve_region(base, len);
-        } else {
-            b.release_region(base, len);
-        }
-        let inside = base <= start && end <= base.saturating_add(len);
-        let touches = base < end && start < base.saturating_add(len);
-        if reserve {
-            assert!(b.is_used(f) == (used_in(&before, f) || touches));
-        } else {
-            assert!(b.is_used(f) == (used_in(&before, f) && !inside));
+        let (start, end, used): (usize, usize, bool) = (kani::any(), kani::any(), kani::any());
+        b.mark(start, end, used);
+        let hi = end.min(b.nframes);
+        assert!(same_outside(&b, &before, start, hi));
+        let full = if used { u64::MAX } else { 0 };
+        assert!((0..W).all(|w| b.bits[w] & range(w, start, hi) == full & range(w, start, hi)));
+        assert!(invariant(&b));
+    }
+
+    /// Los marcos que toman las regiones del mapa de memoria, con cualquier
+    /// dirección y largo de 64 bits: `inner_frames` da exactamente los
+    /// marcos enteros dentro de la región y `outer_frames` los que la
+    /// tocan. El final de la región satura en `u64::MAX`.
+    #[kani::proof]
+    fn frames_any() {
+        let (base, len, g): (u64, u64, u64) = (kani::any(), kani::any(), kani::any());
+        let (lo, hi) = (g as u128 * 4096, (g as u128 + 1) * 4096);
+        let (rb, re) = (base as u128, base.saturating_add(len) as u128);
+        let (s, e) = inner_frames(base, len);
+        assert!((s as u64 <= g && g < e as u64) == (rb <= lo && hi <= re));
+        let (s, e) = outer_frames(base, len);
+        assert!((s as u64 <= g && g < e as u64) == (lo < re && rb < hi));
+    }
+
+    /// `alloc_contiguous` entero, con hasta 8 marcos y cualquier `n` y
+    /// alineación: los marcos que entrega estaban libres, están alineados y
+    /// dentro del rango, y no toca ningún otro.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn alloc_contiguous_small() {
+        let before: [u64; W] = kani::any();
+        let mut bits = before;
+        let mut b = any_state(&mut bits, 8);
+        let free0 = b.free;
+        let (n, align): (usize, usize) = (kani::any(), kani::any());
+        kani::assume(n <= 8 && align <= 8);
+        match b.alloc_contiguous(n, align) {
+            Some(f) => {
+                assert!(f % align == 0 && f + n <= b.nframes);
+                assert!(taken(&b, &before, f, f + n));
+                assert!(same_outside(&b, &before, f, f + n));
+                assert!(b.free == free0 - n);
+            }
+            None => assert!(same_outside(&b, &before, 0, 0)),
         }
         assert!(invariant(&b));
     }

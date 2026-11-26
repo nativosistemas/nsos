@@ -43,8 +43,11 @@ casos borde.
 | `pio_access_in_range` | `crates/kcore/src/platform.rs` | Un acceso de una cell a sus puertos que acepta `pio_offset` cae entero en su rango y en la ventana de E/S. |
 | `alloc_any` | `crates/kcore/src/frame_bitmap.rs` | Desde cualquier bitmap de hasta 128 marcos que cumpla el invariante (`free` cuenta los marcos libres; bits y `hint` cualesquiera, también los que sobran al final de la última palabra): `alloc` entrega un marco que estaba libre y dentro del rango, lo marca ocupado y no toca ningún otro; si no entrega nada, no había libres. Dos cells nunca reciben el mismo marco. |
 | `free_any` | `crates/kcore/src/frame_bitmap.rs` | `free_frame` con cualquier número de marco: solo libera uno ocupado y dentro del rango; uno libre da `DoubleFree` y uno fuera de rango `OutOfRange`, sin cambiar nada. |
-| `alloc_contiguous_0`, `alloc_contiguous_2`, `alloc_contiguous_3` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 72 marcos, `n = 0` o una alineación inválida no entregan nada; con `(n, align)` = (2, 1) y (3, 4) (concretos: simbólicos, CBMC se queda sin memoria) los marcos que entrega estaban todos libres, están alineados y dentro del rango, y no toca ningún otro. |
-| `regions_any` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 72 marcos y cualquier dirección y largo de 64 bits: sin pánicos ni desbordes; `reserve_region` ocupa todo marco que toca la región y `release_region` libera solo los marcos enteros dentro de ella. |
+| `alloc_contiguous_0` | `crates/kcore/src/frame_bitmap.rs` | `alloc_contiguous` con `n = 0` o con una alineación que no es potencia de 2 no entrega nada. |
+| `last_used_any`, `next_start_any` | `crates/kcore/src/frame_bitmap.rs` | Las piezas del bucle de `alloc_contiguous`. `last_used` da el último marco ocupado de la ventana, o ninguno si está entera libre. `next_start` salta a un comienzo alineado, mayor que ese marco, sin saltear ningún comienzo alineado. Todo comienzo que se saltea contiene un marco ocupado, así que el bucle solo devuelve ventanas libres y alineadas. |
+| `mark_any` | `crates/kcore/src/frame_bitmap.rs` | Con hasta 72 marcos y cualquier `[start, end)`: `mark` deja exactamente esos marcos (dentro del rango) en el estado pedido, no toca ningún otro y mantiene la cuenta de libres. Lo usan `alloc_contiguous` y las regiones. |
+| `frames_any` | `crates/kcore/src/frame_bitmap.rs` | Con cualquier dirección y largo de 64 bits: `inner_frames` da exactamente los marcos enteros dentro de la región (`release_region`) y `outer_frames` los que la tocan (`reserve_region`). |
+| `alloc_contiguous_small` | `crates/kcore/src/frame_bitmap.rs` | `alloc_contiguous` entero con hasta 8 marcos y cualquier `n` y alineación `<= 8`: entrega marcos que estaban libres, alineados y dentro del rango, y no toca ningún otro. |
 | `new_any` (bitmap) | `crates/kcore/src/frame_bitmap.rs` | `FrameBitmap::new` con cualquier tamaño: todo ocupado, sin libres y con el invariante. |
 | `check_item_any` | `crates/kcore/src/wait.rs` | Un ítem de `wait` aceptado pide al menos una señal, todas emitibles por el tipo de su objeto, con `reserved` en 0; memoria, puertos e imágenes nunca se aceptan. |
 | `channel_signals_any` | `crates/kcore/src/wait.rs` | Con cualquier estado de canal, las señales son las del tipo y dicen exactamente lo que harían `recv` y `send`: `READABLE` sii hay mensaje, `PEER_CLOSED` sii el peer cerró, `WRITABLE` sii está abierto y su cola tiene lugar. |
@@ -76,12 +79,15 @@ solo lectura, y decodificar NX siempre desde PXN (`hw_agrees_with_view`).
 Cada una hace fallar la prueba indicada: no saltear en `alloc` los bits que
 sobran después del último marco (`alloc_any`), quitar el control de
 `DoubleFree` (`free_any`), saltar un hueco sin redondear a la alineación
-(`alloc_contiguous_2`) y redondear `release_region` hacia afuera
-(`regions_any`).
+(`next_start_any`) y redondear `release_region` hacia afuera
+(`frames_any`).
 
 Los invariantes se cuentan por palabra (`count_ones` sobre máscaras), no
 marco a marco: con un recuento marco a marco CBMC pasó los 6 GB en
-`free_any`.
+`free_any`. `alloc_contiguous` entero con 72 marcos se queda sin memoria
+aun con `n` y la alineación concretos (CBMC desenrolla el bucle interno en
+cada vuelta del externo), por eso se prueba por piezas y entero solo con 8
+marcos. El host lo recorre con más marcos en `matches_reference_model`.
 
 ### Mutación de `wait`
 
