@@ -6,6 +6,17 @@ que se comunican por IPC basado en capacidades. Toma ideas de Singularity
 pragmatismo), con la MMU como segunda barrera. Es un prototipo para
 investigar en QEMU, no un reemplazo de Linux.
 
+> **In English.** nsos is an experimental microkernel written in Rust.
+> Programs run as isolated *cells* in user mode, each with its own address
+> space and capability table, and talk only through capability-based IPC
+> channels. It draws on Singularity and Midori, with the MMU as a second
+> barrier. It boots on QEMU (x86_64 and ARM64) and has virtio drivers as
+> cells, live update with rollback, migration between machines and its own
+> copy-on-write object store. Isolation properties are verified: the design
+> is modelled and proved in Lean, and critical kernel code is checked with
+> Kani. Documentation and commit messages are in Spanish; identifiers are
+> in English. Contributions are welcome: see `CONTRIBUTING.md`.
+
 ## Estado
 
 El kernel arranca en QEMU x86_64 (BIOS y UEFI) con Limine, tiene tablas de
