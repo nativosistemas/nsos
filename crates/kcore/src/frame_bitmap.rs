@@ -283,16 +283,16 @@ mod proofs {
     const SMALL: usize = 72;
 
     /// `alloc_contiguous` entrega `n` marcos que estaban todos libres,
-    /// alineados y dentro del rango, y no toca ningún otro. `n` es concreto
-    /// en cada prueba: con `n` simbólico, CBMC desenrolla el bucle interno
-    /// tantas veces como el externo y se queda sin memoria.
-    fn alloc_contiguous_n(n: usize) {
+    /// alineados y dentro del rango, y no toca ningún otro. `n` y `align`
+    /// son concretos en cada prueba: con `n` simbólico CBMC desenrolla el
+    /// bucle interno tantas veces como el externo, y con `align` simbólico
+    /// cada vuelta lleva una división de 64 bits; en los dos casos se queda
+    /// sin memoria.
+    fn alloc_contiguous_n(n: usize, align: usize) {
         let before: [u64; W] = kani::any();
         let mut bits = before;
         let mut b = any_state(&mut bits, SMALL);
         let free0 = b.free;
-        let align: usize = kani::any();
-        kani::assume(align <= 8);
         match b.alloc_contiguous(n, align) {
             Some(f) => {
                 assert!(f % align == 0);
@@ -309,22 +309,25 @@ mod proofs {
     #[kani::proof]
     #[kani::unwind(74)]
     fn alloc_contiguous_2() {
-        alloc_contiguous_n(2);
+        alloc_contiguous_n(2, 1);
     }
 
     #[kani::proof]
     #[kani::unwind(74)]
     fn alloc_contiguous_3() {
-        alloc_contiguous_n(3);
+        alloc_contiguous_n(3, 4);
     }
 
-    /// `n == 0` nunca entrega nada.
+    /// `n == 0` o una alineación que no es potencia de 2 nunca entregan
+    /// nada.
     #[kani::proof]
     #[kani::unwind(3)]
     fn alloc_contiguous_0() {
         let mut bits: [u64; W] = kani::any();
         let mut b = any_state(&mut bits, SMALL);
-        assert!(b.alloc_contiguous(0, kani::any()).is_none());
+        let (n, align): (usize, usize) = (kani::any(), kani::any());
+        kani::assume(n == 0 || !align.is_power_of_two());
+        assert!(b.alloc_contiguous(n, align).is_none());
     }
 
     /// Las regiones del mapa de memoria (solo al arrancar), con cualquier
