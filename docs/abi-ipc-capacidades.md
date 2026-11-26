@@ -269,7 +269,10 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
   llama, crea un espacio de direcciones nuevo, carga la imagen y **mueve**
   las `n` capacidades al CSpace de la hija (slots 1..n en ese orden: es su
   "vector de arranque"). Devuelve una capacidad `Cell` con
-  `CONTROL | WAIT | DUPLICATE | GRANT`.
+  `CONTROL | WAIT | DUPLICATE | GRANT`. El lugar de esa capacidad se reserva
+  en el CSpace de quien llama *antes* de crear la hija (`CSpace::reserve`):
+  si no hay lugar, falla con `NoMemory` sin crear nada, y nunca queda una
+  hija corriendo sin una capacidad que la controle.
 * Una cell no hereda nada que no se le pase explícitamente.
 * Si la cell falla (excepción de CPU, `panic`, violación de ABI), el kernel la
   termina y libera sus capacidades (los peers ven `PEER_CLOSED`). El kernel

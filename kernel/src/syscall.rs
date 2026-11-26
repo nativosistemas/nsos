@@ -176,26 +176,37 @@ fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64) -> SysResult<u64> 
     };
     // Validar la imagen antes de quitarle nada a quien llama.
     nsos_kcore::elf::parse(image.bytes).map_err(|_| Error::InvalidArgs)?;
-    // Reservar el slot de la respuesta *antes* de mover las capacidades,
-    // para no fallar después de crear la cell.
-    let caps = {
+    // Reservar el lugar de la respuesta *antes* de mover las capacidades:
+    // después de crear la cell, insertarla no puede fallar (si fallara, la
+    // cell quedaría corriendo sin que nadie pueda matarla).
+    let (reservation, caps) = {
         let mut cs = cell.cspace.lock();
-        if cs.len() + 1 > crate::cell::CSPACE_LIMIT as usize {
-            return Err(Error::NoMemory);
+        let r = cs.reserve()?;
+        match cs.remove_all(&hs, Rights::GRANT) {
+            Ok(caps) => (r, caps),
+            Err(e) => {
+                cs.cancel(r);
+                return Err(e);
+            }
         }
-        cs.remove_all(&hs, Rights::GRANT)?
     };
     cell.revoke_mappings();
-    let child = cell::spawn(&image.name, image.bytes, caps).map_err(|e| {
-        kprintln!("cell_spawn \"{}\": {:?}", image.name, e);
-        Error::NoMemory
-    })?;
-    let r = cell.cspace.lock().insert(Cap {
-        object: KObject::Cell(child),
-        rights: cell::CELL_RIGHTS,
-    });
-    // Si aun así no entra, la cell nueva sigue corriendo sin supervisor.
-    r.map(|h| h.0 as u64)
+    let child = match cell::spawn(&image.name, image.bytes, caps) {
+        Ok(c) => c,
+        Err(e) => {
+            kprintln!("cell_spawn \"{}\": {:?}", image.name, e);
+            cell.cspace.lock().cancel(reservation);
+            return Err(Error::NoMemory);
+        }
+    };
+    let h = cell.cspace.lock().insert_reserved(
+        reservation,
+        Cap {
+            object: KObject::Cell(child),
+            rights: cell::CELL_RIGHTS,
+        },
+    );
+    Ok(h.0 as u64)
 }
 
 fn target_cell(cell: &Cell, h: CapHandle, need: Rights) -> SysResult<Arc<Cell>> {
