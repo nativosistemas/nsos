@@ -25,7 +25,11 @@ const MAX_LOG: usize = 1024;
 pub fn handle(f: &mut TrapFrame) {
     let cell = sched::current_cell().expect("syscall desde un hilo sin cell");
     let args = f.syscall_args();
-    let r = match Syscall::from_raw(f.syscall_nr()) {
+    let nr = Syscall::from_raw(f.syscall_nr());
+    // Spectre v1: que una predicción equivocada del control del número no
+    // lleve a ejecutar especulativamente otra syscall con estos argumentos.
+    crate::arch::cpu::speculation_barrier();
+    let r = match nr {
         None => Err(Error::NoSys),
         Some(Syscall::Exit) => {
             cell::terminate(&cell, ExitStatus::Exited(args[0] as u32 as i32));

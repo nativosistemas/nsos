@@ -30,6 +30,20 @@ fn retire<T>(s: &mut Slot<T>) -> bool {
     s.generation < GEN_LIMIT
 }
 
+/// `i` si `i < len`, y si no `0`, calculado sin ramas (como
+/// `array_index_nospec` de Linux). Mitigación parcial de Spectre v1: aunque
+/// la CPU prediga mal el control de rango que sigue, el índice que usa
+/// especulativamente ya está dentro de la tabla. Vale para `i` y `len`
+/// menores que 2^63 (un slot es de 32 bits). No es una barrera: el
+/// compilador podría, en teoría, volver a poner una rama; la barrera de
+/// verdad (`lfence`) está en la entrada de las syscalls.
+fn index_nospec(i: usize, len: usize) -> usize {
+    // Bit alto en 0 sii i < len (con i, len < 2^63): entonces la máscara es
+    // todo unos; si no, todo ceros.
+    let mask = (!(i | len.wrapping_sub(1).wrapping_sub(i)) as isize >> (usize::BITS - 1)) as usize;
+    i & mask
+}
+
 /// Tabla de capacidades.
 pub struct CSpace<T> {
     // slots[0] existe pero nunca se usa (el handle 0 es inválido).
@@ -149,7 +163,9 @@ impl<T> CSpace<T> {
     }
 
     fn slot(&self, h: CapHandle) -> Result<&Slot<T>, Error> {
-        let s = self.slots.get(h.slot() as usize).ok_or(Error::BadHandle)?;
+        // Fuera de rango, el índice pasa a ser el del slot 0, que siempre
+        // está vacío: da `BadHandle`, como si no existiera.
+        let s = &self.slots[index_nospec(h.slot() as usize, self.slots.len())];
         if !h.is_valid() || s.generation != h.generation() || s.cap.is_none() {
             return Err(Error::BadHandle);
         }
@@ -174,7 +190,8 @@ impl<T> CSpace<T> {
     /// generación nueva, así el handle viejo deja de valer.
     pub fn remove(&mut self, h: CapHandle) -> Result<Cap<T>, Error> {
         self.slot(h)?;
-        let s = &mut self.slots[h.slot() as usize];
+        let i = index_nospec(h.slot() as usize, self.slots.len());
+        let s = &mut self.slots[i];
         let cap = s.cap.take().unwrap();
         if retire(s) {
             self.free.push(h.slot());
@@ -745,6 +762,17 @@ mod proofs {
     #[kani::solver(cadical)]
     fn reserved_after_clear() {
         reserved_then(4);
+    }
+
+    /// `index_nospec` da exactamente `i` dentro de la tabla y `0` fuera,
+    /// con cualquier `i` de 32 bits (un slot) y cualquier largo hasta 2^63.
+    #[kani::proof]
+    fn index_nospec_any() {
+        let i: u32 = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len < 1 << 63);
+        let r = index_nospec(i as usize, len);
+        assert!(r == if (i as usize) < len { i as usize } else { 0 });
     }
 
     /// Un handle cualquiera (incluso fabricado) nunca hace fallar a `get`.

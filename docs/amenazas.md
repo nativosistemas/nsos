@@ -54,10 +54,15 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    bit USER) en el espacio de cada cell (en ARM64, en `TTBR1_EL1`, siempre
    activo) y no hay KPTI: en una CPU vulnerable
    a Meltdown, una cell podría leer memoria del kernel por ejecución
-   especulativa. Tampoco hay mitigaciones de Spectre (retpolines, IBRS,
-   barreras tras validar índices de syscalls). `clock_monotonic` da
-   resolución de nanosegundos, útil para medir tiempos. *Mitigación futura*:
-   KPTI con PCID, `lfence` tras las comprobaciones de rango, reducir la
+   especulativa. Contra Spectre v1 hay una mitigación parcial: una barrera
+   de especulación después de decodificar el número de syscall (`lfence`;
+   en ARM64, `dsb nsh; isb`) y el índice del CSpace enmascarado sin ramas
+   (`index_nospec`, Kani: `index_nospec_any`), así que una predicción
+   equivocada no lee un slot fuera de la tabla. No hay retpolines, IBRS ni
+   barreras en el resto de los controles de rango (colas, tablas de
+   páginas, el almacén). `clock_monotonic` da resolución de nanosegundos,
+   útil para medir tiempos. *Mitigación futura*: KPTI con PCID, barreras
+   en el resto de los índices que vienen de una cell, reducir la
    resolución del reloj para cells sin un derecho específico.
 2. **DMA sin IOMMU.** Un driver con capacidades `Memory` con `CONTROL`
    conoce direcciones físicas y el dispositivo puede escribir en cualquier

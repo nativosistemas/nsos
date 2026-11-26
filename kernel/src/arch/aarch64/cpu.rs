@@ -47,6 +47,15 @@ pub fn wait_for_interrupt() {
     unsafe { asm!("wfi", options(nomem, nostack)) };
 }
 
+/// Barrera de especulación (Spectre v1): `dsb nsh; isb` espera a que
+/// terminen las instrucciones anteriores y descarta lo que se haya
+/// especulado después. (La instrucción `SB` de ARMv8.5 haría lo mismo, pero
+/// el Cortex-A72 no la tiene.) También es barrera del compilador.
+pub fn speculation_barrier() {
+    // SAFETY: `dsb nsh` e `isb` solo ordenan la ejecución; no cambian estado.
+    unsafe { asm!("dsb nsh", "isb", options(nostack, preserves_flags)) };
+}
+
 /// Contador virtual del generic timer.
 pub fn counter() -> u64 {
     // SAFETY: `isb` ordena la lectura del contador; no toca memoria.
