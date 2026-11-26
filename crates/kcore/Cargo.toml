@@ -4,6 +4,7 @@ description = "Lógica del kernel independiente del hardware (sin unsafe, testea
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 # `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
 [lints.rust]

@@ -5,8 +5,8 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Spinlock simple. Aún no deshabilita interrupciones: cuando existan
-/// handlers que tomen locks (hito 3) se reemplaza por una variante `IrqLock`.
+/// Spinlock simple: no deshabilita interrupciones. Sirve solo para datos que
+/// ningún handler de interrupción toca; si no, usar [`IrqSpinLock`].
 pub struct SpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,

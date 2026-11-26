@@ -24,10 +24,10 @@ los mismos drivers, almacén y migración; ver [docs/arm64.md](docs/arm64.md)). 
 
 ## Requisitos
 
-* Rust estable (lo fija `rust-toolchain.toml`, incluye el target
+* Rust estable, con la versión fija en `rust-toolchain.toml` (incluye el target
   `x86_64-unknown-none`).
 * `qemu-system-x86_64`, `xorriso`, `make`, `git`, un compilador C (para la
-  herramienta `limine`, que se descarga sola la primera vez).
+  herramienta `limine`, que se descarga sola la primera vez, en un commit fijo).
 * Opcional: OVMF para arrancar por UEFI.
 * Para ARM64: `qemu-system-aarch64`, el firmware UEFI de QEMU
   (`qemu-efi-aarch64`), `mtools` y `dosfstools`.
@@ -88,3 +88,15 @@ además el mapa de memoria de Limine.
 * [Registro de `unsafe`](docs/unsafe.md)
 * [Verificación formal en Lean](verification/lean/README.md)
 * [Pruebas de Kani sobre el código Rust](verification/kani.md)
+
+## Licencia
+
+Se distribuye bajo cualquiera de estas dos licencias, a elección de quien lo
+use:
+
+* [Apache License, Version 2.0](LICENSE-APACHE)
+* [Licencia MIT](LICENSE-MIT)
+
+Salvo que se indique lo contrario, toda contribución enviada para incluirse en
+nsos, según se define en la licencia Apache-2.0, queda bajo esas mismas dos
+licencias, sin términos ni condiciones adicionales.

@@ -1,4 +1,6 @@
 [toolchain]
-channel = "stable"
+# Versión fija: un clippy nuevo no rompe la CI sin tocar el código.
+# Se actualiza en un PR aparte.
+channel = "1.100.0"
 targets = ["x86_64-unknown-none", "aarch64-unknown-none-softfloat"]
 components = ["rustfmt", "clippy"]

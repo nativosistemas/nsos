@@ -16,7 +16,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${1:-debug}"
 ARCH="${ARCH:-x86_64}"
 CMDLINE="${CMDLINE:-}"
-LIMINE_BRANCH="v10.x-binary"
+# Limine es de confianza (docs/amenazas.md): se fija un commit de la rama de
+# binarios y se comprueba antes de usarlo. Actualizar en un PR aparte.
+LIMINE_URL="https://github.com/limine-bootloader/limine.git"
+LIMINE_COMMIT="7a9013f305de0bea1f6310e76e7baba30499fef0" # v10.8.5, rama v10.x-binary
 LIMINE_DIR="$ROOT/build/limine"
 
 case "$ARCH" in
@@ -56,9 +59,20 @@ RUSTFLAGS="-C relocation-model=static" cargo build --release \
 CELL_DIR="$ROOT/target/cells/$TARGET/release"
 
 # 2. Limine (binarios precompilados + herramienta del host)
+if [[ -d "$LIMINE_DIR" ]] && \
+    [[ "$(git -C "$LIMINE_DIR" rev-parse HEAD 2>/dev/null)" != "$LIMINE_COMMIT" ]]; then
+    echo "Limine en $LIMINE_DIR no es $LIMINE_COMMIT: se vuelve a descargar" >&2
+    rm -rf "$LIMINE_DIR"
+fi
 if [[ ! -d "$LIMINE_DIR" ]]; then
-    git clone --quiet --depth=1 --branch="$LIMINE_BRANCH" \
-        https://github.com/limine-bootloader/limine.git "$LIMINE_DIR"
+    git init --quiet "$LIMINE_DIR"
+    git -C "$LIMINE_DIR" fetch --quiet --depth=1 "$LIMINE_URL" "$LIMINE_COMMIT"
+    git -C "$LIMINE_DIR" checkout --quiet --detach FETCH_HEAD
+fi
+if [[ "$(git -C "$LIMINE_DIR" rev-parse HEAD)" != "$LIMINE_COMMIT" ]] || \
+    [[ -n "$(git -C "$LIMINE_DIR" status --porcelain --untracked-files=no)" ]]; then
+    echo "FALLO: Limine no coincide con el commit fijado $LIMINE_COMMIT" >&2
+    exit 1
 fi
 if [[ ! -x "$LIMINE_DIR/limine" ]]; then
     make -s -C "$LIMINE_DIR" >/dev/null

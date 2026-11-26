@@ -4,7 +4,8 @@
 # Comprueba que:
 #   1. todo archivo con `unsafe` (bloque, fn, impl o extern) está en la tabla
 #      de docs/unsafe.md, y que la tabla no nombra archivos que ya no lo usan;
-#   2. crates/abi, crates/kcore y crates/contract siguen con #![forbid(unsafe_code)];
+#   2. crates/abi, crates/kcore, crates/contract, crates/link y crates/store
+#      siguen con #![forbid(unsafe_code)];
 #   3. toda cell (salvo el runtime) declara #![deny(unsafe_code)].
 # Imprime la cantidad de usos por archivo para seguir su evolución en los PRs.
 #
@@ -51,7 +52,7 @@ for f in "${registered[@]}"; do
     fi
 done
 
-for c in crates/abi/src/lib.rs crates/kcore/src/lib.rs crates/contract/src/lib.rs; do
+for c in crates/{abi,kcore,contract,link,store}/src/lib.rs; do
     if ! grep -q '^#!\[forbid(unsafe_code)\]' "$c"; then
         echo "FALLO: $c perdió #![forbid(unsafe_code)]" >&2
         fail=1

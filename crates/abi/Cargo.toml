@@ -4,6 +4,7 @@ description = "ABI estable entre el kernel de nsos y las cells: syscalls, capaci
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 # `cfg(kani)`: pruebas de Kani (ver verification/kani.md).
 [lints.rust]
