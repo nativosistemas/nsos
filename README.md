@@ -35,6 +35,10 @@ los mismos drivers, almacén y migración; ver [docs/arm64.md](docs/arm64.md)). 
 
 ## Requisitos
 
+Lo más simple: abrir el repositorio en el contenedor de
+[`.devcontainer/`](.devcontainer) (VS Code, GitHub Codespaces o
+`devcontainer up`), que trae todo lo de esta sección, Lean y Kani. Si no:
+
 * Rust estable, con la versión fija en `rust-toolchain.toml` (incluye el target
   `x86_64-unknown-none`).
 * `qemu-system-x86_64`, `xorriso`, `make`, `git`, un compilador C (para la
