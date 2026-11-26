@@ -28,7 +28,8 @@ pub const USER_STACK_SIZE: u64 = 64 * 1024;
 /// y la página de guarda sin mapear que tiene debajo. Un segmento que las
 /// pise se rechaza acá con [`ElfError::BadSegment`].
 pub const IMAGE_MAX: u64 = USER_STACK_TOP - USER_STACK_SIZE - PAGE;
-const _: () = assert!(USER_MIN < IMAGE_MAX && USER_STACK_TOP <= USER_MAX && IMAGE_MAX % PAGE == 0);
+const _: () =
+    assert!(USER_MIN < IMAGE_MAX && USER_STACK_TOP <= USER_MAX && IMAGE_MAX.is_multiple_of(PAGE));
 /// Máximo de segmentos cargables aceptados.
 pub const MAX_SEGMENTS: usize = 16;
 const PAGE: u64 = 4096;
