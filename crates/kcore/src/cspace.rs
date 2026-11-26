@@ -694,11 +694,13 @@ mod proofs {
         cs.check_invariants();
     }
 
-    /// Con una reserva pendiente, la operación `op` (insertar, insertar
-    /// varias, quitar, duplicar o vaciar) deja lugar para ella:
+    /// Con una reserva pendiente, la operación `op` (insertar, quitar o
+    /// duplicar) deja lugar para ella:
     /// `insert_reserved` después no entra en pánico, el handle vale y nombra
     /// la capacidad insertada. Es lo que necesita `cell_spawn`. Una prueba
-    /// por operación: juntas, CBMC se queda sin memoria.
+    /// por operación: juntas, CBMC se queda sin memoria. Con `insert_all` y
+    /// `clear` se queda sin memoria aun por separado; esos casos los cubre
+    /// `insert_reserved_any`.
     fn reserved_then(op: u8) {
         let (mut cs, issued) = any_state();
         let Ok(r) = cs.reserve() else { return };
@@ -707,19 +709,10 @@ mod proofs {
                 let _ = cs.insert(any_cap());
             }
             1 => {
-                let mut caps = Vec::with_capacity(2);
-                caps.push(any_cap());
-                caps.push(any_cap());
-                let _ = cs.insert_all(caps);
-            }
-            2 => {
                 let _ = cs.remove(any_handle(&issued));
             }
-            3 => {
-                let _ = cs.dup(any_handle(&issued), Rights(kani::any()));
-            }
             _ => {
-                let _ = cs.clear();
+                let _ = cs.dup(any_handle(&issued), Rights(kani::any()));
             }
         }
         let c = any_cap();
@@ -738,29 +731,33 @@ mod proofs {
     #[kani::proof]
     #[kani::unwind(6)]
     #[kani::solver(cadical)]
-    fn reserved_after_insert_all() {
+    fn reserved_after_remove() {
         reserved_then(1);
     }
 
     #[kani::proof]
     #[kani::unwind(6)]
     #[kani::solver(cadical)]
-    fn reserved_after_remove() {
+    fn reserved_after_dup() {
         reserved_then(2);
     }
 
+    /// El paso de la inducción: desde cualquier CSpace que cumpla los
+    /// invariantes con al menos una reserva pendiente, `insert_reserved` no
+    /// falla, nombra la capacidad y mantiene los invariantes. Como toda
+    /// operación los mantiene (`insert_any`, `insert_all_any`, `remove_any`,
+    /// `clear_any`, … parten de estados con reservas), una reserva sigue
+    /// teniendo lugar después de cualquier secuencia de operaciones.
     #[kani::proof]
     #[kani::unwind(6)]
     #[kani::solver(cadical)]
-    fn reserved_after_dup() {
-        reserved_then(3);
-    }
-
-    #[kani::proof]
-    #[kani::unwind(6)]
-    #[kani::solver(cadical)]
-    fn reserved_after_clear() {
-        reserved_then(4);
+    fn insert_reserved_any() {
+        let (mut cs, _) = any_state();
+        kani::assume(cs.reserved >= 1);
+        let c = any_cap();
+        let h = cs.insert_reserved(Reservation(()), c.clone());
+        assert!(cs.get(h) == Ok(&c));
+        cs.check_invariants();
     }
 
     /// `index_nospec` da exactamente `i` dentro de la tabla y `0` fuera,
