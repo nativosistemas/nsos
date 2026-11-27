@@ -18,3 +18,4 @@ import Nsos.StoreContract
 import Nsos.MigrationContract
 import Nsos.ContractId
 import Nsos.Quota
+import Nsos.Cpu

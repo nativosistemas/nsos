@@ -416,3 +416,20 @@ registro de terminaciones y los nombres de hilo crecían sin tope.
   que las dos cuotas vuelven enteras al kernel.
 * `EXITS` guarda las últimas 1024 terminaciones y el hilo de una cell ya no
   filtra una copia de su nombre.
+
+## Reservas de CPU (hecho)
+
+El scheduler era round-robin puro: una cell podía quedarse con casi toda la
+CPU creando hijas que giran, y ninguna tenía garantías.
+
+* Modelo primero: `Nsos/Cpu.lean`. Si las reservas suman como mucho el
+  período y el scheduler le da la CPU primero a quien todavía tiene reserva,
+  cada cell que quiere correr recibe la suya (`reserved`). Tres mutaciones
+  lo rompen. El reparto de las reservas es una instancia de `Quota.lean`.
+* La cuenta de cada cell lleva su reserva (unidades de 10 ms por segundo);
+  `cell_spawn` la separa de la de quien la crea (en los bits de arriba de
+  `quota`, Kani `spawn_quota_any`). El scheduler mide lo que corre cada cell
+  en cada cambio de contexto, elige primero a quien tiene reserva y reparte
+  lo que sobra en round-robin.
+* Prueba en QEMU: `puntual` con 40 unidades corre 626 milésimas del tiempo
+  con 6 `acaparadora` girando; sin reservas, 134.

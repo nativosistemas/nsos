@@ -284,6 +284,12 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
   encola hasta que se recibe (432 B), cada canal que crea (1,5 KiB) y cada
   mapeo. `nsos_rt::cell_spawn` da 512 marcos (2 MiB y 256 KiB de memoria
   del kernel); `cell_spawn_with_quota` elige la cuota.
+* `quota` lleva también la **reserva de CPU** de la hija, en los 16 bits
+  de arriba (`nsos_abi::syscall::spawn_quota`): unidades de
+  `CPU_UNITS` = 100 por segundo, que salen de la reserva de quien llama y
+  vuelven al terminar. El scheduler le da la CPU primero a quien todavía
+  tiene reserva en el segundo; sin reserva (lo normal), la cell corre con
+  lo que sobra. `nsos_rt::cell_spawn_with` elige marcos y reserva.
 * Una cell no hereda nada que no se le pase explícitamente.
 * Si la cell falla (excepción de CPU, `panic`, violación de ABI), el kernel la
   termina y libera sus capacidades (los peers ven `PEER_CLOSED`). El kernel

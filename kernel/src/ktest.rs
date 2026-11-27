@@ -712,6 +712,26 @@ pub fn run_cells() -> bool {
                     <= crate::CHARLATANA_QUOTA * crate::quota::KMEM_PER_FRAME
         ),
     );
+    // Con 6 `acaparadora` girando a la vez, sin reservas `puntual` recibiría
+    // una parte por cada cell que quiere la CPU (menos de 150 milésimas).
+    // Con su reserva, al menos esa parte del tiempo (con un margen por las
+    // syscalls y los hilos del kernel).
+    check(
+        "puntual: recibe su reserva de CPU aunque otras cells giren sin parar",
+        matches!(
+            status("puntual"),
+            Some(Exited(n)) if (n as u64) * crate::quota::CPU_UNITS
+                >= crate::PUNTUAL_CPU * 1000 * 85 / 100
+        ),
+    );
+    check(
+        "acaparadora: las 6 terminaron con 0",
+        exits
+            .iter()
+            .filter(|(n, s)| n == "acaparadora" && *s == Exited(0))
+            .count()
+            == 6,
+    );
     check(
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),

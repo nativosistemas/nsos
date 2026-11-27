@@ -1,4 +1,14 @@
-//! Scheduler round-robin apropiativo de hilos del kernel.
+//! Scheduler round-robin apropiativo de hilos del kernel, con reservas de
+//! CPU por cell.
+//!
+//! En cada cambio de contexto se le cobra a la cell del hilo que deja la CPU
+//! el tiempo que corrió (medido, no por ticks: una cell no esquiva el cobro
+//! cediendo justo antes del tick). Para elegir el siguiente, primero se
+//! busca en la cola un hilo del kernel o de una cell a la que le quede
+//! reserva en el período (`crate::quota`); si no hay, el primero de la cola.
+//! Es la regla del modelo `verification/lean/Nsos/Cpu.lean`: con las
+//! reservas sumando como mucho el período, cada cell recibe la suya, y la
+//! CPU nunca queda ociosa si alguien quiere correr.
 //!
 //! Un cambio de contexto es simplemente devolver a la ruta de interrupción un
 //! `TrapFrame` distinto del que se guardó (ver `arch::idt`). Cada hilo tiene
@@ -65,6 +75,8 @@ struct Scheduler {
     /// vencer (ver [`wake_at`]). Puede quedar alguno de un hilo que ya volvió:
     /// un despertar de más es inofensivo porque toda espera vuelve a mirar.
     timers: Vec<(u64, ThreadId)>,
+    /// Cuándo empezó a correr el hilo actual (para cobrarle su tiempo).
+    since_ns: u64,
 }
 
 impl Scheduler {
@@ -95,6 +107,7 @@ pub fn init() {
         next_id: 1,
         switches: 0,
         timers: Vec::new(),
+        since_ns: crate::arch::time::now_ns(),
     });
 }
 
@@ -180,11 +193,17 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
 
     let cur_id = s.current;
     let idle = s.idle;
+    let now = crate::arch::time::now_ns();
+    let ran = now.saturating_sub(s.since_ns);
     {
         let cur = s.find(cur_id).expect("hilo actual inexistente");
         cur.frame = frame;
         if cur.state == State::Running {
             cur.state = State::Ready;
+        }
+        // Lo que corrió se le cobra a la reserva de su cell.
+        if let Some(c) = &cur.cell {
+            c.account.cpu_charge(ran, now);
         }
     }
     // Plazos vencidos: esos hilos vuelven a la cola.
@@ -214,7 +233,19 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
         s.ready.push_back(cur_id);
     }
 
-    let next_id = s.ready.pop_front().unwrap_or(idle);
+    // Primero, quien tiene derecho a la CPU en este período: un hilo del
+    // kernel o uno de una cell que todavía tiene reserva.
+    let reserved = s.ready.iter().position(|&id| {
+        s.threads.iter().find(|t| t.id == id).is_some_and(|t| {
+            t.cell
+                .as_ref()
+                .is_none_or(|c| c.account.cpu_in_reserve(now))
+        })
+    });
+    let next_id = match reserved {
+        Some(i) => s.ready.remove(i).expect("posición válida"),
+        None => s.ready.pop_front().unwrap_or(idle),
+    };
     if cur_state == State::Dead {
         let pos = s.threads.iter().position(|t| t.id == cur_id).unwrap();
         s.zombie = Some(s.threads.swap_remove(pos));
@@ -223,6 +254,7 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
         s.switches += 1;
     }
     s.current = next_id;
+    s.since_ns = now;
     let next = s.find(next_id).expect("hilo listo inexistente");
     next.state = State::Running;
     let root = match &next.cell {

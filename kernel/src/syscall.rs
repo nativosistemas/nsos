@@ -161,8 +161,9 @@ fn sleep(cell: &Cell) -> SysResult<()> {
 const SPAWN_MAX_CAPS: usize = 16;
 
 /// `cell_spawn(h_image, caps, n) -> h_cell`.
-/// La cuota de la hija (`q` marcos) sale de la cuota disponible de quien
-/// llama (`quota::Account::split`); al morir la hija, vuelve.
+/// La cuota de la hija (marcos y reserva de CPU, juntos en `q`: ver
+/// `nsos_abi::syscall::spawn_quota`) sale de la de quien llama
+/// (`quota::Account::split`); al morir la hija, vuelve.
 fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64, q: u64) -> SysResult<u64> {
     let n = usize::try_from(n).map_err(|_| Error::InvalidArgs)?;
     if n > SPAWN_MAX_CAPS {
@@ -185,7 +186,8 @@ fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64, q: u64) -> SysResu
     // Reservar el lugar de la respuesta *antes* de mover las capacidades:
     // después de crear la cell, insertarla no puede fallar (si fallara, la
     // cell quedaría corriendo sin que nadie pueda matarla).
-    let account = cell.account.split(q)?;
+    let (q, cpu) = nsos_abi::syscall::spawn_quota_parts(q);
+    let account = cell.account.split(q, cpu)?;
     let (reservation, caps) = {
         let mut cs = cell.cspace.lock();
         let reserved = cs

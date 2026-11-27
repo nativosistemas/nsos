@@ -25,6 +25,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/MigrationContract.lean` | La migración de `Migration.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/ContractId.lean` | El contrato de cada canal (`Sys.contract`) no cambia. |
 | `Nsos/Quota.lean` | Cuotas de memoria por supervisor: cada cell gasta solo su cuota, `cell_spawn` le pasa parte de la suya a la hija y al morir vuelve al supervisor (modelo antes del código). |
+| `Nsos/Cpu.lean` | Reservas de CPU: con las reservas sumando como mucho el período, un scheduler que le da la CPU primero a quien tiene reserva le cumple la suya a cada cell (modelo antes del código). |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
@@ -286,6 +287,20 @@ Mutaciones que rompen `step_inv`: aceptar un pedido que se pasa por un
 marco de la cuota, crear una hija con una cuota que se pasa por un marco de
 la del supervisor, y no pasarle al supervisor los marcos usados de la hija
 al morir.
+
+Reservas de CPU (`Nsos/Cpu.lean`, antes del código del scheduler):
+
+* `CpuModel.reserved`: si las reservas suman como mucho la longitud del
+  período y una cell quiere correr en todo el período, lo termina con su
+  reserva gastada entera, hagan lo que hagan las demás y elija lo que elija
+  el scheduler entre las que tienen reserva.
+* `CpuModel.tick_sum`, `run_sum`: cada unidad en que alguien con reserva
+  quiere correr se descuenta de una reserva.
+
+Mutaciones que rompen `tick_sum`: que el scheduler pueda elegir a una cell
+sin reserva habiendo otra con reserva lista, no descontarle la unidad a
+quien corrió, y dejar la CPU sin dar a nadie con reserva habiendo alguno
+listo.
 
 ## Tests derivados del modelo
 
