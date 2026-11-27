@@ -307,13 +307,27 @@ pub fn cell_spawn(image: CapHandle, caps: &[CapHandle]) -> SysResult<CapHandle> 
 }
 
 /// Como [`cell_spawn`], con `quota` marcos de cuota de memoria para la cell
-/// nueva. Salen de la cuota disponible de quien llama y vuelven cuando la
+/// nueva y sin reserva de CPU (corre cuando nadie con reserva quiere la
+/// CPU). Salen de la cuota disponible de quien llama y vuelven cuando la
 /// cell nueva termina; sin tantos disponibles, `NoMemory`.
 pub fn cell_spawn_with_quota(
     image: CapHandle,
     caps: &[CapHandle],
     quota: u64,
 ) -> SysResult<CapHandle> {
+    cell_spawn_with(image, caps, quota, 0)
+}
+
+/// Como [`cell_spawn_with_quota`], y además `cpu` unidades de reserva de
+/// CPU (de [`abi::syscall::CPU_UNITS`] por segundo) que salen de la reserva
+/// de quien llama.
+pub fn cell_spawn_with(
+    image: CapHandle,
+    caps: &[CapHandle],
+    frames: u64,
+    cpu: u64,
+) -> SysResult<CapHandle> {
+    let quota = abi::syscall::spawn_quota(frames, cpu).ok_or(abi::Error::InvalidArgs)?;
     decode_ret(syscall4(
         Syscall::CellSpawn,
         image.0 as u64,

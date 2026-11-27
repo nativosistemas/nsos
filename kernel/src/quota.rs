@@ -26,6 +26,13 @@
 //! en la misma proporción y el modelo de Lean vale para cada uno por
 //! separado (los mismos pasos sobre el mismo árbol de supervisores).
 //!
+//! La cuenta lleva además la **reserva de CPU** de la cell: unidades de
+//! [`CPU_UNITS`] por período (un segundo) que el scheduler le garantiza.
+//! También se reparte con `cell_spawn` y vuelve al morir (la misma regla que
+//! los otros dos recursos), y el scheduler le da la CPU primero a quien
+//! todavía tiene reserva en el período (`verification/lean/Nsos/Cpu.lean`:
+//! si las reservas suman como mucho el período, cada cell recibe la suya).
+//!
 //! Orden de los locks: una cuenta antes que las de sus supervisores. Nunca
 //! se toma la de una hija con la de su supervisor tomada. El lock de un
 //! canal se puede tener tomado al cobrar (los mensajes se cobran al
@@ -51,6 +58,17 @@ pub const KMEM_PER_FRAME: u64 = 512;
 /// Cuota de las cells que crea el kernel al arrancar (8 MiB).
 pub const BOOT_QUOTA: u64 = 2048;
 
+pub use nsos_abi::syscall::CPU_UNITS;
+
+/// Unidades de CPU por período que el kernel se guarda para sus hilos.
+pub const KERNEL_CPU_RESERVE: u64 = 10;
+
+/// Duración del período del scheduler.
+pub const PERIOD_NS: u64 = 1_000_000_000;
+
+/// Tiempo de una unidad de reserva de CPU.
+pub const CPU_UNIT_NS: u64 = PERIOD_NS / CPU_UNITS;
+
 /// Recurso de una cuenta.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Res {
@@ -70,6 +88,11 @@ pub struct Account {
 struct State {
     frames: Quota,
     kmem: Quota,
+    /// Reserva de CPU en `avail` (unidades por período; `used` siempre 0).
+    cpu: Quota,
+    /// Tiempo de reserva que le queda en el período `cpu_period`.
+    cpu_left_ns: u64,
+    cpu_period: u64,
     /// La cell murió: lo suyo se cuenta en el supervisor.
     dead: bool,
 }
@@ -92,6 +115,7 @@ pub fn init(free: u64, heap: u64) {
     let root = Account::new(
         Quota::new(free.saturating_sub(KERNEL_RESERVE)),
         Quota::new(heap.saturating_sub(KERNEL_KMEM_RESERVE)),
+        Quota::new(CPU_UNITS - KERNEL_CPU_RESERVE),
         None,
     );
     *ROOT.lock() = Some(Arc::new(root));
@@ -103,11 +127,14 @@ pub fn root() -> Arc<Account> {
 }
 
 impl Account {
-    fn new(frames: Quota, kmem: Quota, parent: Option<Arc<Account>>) -> Self {
+    fn new(frames: Quota, kmem: Quota, cpu: Quota, parent: Option<Arc<Account>>) -> Self {
         Self {
             state: IrqSpinLock::new(State {
                 frames,
                 kmem,
+                cpu,
+                cpu_left_ns: 0,
+                cpu_period: u64::MAX,
                 dead: false,
             }),
             parent,
@@ -159,19 +186,61 @@ impl Account {
     }
 
     /// Separa `q` marcos de la cuota disponible para una cell hija, con
-    /// `q * KMEM_PER_FRAME` bytes de memoria del kernel. Las dos o ninguna.
-    pub fn split(self: &Arc<Self>, q: u64) -> Result<Arc<Account>, Error> {
+    /// `q * KMEM_PER_FRAME` bytes de memoria del kernel y `cpu` unidades de
+    /// reserva de CPU. Todo o nada.
+    pub fn split(self: &Arc<Self>, q: u64, cpu: u64) -> Result<Arc<Account>, Error> {
         let k = q.checked_mul(KMEM_PER_FRAME).ok_or(Error::NoMemory)?;
-        let (frames, kmem) = {
+        let (frames, kmem, cpu) = {
             let mut g = self.state.lock();
-            if g.dead || q > g.frames.avail || k > g.kmem.avail {
+            if g.dead || q > g.frames.avail || k > g.kmem.avail || cpu > g.cpu.avail {
                 return Err(Error::NoMemory);
             }
             let frames = g.frames.split(q).expect("comprobado arriba");
             let kmem = g.kmem.split(k).expect("comprobado arriba");
-            (frames, kmem)
+            let cpu = g.cpu.split(cpu).expect("comprobado arriba");
+            // Lo que le queda en este período no puede pasar de su reserva nueva.
+            g.cpu_left_ns = g.cpu_left_ns.min(g.cpu.avail * CPU_UNIT_NS);
+            (frames, kmem, cpu)
         };
-        Ok(Arc::new(Account::new(frames, kmem, Some(self.clone()))))
+        Ok(Arc::new(Account::new(
+            frames,
+            kmem,
+            cpu,
+            Some(self.clone()),
+        )))
+    }
+
+    /// Renueva la reserva de CPU al empezar un período nuevo.
+    fn refresh_cpu(g: &mut State, now_ns: u64) {
+        let period = now_ns / PERIOD_NS;
+        if g.cpu_period != period {
+            g.cpu_period = period;
+            g.cpu_left_ns = g.cpu.avail * CPU_UNIT_NS;
+        }
+    }
+
+    /// ¿Le queda reserva de CPU en el período de `now_ns`? Una cell muerta,
+    /// no.
+    pub fn cpu_in_reserve(&self, now_ns: u64) -> bool {
+        let mut g = self.state.lock();
+        if g.dead {
+            return false;
+        }
+        Self::refresh_cpu(&mut g, now_ns);
+        g.cpu_left_ns > 0
+    }
+
+    /// Le cobra `ns` de CPU (lo que corrió hasta `now_ns`) a la reserva del
+    /// período.
+    pub fn cpu_charge(&self, ns: u64, now_ns: u64) {
+        let mut g = self.state.lock();
+        Self::refresh_cpu(&mut g, now_ns);
+        g.cpu_left_ns = g.cpu_left_ns.saturating_sub(ns);
+    }
+
+    /// Reserva de CPU (unidades por período).
+    pub fn cpu_reserve(&self) -> u64 {
+        self.state.lock().cpu.avail
     }
 
     /// La cell murió: lo disponible vuelve al supervisor y lo usado pasa a
@@ -183,21 +252,23 @@ impl Account {
             return;
         }
         let parent = self.parent.as_deref().expect("la cuenta raíz no muere");
-        parent.absorb(g.frames, g.kmem);
+        parent.absorb(g.frames, g.kmem, g.cpu);
         g.frames = Quota::default();
         g.kmem = Quota::default();
+        g.cpu = Quota::default();
+        g.cpu_left_ns = 0;
         g.dead = true;
     }
 
-    fn absorb(&self, frames: Quota, kmem: Quota) {
+    fn absorb(&self, frames: Quota, kmem: Quota, cpu: Quota) {
         let mut g = self.state.lock();
         if g.dead {
             let parent = self.parent.as_deref().expect("la cuenta raíz no muere");
-            parent.absorb(frames, kmem);
+            parent.absorb(frames, kmem, cpu);
             return;
         }
-        let ok = g.frames.absorb(frames) && g.kmem.absorb(kmem);
-        assert!(ok, "cuenta de memoria fuera de rango");
+        let ok = g.frames.absorb(frames) && g.kmem.absorb(kmem) && g.cpu.absorb(cpu);
+        assert!(ok, "cuenta fuera de rango");
     }
 
     /// Cuota disponible de marcos.

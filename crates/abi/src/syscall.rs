@@ -73,10 +73,11 @@ pub enum Syscall {
     /// `cell_spawn(h_image, caps: *const CapHandle, n, quota) -> h_cell`:
     /// crea una cell a partir de una imagen (requiere `EXEC`) y le *mueve*
     /// las capacidades dadas (cada una requiere `GRANT`), que recibe en los
-    /// slots `1..=n`. La cell nueva recibe `quota` marcos de cuota de
-    /// memoria, que salen de la cuota disponible de quien llama (sin tantos,
-    /// `NoMemory`) y vuelven cuando termina. Devuelve una capacidad a la
-    /// cell nueva.
+    /// slots `1..=n`. `quota` lleva dos cosas (ver [`spawn_quota`]): los
+    /// marcos de cuota de memoria de la cell nueva y su reserva de CPU (en
+    /// [`CPU_UNITS`] por período). Las dos salen de las de quien llama (sin
+    /// tantas, `NoMemory`) y vuelven cuando termina. Devuelve una capacidad
+    /// a la cell nueva.
     CellSpawn = 50,
     /// `cell_kill(h_cell)`: termina la cell (requiere `CONTROL`). No espera:
     /// la terminación se observa con `cell_status`.
@@ -305,5 +306,62 @@ mod tests {
             reserved: 7,
         };
         assert_eq!(WaitItem::from_bytes(&it.to_bytes()), it);
+    }
+}
+
+/// Unidades de reserva de CPU por período del scheduler (el período dura un
+/// segundo: una unidad son 10 ms por segundo).
+pub const CPU_UNITS: u64 = 100;
+
+/// Bits de `quota` de `cell_spawn` que llevan los marcos; la reserva de CPU
+/// va en los de arriba.
+pub const SPAWN_FRAMES_BITS: u32 = 48;
+
+/// Arma el argumento `quota` de `cell_spawn`: `frames` marcos de memoria y
+/// `cpu` unidades de reserva de CPU. `None` si no entran.
+pub const fn spawn_quota(frames: u64, cpu: u64) -> Option<u64> {
+    if frames >> SPAWN_FRAMES_BITS != 0 || cpu > CPU_UNITS {
+        return None;
+    }
+    Some(frames | (cpu << SPAWN_FRAMES_BITS))
+}
+
+/// Lo inverso de [`spawn_quota`]: `(marcos, reserva de CPU)`.
+pub const fn spawn_quota_parts(quota: u64) -> (u64, u64) {
+    (
+        quota & ((1 << SPAWN_FRAMES_BITS) - 1),
+        quota >> SPAWN_FRAMES_BITS,
+    )
+}
+
+#[cfg(test)]
+mod spawn_quota_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        let q = spawn_quota(512, 40).unwrap();
+        assert_eq!(spawn_quota_parts(q), (512, 40));
+        assert_eq!(spawn_quota_parts(512), (512, 0)); // compatible
+        assert!(spawn_quota(1 << 48, 0).is_none());
+        assert!(spawn_quota(1, CPU_UNITS + 1).is_none());
+    }
+}
+
+#[cfg(kani)]
+mod spawn_quota_proofs {
+    use super::*;
+
+    /// Cualquier par que acepta `spawn_quota` vuelve igual, y cualquier
+    /// `quota` se parte sin desbordar.
+    #[kani::proof]
+    fn spawn_quota_any() {
+        let (f, c): (u64, u64) = (kani::any(), kani::any());
+        if let Some(q) = spawn_quota(f, c) {
+            assert!(spawn_quota_parts(q) == (f, c));
+        }
+        let q: u64 = kani::any();
+        let (f, c) = spawn_quota_parts(q);
+        assert!(f >> SPAWN_FRAMES_BITS == 0 && c <= u64::MAX >> SPAWN_FRAMES_BITS);
     }
 }

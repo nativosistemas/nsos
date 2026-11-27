@@ -729,14 +729,28 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
     spawn_with_quota(name, image, caps, quota::BOOT_QUOTA)
 }
 
-/// Como [`spawn`], con `q` marcos de la cuenta raíz.
+/// Como [`spawn`], con `q` marcos de la cuenta raíz y sin reserva de CPU.
 pub fn spawn_with_quota(
     name: &str,
     image: &[u8],
     caps: Vec<KCap>,
     q: u64,
 ) -> Result<Arc<Cell>, SpawnError> {
-    let account = quota::root().split(q).map_err(|_| SpawnError::NoMemory)?;
+    spawn_with_reserve(name, image, caps, q, 0)
+}
+
+/// Como [`spawn`], con `q` marcos y `cpu` unidades de reserva de CPU de la
+/// cuenta raíz.
+pub fn spawn_with_reserve(
+    name: &str,
+    image: &[u8],
+    caps: Vec<KCap>,
+    q: u64,
+    cpu: u64,
+) -> Result<Arc<Cell>, SpawnError> {
+    let account = quota::root()
+        .split(q, cpu)
+        .map_err(|_| SpawnError::NoMemory)?;
     spawn_in(name, image, caps, account)
 }
 

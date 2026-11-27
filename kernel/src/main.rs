@@ -256,6 +256,15 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("sellada", sellada, alloc::vec![]).map_err(report)?;
     let glotona = module("glotona").ok_or("falta el módulo glotona")?;
     cell::spawn_with_quota("glotona", glotona, alloc::vec![], GLOTONA_QUOTA).map_err(report)?;
+    // Reservas de CPU: `puntual` con reserva y varias `acaparadora` sin
+    // reserva que giran a la vez.
+    let acaparadora = module("acaparadora").ok_or("falta el módulo acaparadora")?;
+    for _ in 0..ACAPARADORAS {
+        cell::spawn("acaparadora", acaparadora, alloc::vec![]).map_err(report)?;
+    }
+    let puntual = module("puntual").ok_or("falta el módulo puntual")?;
+    cell::spawn_with_reserve("puntual", puntual, alloc::vec![], 512, PUNTUAL_CPU)
+        .map_err(report)?;
     let charlatana = module("charlatana").ok_or("falta el módulo charlatana")?;
     cell::spawn_with_quota("charlatana", charlatana, alloc::vec![], CHARLATANA_QUOTA)
         .map_err(report)?;
@@ -275,12 +284,21 @@ pub fn image(name: &str) -> Result<cell::KCap, &'static str> {
     })
 }
 
+/// Reserva de CPU de `puntual` (unidades de `quota::CPU_UNITS` por segundo).
+pub const PUNTUAL_CPU: u64 = 40;
+
+/// Cuántas `acaparadora` giran a la vez que `puntual`.
+const ACAPARADORAS: usize = 6;
+
 /// Cuota de `glotona` (4 MiB): la prueba negativa de las cuotas.
 pub const GLOTONA_QUOTA: u64 = 1024;
 
 /// Cuota de `charlatana` (4 MiB, 512 KiB de memoria del kernel): la prueba
 /// negativa de la cuota de memoria del kernel.
 pub const CHARLATANA_QUOTA: u64 = 1024;
+
+/// Reserva de CPU de `init` (el supervisor tiene que poder reaccionar).
+const INIT_CPU: u64 = 10;
 
 /// Cuota de `init` (32 MiB): de ella salen las de las cells que crea.
 const INIT_QUOTA: u64 = 8192;
@@ -296,7 +314,7 @@ fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<
         image("cliente")?,
         image("contador-roto")?,
     ];
-    cell::spawn_with_quota("init", init, caps, INIT_QUOTA).map_err(report)?;
+    cell::spawn_with_reserve("init", init, caps, INIT_QUOTA, INIT_CPU).map_err(report)?;
     Ok(())
 }
 
