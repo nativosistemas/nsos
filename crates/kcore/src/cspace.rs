@@ -89,6 +89,37 @@ impl<T> CSpace<T> {
         }
     }
 
+    /// Como [`CSpace::new`], pero con la memoria de todos los slots posibles
+    /// reservada desde el principio: la tabla nunca crece ni se realoca, y
+    /// ocupa exactamente [`CSpace::reserved_bytes`] (el kernel se lo cobra a
+    /// la cuota de la cell).
+    pub fn with_reserved(limit: u32) -> Self {
+        let mut cs = Self::new(limit);
+        let n = cs.slot_limit as usize;
+        cs.slots.reserve_exact(n - cs.slots.len());
+        cs.free.reserve_exact(n);
+        cs
+    }
+
+    /// Bytes de heap que ocupa una CSpace de [`CSpace::with_reserved`] con
+    /// este límite.
+    pub const fn reserved_bytes(limit: u32) -> usize {
+        let limit = if limit < MAX_SLOTS - 1 {
+            limit
+        } else {
+            MAX_SLOTS - 1
+        };
+        let slots = {
+            let s = limit.saturating_mul(4) + 1;
+            if s < MAX_SLOTS {
+                s
+            } else {
+                MAX_SLOTS
+            }
+        } as usize;
+        slots * (core::mem::size_of::<Slot<T>>() + core::mem::size_of::<u32>())
+    }
+
     /// Capacidades vivas.
     pub fn len(&self) -> usize {
         self.live
@@ -462,6 +493,18 @@ mod tests {
         let h = cs.insert_reserved(r, cap(2, Rights::NONE));
         cs.remove(h).unwrap();
         cs.check_invariants();
+    }
+
+    #[test]
+    fn reserved_never_grows() {
+        let mut cs = CSpace::with_reserved(2);
+        let (cap_s, cap_f) = (cs.slots.capacity(), cs.free.capacity());
+        for _ in 0..3 * GEN_LIMIT {
+            let h = cs.insert(cap(1, Rights::NONE)).unwrap();
+            cs.remove(h).unwrap();
+        }
+        assert_eq!((cs.slots.capacity(), cs.free.capacity()), (cap_s, cap_f));
+        assert!(CSpace::<u32>::reserved_bytes(2) >= 9 * 4);
     }
 
     #[test]

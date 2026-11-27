@@ -27,6 +27,30 @@ use nsos_kcore::elf;
 pub const CSPACE_LIMIT: u32 = 1024;
 /// Mensajes máximos encolados por extremo.
 pub const QUEUE_LIMIT: usize = 64;
+
+// Memoria del kernel que se cobra por cada cosa (`quota::Account::charge_kmem`).
+// Son cotas de lo que ocupa en el heap, con lo que agrega el allocador.
+
+/// Lo fijo de una cell: su pila de kernel, su CSpace (reservada entera, nunca
+/// crece) y sus estructuras.
+pub const CELL_KMEM: u64 = (sched::STACK_SIZE
+    + CSpace::<KObject>::reserved_bytes(CSPACE_LIMIT)
+    + core::mem::size_of::<Cell>()
+    + 1024) as u64;
+/// Un mensaje encolado (lo paga quien lo manda, hasta que se recibe o se
+/// descarta).
+pub const MSG_KMEM: u64 = (core::mem::size_of::<QueuedMsg>()
+    + nsos_abi::msg::MAX_CAPS * core::mem::size_of::<KCap>()
+    + 64) as u64;
+/// Un canal: el par, sus dos extremos y el lugar de sus colas.
+pub const CHANNEL_KMEM: u64 = (core::mem::size_of::<ChannelPair>()
+    + 2 * core::mem::size_of::<Endpoint>()
+    + 2 * QUEUE_LIMIT * core::mem::size_of::<usize>()
+    + 256) as u64;
+/// Un mapeo de un objeto `Memory` (la lista puede duplicar su capacidad).
+pub const MAPPING_KMEM: u64 = (2 * core::mem::size_of::<Mapping>()) as u64;
+/// La estructura de un objeto `Memory` (sus marcos se cobran aparte).
+pub const MEMOBJ_KMEM: u64 = (core::mem::size_of::<MemObj>() + 32) as u64;
 /// Tope de la pila de usuario. Vive en `kcore::elf`, que rechaza los
 /// segmentos que la pisen.
 pub use elf::{USER_STACK_SIZE, USER_STACK_TOP};
@@ -87,9 +111,14 @@ pub struct MemObj {
 impl MemObj {
     /// Reserva `pages` marcos contiguos y los cobra a `account`.
     pub fn new(pages: usize, account: Arc<Account>) -> Option<Arc<MemObj>> {
-        account.charge(pages as u64).ok()?;
+        account.charge_kmem(MEMOBJ_KMEM).ok()?;
+        if account.charge(pages as u64).is_err() {
+            account.refund_kmem(MEMOBJ_KMEM);
+            return None;
+        }
         let Some(phys) = pmm::alloc_contiguous(pages, 1) else {
             account.refund(pages as u64);
+            account.refund_kmem(MEMOBJ_KMEM);
             return None;
         };
         // SAFETY: marcos recién reservados, nuestros, en el HHDM.
@@ -132,6 +161,7 @@ impl Drop for MemObj {
             pmm::free_frame(self.phys + i as u64 * PAGE_SIZE);
         }
         self.account.refund(self.pages as u64);
+        self.account.refund_kmem(MEMOBJ_KMEM);
     }
 }
 
@@ -181,13 +211,27 @@ pub struct QueuedMsg {
     pub header: MsgHeader,
     pub data: [u8; MAX_DATA],
     caps: Vec<KCap>,
+    /// Quien pagó [`MSG_KMEM`] por él (los del kernel no se cobran).
+    payer: Option<Arc<Account>>,
 }
 
 impl QueuedMsg {
     /// Arma un mensaje con capacidades que acaban de salir de una CSpace.
     pub fn new(header: MsgHeader, data: [u8; MAX_DATA], caps: Vec<KCap>) -> QueuedMsg {
         mark_in_flight(&caps);
-        QueuedMsg { header, data, caps }
+        QueuedMsg {
+            header,
+            data,
+            caps,
+            payer: None,
+        }
+    }
+
+    /// Lo paga `account`, que ya pagó [`MSG_KMEM`]: se le devuelve cuando
+    /// el mensaje se recibe o se descarta.
+    pub fn paid_by(mut self, account: Arc<Account>) -> QueuedMsg {
+        self.payer = Some(account);
+        self
     }
 
     /// Saca las capacidades (para entregarlas a una CSpace).
@@ -207,6 +251,9 @@ impl QueuedMsg {
 impl Drop for QueuedMsg {
     fn drop(&mut self) {
         unmark_in_flight(&self.caps);
+        if let Some(a) = self.payer.take() {
+            a.refund_kmem(MSG_KMEM);
+        }
     }
 }
 
@@ -292,7 +339,7 @@ pub fn ipc_gc() -> usize {
             })
             .collect();
         let garbage = nsos_kcore::ipc_gc::garbage(&graph);
-        let queues: Vec<VecDeque<QueuedMsg>> = nodes
+        let queues: Vec<VecDeque<alloc::boxed::Box<QueuedMsg>>> = nodes
             .iter()
             .zip(&garbage)
             .filter(|(_, g)| **g)
@@ -310,8 +357,10 @@ pub fn ipc_gc() -> usize {
 
 #[derive(Default)]
 struct Side {
-    /// Mensajes que le llegan a este extremo.
-    queue: VecDeque<QueuedMsg>,
+    /// Mensajes que le llegan a este extremo. En caja: la cola guarda
+    /// punteros, así lo que retiene después de vaciarse es poco (y está en
+    /// [`CHANNEL_KMEM`]).
+    queue: VecDeque<alloc::boxed::Box<QueuedMsg>>,
     /// Este extremo ya no tiene dueños.
     closed: bool,
     /// Hilos esperando recibir en este extremo. Pueden ser varios (varias
@@ -347,6 +396,16 @@ pub struct ChannelPair {
     /// hay forma de escribirlo después de `channel_create`
     /// (`Sys.step_contract_fixed` en `verification/lean/Nsos/ContractId.lean`).
     contract: u64,
+    /// Quien pagó [`CHANNEL_KMEM`] (los canales del kernel no se cobran).
+    payer: Option<Arc<Account>>,
+}
+
+impl Drop for ChannelPair {
+    fn drop(&mut self) {
+        if let Some(a) = self.payer.take() {
+            a.refund_kmem(CHANNEL_KMEM);
+        }
+    }
 }
 
 /// Un extremo de canal. Se cierra cuando muere su última capacidad.
@@ -362,11 +421,27 @@ pub const ENDPOINT_RIGHTS: Rights = Rights(
     Rights::SEND.0 | Rights::RECV.0 | Rights::GRANT.0 | Rights::DUPLICATE.0 | Rights::WAIT.0,
 );
 
-/// Crea un canal con el contrato `contract` y devuelve sus dos extremos.
+/// Crea un canal del kernel con el contrato `contract` y devuelve sus dos
+/// extremos.
 pub fn channel_create(contract: u64) -> (Arc<Endpoint>, Arc<Endpoint>) {
+    channel_new(contract, None)
+}
+
+/// Crea un canal que paga `account` ([`CHANNEL_KMEM`] de su memoria del
+/// kernel, hasta que mueran los dos extremos).
+pub fn channel_create_paid(
+    contract: u64,
+    account: &Arc<Account>,
+) -> Result<(Arc<Endpoint>, Arc<Endpoint>), Error> {
+    account.charge_kmem(CHANNEL_KMEM)?;
+    Ok(channel_new(contract, Some(account.clone())))
+}
+
+fn channel_new(contract: u64, payer: Option<Arc<Account>>) -> (Arc<Endpoint>, Arc<Endpoint>) {
     let pair = Arc::new(ChannelPair {
         sides: IrqSpinLock::new(Default::default()),
         contract,
+        payer,
     });
     (
         Arc::new(Endpoint {
@@ -414,7 +489,7 @@ impl Endpoint {
             return Err(Error::WouldBlock);
         }
         let msg = build()?;
-        peer.queue.push_back(msg);
+        peer.queue.push_back(alloc::boxed::Box::new(msg));
         wake_all(&mut peer.recv_waiters);
         Ok(())
     }
@@ -428,7 +503,7 @@ impl Endpoint {
         let me = &mut sides[self.side];
         if let Some(m) = me.queue.pop_front() {
             wake_all(&mut me.send_waiters);
-            return Ok(m);
+            return Ok(*m);
         }
         if peer_closed {
             return Err(Error::PeerClosed);
@@ -446,7 +521,7 @@ impl Endpoint {
     pub fn unrecv(&self, m: QueuedMsg) {
         let mut sides = self.pair.sides.lock();
         let me = &mut sides[self.side];
-        me.queue.push_front(m);
+        me.queue.push_front(alloc::boxed::Box::new(m));
         wake_all(&mut me.recv_waiters);
     }
 
@@ -546,8 +621,12 @@ pub struct Cell {
 
 static NEXT_CELL: AtomicU64 = AtomicU64::new(1);
 
-/// Registro de terminaciones (lo consultan los tests).
+/// Registro de terminaciones (lo consultan los tests). Guarda las últimas
+/// [`EXITS_KEPT`]: antes crecía con cada cell creada, sin tope.
 pub static EXITS: IrqSpinLock<Vec<(String, ExitStatus)>> = IrqSpinLock::new(Vec::new());
+
+/// Terminaciones que guarda [`EXITS`].
+pub const EXITS_KEPT: usize = 1024;
 
 impl Cell {
     /// CR3 de la cell (0 si ya se destruyó).
@@ -672,10 +751,17 @@ pub fn spawn_in(
     caps: Vec<KCap>,
     account: Arc<Account>,
 ) -> Result<Arc<Cell>, SpawnError> {
+    // Lo que el kernel gasta por la cell (pila de kernel, CSpace, estructuras)
+    // sale de su cuota de memoria del kernel.
+    if account.charge_kmem(CELL_KMEM).is_err() {
+        account.close();
+        return Err(SpawnError::NoMemory);
+    }
     let mut space = None;
     let mut frames = Vec::new();
     let r = build(name, image, caps, &account, &mut space, &mut frames);
     if r.is_err() {
+        account.refund_kmem(CELL_KMEM);
         if let Some(space) = space.take() {
             space.destroy_user(&mut |p| free_charged(&account, p));
         }
@@ -707,9 +793,9 @@ pub fn spawn_in(
         img.segments.len(),
         img.entry
     );
-    let tname: &'static str =
-        alloc::boxed::Box::leak(alloc::string::String::from(name).into_boxed_str());
-    let tid = sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP);
+    // El hilo se llama "cell" (el nombre está en la cell): antes se filtraba
+    // una copia del nombre por cada cell creada.
+    let tid = sched::spawn_user("cell", cell.clone(), img.entry, USER_STACK_TOP);
     cell.thread.store(tid, Ordering::Relaxed);
     Ok(cell)
 }
@@ -771,7 +857,7 @@ fn build(
         v += PAGE_SIZE;
     }
 
-    let mut cspace = CSpace::new(CSPACE_LIMIT);
+    let mut cspace = CSpace::with_reserved(CSPACE_LIMIT);
     cspace
         .insert_all(caps)
         .map_err(|(e, _)| SpawnError::Caps(e))?;
@@ -790,9 +876,22 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
         status
     };
     kprintln!("cell {} \"{}\" terminó: {:?}", cell.id, cell.name, status);
-    EXITS.lock().push((cell.name.clone(), status));
+    {
+        let mut exits = EXITS.lock();
+        if exits.len() >= EXITS_KEPT {
+            exits.remove(0);
+        }
+        exits.push((cell.name.clone(), status));
+    }
 
-    let caps = cell.cspace.lock().clear();
+    // Vaciar y soltar la tabla (está reservada entera): la `Cell` puede
+    // seguir viva mientras su supervisor tenga la capacidad.
+    let caps = {
+        let mut cs = cell.cspace.lock();
+        let caps = cs.clear();
+        *cs = CSpace::new(0);
+        caps
+    };
     drop(caps); // fuera del lock del CSpace
     ipc_gc(); // lo que solo esta cell alcanzaba ya es basura
 
@@ -807,8 +906,11 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
         free_charged(&cell.account, p);
     }
     drop(core::mem::take(&mut *cell.mappings.lock()));
+    // Su pila de kernel se libera apenas termine el hilo (lo cubre la reserva
+    // del kernel mientras tanto).
+    cell.account.refund_kmem(CELL_KMEM);
     // Lo que le queda disponible vuelve al supervisor; lo que sigue en uso
-    // (objetos `Memory` que viajaron a otras cells) pasa a ser suyo.
+    // (objetos `Memory` que viajaron, mensajes encolados) pasa a ser suyo.
     cell.account.close();
 
     // Recién ahora (recursos liberados) se avisa a quienes esperan.
@@ -830,6 +932,17 @@ impl Cell {
         if !nsos_kcore::paging::user_range_ok(vaddr, obj.size(), elf::USER_MIN, elf::USER_MAX) {
             return Err(Error::InvalidArgs);
         }
+        // La entrada de la lista de mapeos la paga la cell; si no se mapea,
+        // se le devuelve (el `Drop` de `Mapping` la devuelve al quitarlo).
+        self.account.charge_kmem(MAPPING_KMEM)?;
+        let r = self.map_memory_charged(obj, vaddr, write);
+        if r.is_err() {
+            self.account.refund_kmem(MAPPING_KMEM);
+        }
+        r
+    }
+
+    fn map_memory_charged(&self, obj: Arc<MemObj>, vaddr: u64, write: bool) -> Result<(), Error> {
         let mut g = self.space.lock();
         let space = g.as_mut().ok_or(Error::InvalidArgs)?;
         // Todo o nada: comprobar que el rango está libre antes de mapear.
@@ -858,7 +971,12 @@ impl Cell {
                 .map_err(|_| Error::NoMemory)?;
         }
         drop(g);
-        self.mappings.lock().push(Mapping { obj, vaddr, write });
+        self.mappings.lock().push(Mapping {
+            obj,
+            vaddr,
+            write,
+            payer: self.account.clone(),
+        });
         Ok(())
     }
 
@@ -929,6 +1047,14 @@ struct Mapping {
     obj: Arc<MemObj>,
     vaddr: u64,
     write: bool,
+    /// Pagó [`MAPPING_KMEM`].
+    payer: Arc<Account>,
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        self.payer.refund_kmem(MAPPING_KMEM);
+    }
 }
 
 impl Mapping {

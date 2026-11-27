@@ -635,6 +635,7 @@ pub fn run_cells() -> bool {
     kprintln!("ktest: cells en anillo 3");
     let free_before = pmm::stats().free_frames;
     let quota_before = crate::quota::root().avail();
+    let kmem_before = crate::quota::root().kmem_avail();
     if let Err(e) = crate::boot_demo_cells() {
         kprintln!("  FALLO: {}", e);
         return false;
@@ -700,6 +701,17 @@ pub fn run_cells() -> bool {
             Some(Exited(n)) if n >= 1 && (n as u64) * 256 <= crate::GLOTONA_QUOTA
         ),
     );
+    // Cada mensaje encolado se cobra a la memoria del kernel de quien lo
+    // manda; sin eso `charlatana` encola unos 32 000 (10 MiB del heap).
+    check(
+        "charlatana: la cuota de memoria del kernel frena los mensajes encolados",
+        matches!(
+            status("charlatana"),
+            Some(Exited(n)) if n >= 1
+                && (n as u64) * crate::cell::MSG_KMEM
+                    <= crate::CHARLATANA_QUOTA * crate::quota::KMEM_PER_FRAME
+        ),
+    );
     check(
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),
@@ -757,7 +769,8 @@ pub fn run_cells() -> bool {
     );
     check(
         "las cuotas volvieron enteras a la cuenta del kernel",
-        crate::quota::root().avail() == quota_before,
+        crate::quota::root().avail() == quota_before
+            && crate::quota::root().kmem_avail() == kmem_before,
     );
     check(
         "el kernel sigue: el heap responde",

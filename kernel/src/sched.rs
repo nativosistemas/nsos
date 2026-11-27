@@ -22,7 +22,8 @@ use core::mem::size_of;
 /// Identificador de hilo.
 pub type ThreadId = u64;
 
-const STACK_SIZE: usize = 64 * 1024;
+/// Pila de kernel de cada hilo.
+pub const STACK_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
