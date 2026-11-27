@@ -130,6 +130,10 @@ pub fn breakpoint() {
 /// tiene `SP_EL1` al volver a EL0 (ver `trap`).
 pub fn set_kernel_stack(_top: u64) {}
 
+/// Raíces de la cell que va a correr: en ARM64 no hay KPTI (los núcleos
+/// que usamos no son vulnerables a Meltdown).
+pub fn set_cell_roots(_kernel: u64, _user: u64) {}
+
 /// Deshabilita interrupciones y detiene la CPU para siempre.
 pub fn halt_forever() -> ! {
     loop {

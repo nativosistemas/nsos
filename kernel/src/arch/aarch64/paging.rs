@@ -67,6 +67,11 @@ impl AddressSpace {
         self.root
     }
 
+    /// Raíz con la que corre la cell en EL0: la misma (sin KPTI).
+    pub fn user_root(&self) -> PhysAddr {
+        self.root()
+    }
+
     /// Mapea una página `virt → phys` con `flags` neutros.
     pub fn map(
         &mut self,
@@ -153,6 +158,7 @@ impl AddressSpace {
     pub fn new_user(
         _kernel: &AddressSpace,
         alloc: &mut dyn FnMut() -> Option<PhysAddr>,
+        _free: &mut dyn FnMut(PhysAddr),
     ) -> Option<Self> {
         Self::new(alloc)
     }
@@ -340,3 +346,7 @@ pub fn pan_enabled() -> bool {
 pub fn protections() -> [(&'static str, bool); 2] {
     [("PXN", true), ("PAN", pan_enabled())]
 }
+
+/// Sin KPTI en ARM64: nada que preparar (los núcleos que usamos no son
+/// vulnerables a Meltdown).
+pub fn prepare_user_half(_kernel: &AddressSpace, _alloc: &mut dyn FnMut() -> Option<PhysAddr>) {}

@@ -36,12 +36,19 @@ impl Tables for Hhdm {
 /// Un espacio de direcciones (raíz PML4).
 pub struct AddressSpace {
     pml4: PhysAddr,
+    /// KPTI: raíz con la que corre la cell en anillo 3 (0 si no es de una
+    /// cell). Comparte las tablas de la mitad baja con `pml4`; de la alta
+    /// solo tiene lo de `super::kpti::template`.
+    user_pml4: PhysAddr,
 }
 
 impl AddressSpace {
     /// Crea un espacio vacío. `alloc` devuelve marcos físicos a cero.
     pub fn new(alloc: &mut dyn FnMut() -> Option<PhysAddr>) -> Option<Self> {
-        Some(Self { pml4: alloc()? })
+        Some(Self {
+            pml4: alloc()?,
+            user_pml4: 0,
+        })
     }
 
     /// Dirección física de la raíz (valor para CR3).
@@ -49,7 +56,31 @@ impl AddressSpace {
         self.pml4
     }
 
+    /// Raíz con la que corre la cell en anillo 3 (KPTI); 0 si no es de una
+    /// cell.
+    pub fn user_root(&self) -> PhysAddr {
+        self.user_pml4
+    }
+
+    /// Traduce con la raíz de usuario (KPTI) y devuelve los permisos
+    /// efectivos; `None` si no está mapeada ahí (o no hay raíz de usuario).
+    pub fn translate_user(&self, virt: VirtAddr) -> Option<(PhysAddr, u64)> {
+        if self.user_pml4 == 0 {
+            return None;
+        }
+        pt::translate_with_flags(&Hhdm, self.user_pml4, virt)
+    }
+
+    /// Las entradas 256..512 de la raíz (para armar la plantilla de KPTI).
+    pub fn high_half(&self) -> [u64; 256] {
+        let mut out = [0; 256];
+        out.copy_from_slice(&table_mut(self.pml4)[pt::KERNEL_HALF..]);
+        out
+    }
+
     /// Mapea una página `virt → phys` con `flags` (PRESENT se agrega solo).
+    /// En un espacio de cell, la entrada del PML4 de la mitad baja se copia
+    /// también a la raíz de usuario: así las dos ven las mismas tablas.
     pub fn map(
         &mut self,
         virt: VirtAddr,
@@ -58,7 +89,12 @@ impl AddressSpace {
         flags: u64,
         alloc: &mut dyn FnMut() -> Option<PhysAddr>,
     ) -> Result<(), MapError> {
-        pt::map(&mut Hhdm, self.pml4, virt, phys, size, flags, alloc)
+        let r = pt::map(&mut Hhdm, self.pml4, virt, phys, size, flags, alloc);
+        let i = ((virt >> 39) & 511) as usize;
+        if self.user_pml4 != 0 && i < pt::KERNEL_HALF {
+            table_mut(self.user_pml4)[i] = table_mut(self.pml4)[i];
+        }
+        r
     }
 
     /// Mapea un rango usando páginas de 2 MiB donde sea posible.
@@ -129,15 +165,22 @@ impl AddressSpace {
 
     /// Crea un espacio de cell: mitad baja vacía, mitad alta compartida con
     /// `kernel` (mismas tablas de nivel 3, sin el bit USER).
+    /// Con KPTI, también la raíz de usuario (si no hay marco para ella,
+    /// devuelve la primera con `free`).
     pub fn new_user(
         kernel: &AddressSpace,
         alloc: &mut dyn FnMut() -> Option<PhysAddr>,
+        free: &mut dyn FnMut(PhysAddr),
     ) -> Option<Self> {
-        let s = Self { pml4: alloc()? };
+        let pml4 = alloc()?;
+        let Some(user_pml4) = alloc() else {
+            free(pml4);
+            return None;
+        };
         let src = table_mut(kernel.pml4);
-        let dst = table_mut(s.pml4);
-        dst[pt::KERNEL_HALF..].copy_from_slice(&src[pt::KERNEL_HALF..]);
-        Some(s)
+        table_mut(pml4)[pt::KERNEL_HALF..].copy_from_slice(&src[pt::KERNEL_HALF..]);
+        table_mut(user_pml4)[pt::KERNEL_HALF..].copy_from_slice(&super::kpti::template());
+        Some(Self { pml4, user_pml4 })
     }
 
     /// Libera las tablas de la mitad baja y el PML4 (no las páginas hoja,
@@ -160,6 +203,9 @@ impl AddressSpace {
             }
         }
         free(self.pml4);
+        if self.user_pml4 != 0 {
+            free(self.user_pml4);
+        }
     }
 
     /// Activa este espacio en la CPU actual.
@@ -238,4 +284,10 @@ pub fn protections() -> [(&'static str, bool); 2] {
         ("SMEP", SMEP.load(Ordering::Relaxed)),
         ("SMAP", SMAP.load(Ordering::Relaxed)),
     ]
+}
+
+/// KPTI: arma la mitad alta de las tablas de usuario de las cells (ver
+/// `super::kpti`).
+pub fn prepare_user_half(kernel: &AddressSpace, alloc: &mut dyn FnMut() -> Option<PhysAddr>) {
+    super::kpti::init(kernel, alloc);
 }

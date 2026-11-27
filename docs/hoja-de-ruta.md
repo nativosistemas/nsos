@@ -34,8 +34,9 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **KPTI** (con PCID): sacar el kernel del espacio de direcciones de las
-   cells mientras corren en anillo 3 (punto 1 de `amenazas.md`).
+1. **PCID para KPTI**: hoy cada cambio de tablas vacía la TLB (el IPC
+   cuesta casi el doble). Hay que cuidar que `invlpg` en las tablas del
+   kernel no deje traducciones viejas en las de usuario.
 2. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
    layout del almacén, enlace) y `caos` con semilla al azar en la CI.
 3. Después: handoff, SMP, KPTI, IOMMU y Raspberry Pi 4 y 5 (ver

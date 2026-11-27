@@ -5,6 +5,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod ioapic;
+pub mod kpti;
 pub mod paging;
 pub mod port;
 pub mod serial;
@@ -16,6 +17,12 @@ use port::Port;
 
 pub use idt::{initial_frame, TrapFrame};
 pub use syscall::set_kernel_stack;
+
+/// Raíces de la cell que va a correr (KPTI: la de usuario la carga el stub
+/// de salida a anillo 3).
+pub fn set_cell_roots(kernel: u64, user: u64) {
+    kpti::set_roots(kernel, user);
+}
 
 /// Código de excepción de un fallo de página (`ExitStatus::Faulted`).
 pub const FAULT_PAGE: u64 = 14;

@@ -52,11 +52,22 @@ físico.
 
 Ordenado por gravedad para el objetivo del proyecto (aislamiento).
 
-1. **Canales laterales de microarquitectura.** El kernel está mapeado (sin
-   bit USER) en el espacio de cada cell (en ARM64, en `TTBR1_EL1`, siempre
-   activo) y no hay KPTI: en una CPU vulnerable
-   a Meltdown, una cell podría leer memoria del kernel por ejecución
-   especulativa. Contra Spectre v1, cada valor que viene de una cell y se
+1. **Canales laterales de microarquitectura.** Contra Meltdown, en x86_64
+   hay KPTI (`arch/x86_64/kpti.rs`): mientras una cell corre en anillo 3,
+   sus tablas de páginas solo mapean del kernel los stubs de entrada y
+   salida, la GDT, la IDT, la TSS y sus pilas (secciones `.kpti_text` y
+   `.kpti_data`); ni el HHDM, ni el heap, ni el resto del texto. El stub de
+   entrada carga las tablas del kernel antes de tocar su pila, y el de
+   salida vuelve a las de usuario; el kernel ya no usa páginas globales.
+   ktest lo comprueba de dos formas: las tablas de usuario de un espacio de
+   cell no ven el HHDM, el heap, el texto ni la pila del kernel (copiar la
+   mitad alta entera lo hace fallar), y cada entrada desde anillo 3 llega
+   con la raíz de usuario de la cell (si el stub de salida no la carga,
+   falla). Cuesta: sin PCID, cada cambio de tablas vacía la TLB (el IPC de
+   ida y vuelta pasa de unos 40 a unos 75 µs en QEMU). En ARM64 no hay KPTI:
+   el kernel está en `TTBR1_EL1`, siempre activo, y los núcleos que usamos
+   (Cortex-A76 en QEMU, A72 en la Raspberry Pi 4) no son vulnerables a
+   Meltdown. Contra Spectre v1, cada valor que viene de una cell y se
    usa después de un control está cubierto: barrera de especulación
    (`lfence`; en ARM64, `dsb nsh; isb`) después de decodificar el número de
    syscall, después de validar las páginas de `usercopy` (antes de copiar
@@ -67,8 +78,8 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    que queda: no hay retpolines ni IBRS (Spectre v2), y el compilador
    podría, en teoría, volver a poner una rama en un índice enmascarado.
    `clock_monotonic` da resolución de nanosegundos, útil para medir
-   tiempos. *Mitigación futura*: KPTI con PCID, reducir la resolución del
-   reloj para cells sin un derecho específico.
+   tiempos. *Mitigación futura*: PCID para que KPTI no vacíe la TLB, reducir
+   la resolución del reloj para cells sin un derecho específico.
 2. **DMA sin IOMMU.** Un driver con capacidades `Memory` con `CONTROL`
    conoce direcciones físicas y el dispositivo puede escribir en cualquier
    lugar de la RAM. Un driver es, por lo tanto, de confianza respecto a la

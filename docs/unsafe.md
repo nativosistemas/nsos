@@ -22,7 +22,7 @@ Política:
 | `kernel/src/sync.rs` | `Sync` para `SpinLock`, acceso a `UnsafeCell` | acceso serializado por un `AtomicBool` con acquire/release |
 | `kernel/src/arch/x86_64/cpu.rs` | CR0/CR2/CR3/CR4, MSR, `rdtsc`, `sti`/`cli`/`hlt`, `invlpg`, `clac`, `lfence` | escribir CR0/CR3/CR4/MSR y `clac` son `unsafe fn`: el llamador garantiza que el estado nuevo mantiene válidos código y pila (y que la CPU soporta el bit o la instrucción) |
 | `kernel/src/arch/x86_64/gdt.rs` | `lgdt`, recarga de segmentos, `ltr`, escritura del TSS | se inicializa una vez en el BSP sin interrupciones; GDT/TSS son `static` |
-| `kernel/src/arch/x86_64/idt.rs` | stubs en ensamblador, `lidt`, puntero al `TrapFrame`, `clac` al entrar | layout del frame fijo y verificado en compilación; el frame devuelto siempre fue guardado por un stub o fabricado por el scheduler; `clac` solo si SMAP está activo |
+| `kernel/src/arch/x86_64/idt.rs` | stubs en ensamblador (con el cambio de CR3 de KPTI al entrar y salir de anillo 3), `lidt`, puntero al `TrapFrame`, `clac` al entrar | layout del frame fijo y verificado en compilación; el frame devuelto siempre fue guardado por un stub o fabricado por el scheduler; `clac` solo si SMAP está activo |
 | `kernel/src/arch/x86_64/paging.rs` | acceso a tablas vía HHDM; activar NX/WP, SMEP/SMAP y cambiar CR3 | toda tabla proviene del allocador de marcos o de una entrada presente; el espacio nuevo mapea kernel, HHDM y la pila de arranque; SMEP/SMAP solo si CPUID los reporta |
 | `kernel/src/arch/x86_64/apic.rs` | MMIO del APIC, puertos del PIC y del PIT | página MMIO mapeada sin caché; puertos exclusivos del módulo |
 | `kernel/src/arch/x86_64/ioapic.rs` | MMIO del IOAPIC (selección de registro + ventana) | página MMIO en `0xFEC00000` mapeada sin caché por `mm::map_mmio`; selección y acceso siempre bajo el mismo lock |
@@ -32,7 +32,8 @@ Política:
 | `kernel/src/sched.rs` | fabricar el `TrapFrame` inicial, `Send` de `Thread` | el frame vive en la pila propia del hilo; solo el scheduler lo toca bajo lock |
 | `kernel/src/ktest.rs` | escrituras de prueba, cambiar la mitad baja (ARM64, test de PAN) | solo en modo test; direcciones mapeadas por el propio test |
 | `kernel/src/main.rs` | tests negativos `test-wx-fault` y `test-smap-fault` | solo con esas banderas; se espera el #PF |
-| `kernel/src/arch/x86_64/syscall.rs` | MSR de `syscall`, stub de entrada | un solo núcleo: la pila de kernel del hilo actual está en `NSOS_KSTACK_TOP` (con SMP: por CPU vía `swapgs`) |
+| `kernel/src/arch/x86_64/syscall.rs` | MSR de `syscall`, stub de entrada (carga la CR3 del kernel antes de tocar la pila) | un solo núcleo: la pila de kernel del hilo actual está en `NSOS_KSTACK_TOP` (con SMP: por CPU vía `swapgs`) |
+| `kernel/src/arch/x86_64/kpti.rs` | pila de entrada y plantilla de la mitad alta de las tablas de usuario (`UnsafeCell` en `.kpti_data`), direcciones de los símbolos del linker | un solo núcleo; la pila de entrada solo la usan los stubs con interrupciones apagadas; la plantilla se escribe una vez antes de crear cells |
 | `kernel/src/usercopy.rs` | copiar desde/hacia memoria de cells vía HHDM | cada página se traduce con las tablas de la cell y exige USER (y WRITABLE al escribir) |
 | `kernel/src/cell.rs` | copiar segmentos ELF a marcos nuevos | marcos recién reservados; rangos validados por `kcore::elf` |
 | `kernel/src/boot/limine.rs` (módulos) | leer módulos cargados por Limine | `size` bytes válidos en memoria que el kernel nunca reclama |

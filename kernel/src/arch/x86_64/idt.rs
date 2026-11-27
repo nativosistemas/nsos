@@ -8,9 +8,17 @@
 //! reutiliza el mismo camino que cualquier interrupción, sin código especial
 //! de context switch.
 //!
+//! KPTI (`super::kpti`): los stubs están en `.kpti_text`, que ven las tablas
+//! de usuario. Desde anillo 3 la CPU deja el marco en la pila de entrada
+//! (`TSS.RSP0`); `nsos_trap_common` carga la raíz del kernel y copia el
+//! marco a la pila de kernel del hilo. Al volver a anillo 3, copia el marco
+//! de `iretq` a la pila de entrada y carga la raíz de usuario.
+//!
 //! # Invariantes (`unsafe`)
 //! - Los stubs respetan el ABI de la CPU: la pila queda alineada a 16 antes
 //!   del `call` (5 palabras de la CPU + 2 + 15 registros = 22 palabras).
+//! - Lo que tocan los stubs antes de cambiar de raíz (la pila de entrada,
+//!   `NSOS_KERNEL_CR3`, `NSOS_KSTACK_TOP`) está en `.kpti_data`.
 //! - El `TrapFrame` devuelto por `trap_entry` debe ser uno guardado por un
 //!   stub (o fabricado por el scheduler con el mismo layout) en una pila que
 //!   siga viva.
@@ -75,9 +83,31 @@ nsos_isr_\n:
     .quad nsos_isr_\n
 .endm
 
-.section .text
+.section .kpti_text, "ax"
 .global nsos_trap_common
 nsos_trap_common:
+    // Desde anillo 3 (CS del marco: rsp+24), con las tablas de usuario y en
+    // la pila de entrada: cargar las del kernel y pasar a la pila del hilo,
+    // copiando rbx, rax y las 7 palabras del marco (72 bytes).
+    test qword ptr [rsp + 24], 3
+    jz nsos_trap_save
+    push rax
+    push rbx
+    mov rax, cr3
+    mov [rip + NSOS_ENTRY_CR3], rax
+    mov rax, [rip + NSOS_KERNEL_CR3]
+    mov cr3, rax
+    mov rax, [rip + NSOS_KSTACK_TOP]
+    sub rax, 72
+    .irp off, 0, 8, 16, 24, 32, 40, 48, 56, 64
+    mov rbx, [rsp + \off]
+    mov [rax + \off], rbx
+    .endr
+    mov rsp, rax
+    pop rbx
+    pop rax
+.global nsos_trap_save
+nsos_trap_save:
     push rax
     push rbx
     push rcx
@@ -113,6 +143,23 @@ nsos_trap_common:
     pop rbx
     pop rax
     add rsp, 16
+    // Hacia anillo 3: copiar rbx, rax y el marco de `iretq` (7 palabras) a
+    // la pila de entrada y cargar las tablas de usuario.
+    test qword ptr [rsp + 8], 3
+    jz 2f
+    push rax
+    push rbx
+    lea rax, [rip + NSOS_ENTRY_STACK + {entry_size} - 56]
+    .irp off, 0, 8, 16, 24, 32, 40, 48
+    mov rbx, [rsp + \off]
+    mov [rax + \off], rbx
+    .endr
+    mov rsp, rax
+    mov rax, [rip + NSOS_USER_CR3]
+    mov cr3, rax
+    pop rbx
+    pop rax
+2:
     iretq
 
 .set i, 0
@@ -138,6 +185,7 @@ nsos_isr_table:
 .noaltmacro
 "#,
     entry = sym trap_entry,
+    entry_size = const super::kpti::ENTRY_STACK_SIZE,
 );
 
 extern "C" {
@@ -186,6 +234,8 @@ struct Idt(UnsafeCell<[Gate; 256]>);
 // SAFETY: solo `init` escribe, antes de habilitar interrupciones.
 unsafe impl Sync for Idt {}
 
+// En `.kpti_data`: la CPU la lee también con las tablas de usuario.
+#[link_section = ".kpti_data"]
 static IDT: Idt = Idt(UnsafeCell::new([Gate::EMPTY; 256]));
 
 /// Vector de la interrupción de software para ceder la CPU.
@@ -220,6 +270,9 @@ extern "C" fn trap_entry(frame: *mut TrapFrame) -> *mut TrapFrame {
     // SAFETY: el stub pasa un puntero a un TrapFrame recién guardado en la
     // pila actual, válido y exclusivo durante esta llamada.
     let f = unsafe { &mut *frame };
+    if f.cs & 3 == 3 {
+        super::kpti::check_entry();
+    }
     // Una interrupción no limpia RFLAGS.AC: si la cell lo había puesto, SMAP
     // quedaría desactivado dentro del kernel.
     if super::paging::protections()[1].1 {

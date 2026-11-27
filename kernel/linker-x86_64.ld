@@ -17,6 +17,13 @@ SECTIONS
 
     __text_start = .;
     .text : {
+        /* KPTI: el código de entrada y salida va en sus propias páginas,
+         * las únicas del texto del kernel que ven las tablas de usuario. */
+        . = ALIGN(4096);
+        __kpti_text_start = .;
+        KEEP(*(.kpti_text))
+        . = ALIGN(4096);
+        __kpti_text_end = .;
         *(.text .text.*)
     } :text
     __text_end = .;
@@ -33,6 +40,13 @@ SECTIONS
     __data_start = .;
 
     .data : {
+        /* KPTI: GDT, TSS, IDT, pilas de entrada y las variables que lee el
+         * código de entrada antes de cambiar de tablas. */
+        . = ALIGN(4096);
+        __kpti_data_start = .;
+        KEEP(*(.kpti_data))
+        . = ALIGN(4096);
+        __kpti_data_end = .;
         *(.data .data.*)
 
         /* Las requests de Limine deben quedar juntas y entre marcadores. */
