@@ -30,19 +30,7 @@ fn retire<T>(s: &mut Slot<T>) -> bool {
     s.generation < GEN_LIMIT
 }
 
-/// `i` si `i < len`, y si no `0`, calculado sin ramas (como
-/// `array_index_nospec` de Linux). Mitigación parcial de Spectre v1: aunque
-/// la CPU prediga mal el control de rango que sigue, el índice que usa
-/// especulativamente ya está dentro de la tabla. Vale para `i` y `len`
-/// menores que 2^63 (un slot es de 32 bits). No es una barrera: el
-/// compilador podría, en teoría, volver a poner una rama; la barrera de
-/// verdad (`lfence`) está en la entrada de las syscalls.
-fn index_nospec(i: usize, len: usize) -> usize {
-    // Bit alto en 0 sii i < len (con i, len < 2^63): entonces la máscara es
-    // todo unos; si no, todo ceros.
-    let mask = (!(i | len.wrapping_sub(1).wrapping_sub(i)) as isize >> (usize::BITS - 1)) as usize;
-    i & mask
-}
+use crate::nospec::index as index_nospec;
 
 /// Tabla de capacidades.
 pub struct CSpace<T> {

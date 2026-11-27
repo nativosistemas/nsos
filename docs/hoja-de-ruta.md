@@ -34,8 +34,8 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **Spectre**: barreras en el resto de los índices que vienen de una
-   cell (la entrada de syscalls y el CSpace ya las tienen); después KPTI.
+1. **KPTI** (con PCID): sacar el kernel del espacio de direcciones de las
+   cells mientras corren en anillo 3 (punto 1 de `amenazas.md`).
 2. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
    layout del almacén, enlace) y `caos` con semilla al azar en la CI.
 3. Después: handoff, SMP, KPTI, IOMMU y Raspberry Pi 4 y 5 (ver

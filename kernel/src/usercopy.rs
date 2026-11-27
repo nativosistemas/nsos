@@ -5,6 +5,11 @@
 //! escribir) en todos los niveles, y se copia a través del HHDM. Así una
 //! cell no puede hacer que el kernel lea o escriba memoria del kernel, ni
 //! provocar un fallo de página dentro del kernel.
+//!
+//! Spectre v1: primero se comprueban los permisos de todas las páginas y
+//! después de una barrera de especulación se copia, así una predicción
+//! equivocada de un control no copia (ni siquiera de forma especulativa)
+//! una página que no es de la cell.
 
 use crate::arch::paging::{flags, PAGE_SIZE};
 use crate::cell::Cell;
@@ -52,6 +57,7 @@ fn for_each_page(
 pub fn copy_from_user(cell: &Cell, addr: u64, out: &mut [u8]) -> Result<(), Error> {
     // Validar todo antes de copiar nada.
     for_each_page(cell, addr, out.len(), false, |_, _, _| {})?;
+    crate::arch::cpu::speculation_barrier();
     for_each_page(cell, addr, out.len(), false, |k, off, n| {
         // SAFETY: `k` es la dirección HHDM de una página de usuario presente;
         // `out[off..off+n]` está en rango.
@@ -62,6 +68,7 @@ pub fn copy_from_user(cell: &Cell, addr: u64, out: &mut [u8]) -> Result<(), Erro
 /// Copia `data` hacia la cell.
 pub fn copy_to_user(cell: &Cell, addr: u64, data: &[u8]) -> Result<(), Error> {
     for_each_page(cell, addr, data.len(), true, |_, _, _| {})?;
+    crate::arch::cpu::speculation_barrier();
     for_each_page(cell, addr, data.len(), true, |k, off, n| {
         // SAFETY: página de usuario presente y escribible, vía HHDM.
         unsafe { core::ptr::copy_nonoverlapping(data[off..].as_ptr(), k as *mut u8, n) };

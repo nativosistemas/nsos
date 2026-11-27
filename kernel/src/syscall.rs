@@ -192,6 +192,8 @@ fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64, q: u64) -> SysResu
     if n > SPAWN_MAX_CAPS {
         return Err(Error::InvalidArgs);
     }
+    // Spectre v1: acotado sin ramas, así ni especulando se corta `raw` de más.
+    let n = nsos_kcore::nospec::bound(n, SPAWN_MAX_CAPS);
     let mut raw = [0u8; 4 * SPAWN_MAX_CAPS];
     copy_from_user(cell, uptr, &mut raw[..4 * n])?;
     let hs: alloc::vec::Vec<CapHandle> = raw[..4 * n]
@@ -397,6 +399,8 @@ fn ioport(cell: &Cell, h: CapHandle, off: u64, width: u64, value: Option<u64>) -
     if !matches!(width, 1 | 2 | 4) || off.checked_add(width).is_none_or(|e| e > len) {
         return Err(Error::InvalidArgs);
     }
+    // Spectre v1: ningún acceso, ni especulativo, a un puerto fuera del rango.
+    crate::arch::cpu::speculation_barrier();
     port_access(base, len, off, width, value)
 }
 
@@ -640,6 +644,8 @@ fn wait(cell: &Cell, uptr: u64, n: u64, timeout: u64) -> SysResult<u64> {
     if n == 0 || n > WAIT_MAX {
         return Err(Error::InvalidArgs);
     }
+    // Spectre v1: acotado sin ramas, así ni especulando se corta `raw` de más.
+    let n = nsos_kcore::nospec::bound(n, WAIT_MAX);
     let mut raw = [0u8; WaitItem::SIZE * WAIT_MAX];
     let raw = &mut raw[..WaitItem::SIZE * n];
     copy_from_user(cell, uptr, raw)?;
