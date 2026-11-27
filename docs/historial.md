@@ -433,3 +433,17 @@ CPU creando hijas que giran, y ninguna tenía garantías.
   lo que sobra en round-robin.
 * Prueba en QEMU: `puntual` con 40 unidades corre 626 milésimas del tiempo
   con 6 `acaparadora` girando; sin reservas, 134.
+
+## Consola sin esperar al UART (hecho)
+
+`debug_log` escribía hasta 1024 bytes esperando al UART con las
+interrupciones apagadas: unos 89 ms en hardware real a 115200 baudios.
+
+* `debug_log` y los mensajes del kernel se copian enteros a un búfer de
+  64 KiB (`kcore::ring`, Kani `push_all_any` y `pop_into_any`), y un hilo del
+  kernel (`consola`) los escribe en el UART de a 16 bytes. Si el búfer se
+  llena, la cell espera dormida. Antes de apagar QEMU y en un pánico, el
+  búfer se vacía entero.
+* Prueba en QEMU: `parlanchina` escribe líneas de 1024 bytes y ktest
+  comprueba que durante `debug_log` no sale ningún byte por el UART (con la
+  escritura directa de antes, 1038).

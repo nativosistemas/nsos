@@ -732,6 +732,20 @@ pub fn run_cells() -> bool {
             .count()
             == 6,
     );
+    // `debug_log` solo copia al búfer de la consola: durante la syscall no
+    // sale ningún byte por el UART (antes salía la línea entera, con las
+    // interrupciones apagadas). El tiempo se publica como dato.
+    let log_max_us = crate::syscall::DEBUG_LOG_MAX_NS.load(Ordering::Relaxed) / 1000;
+    let log_uart = crate::syscall::DEBUG_LOG_UART_MAX.load(Ordering::Relaxed);
+    kprintln!("bench: debug_log_max_us = {}", log_max_us);
+    kprintln!(
+        "ktest: debug_log escribió hasta {} bytes en el UART",
+        log_uart
+    );
+    check(
+        "parlanchina: debug_log no espera al UART",
+        status("parlanchina") == Some(Exited(0)) && log_uart == 0,
+    );
     check(
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),

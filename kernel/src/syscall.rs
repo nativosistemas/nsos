@@ -113,9 +113,32 @@ fn debug_log(cell: &Cell, ptr: u64, len: u64) -> SysResult<u64> {
     let mut buf = vec![0u8; len];
     copy_from_user(cell, ptr, &mut buf)?;
     let text = core::str::from_utf8(&buf).map_err(|_| Error::InvalidArgs)?;
-    crate::kprint!("[{}] {}", cell.name, text);
-    Ok(0)
+    // Solo se copia al búfer de la consola (lo escribe en el UART el hilo
+    // `consola`): esta syscall ya no espera al UART con las interrupciones
+    // apagadas. Si el búfer está lleno, la cell espera dormida.
+    use core::sync::atomic::Ordering::Relaxed;
+    loop {
+        let (t0, b0) = (crate::arch::time::now_ns(), crate::console::uart_bytes());
+        let parts: [&[u8]; 4] = [b"[", cell.name.as_bytes(), b"] ", text.as_bytes()];
+        if crate::console::log_or_wait(&parts) {
+            let dt = crate::arch::time::now_ns().saturating_sub(t0);
+            DEBUG_LOG_MAX_NS.fetch_max(dt, Relaxed);
+            DEBUG_LOG_UART_MAX.fetch_max(crate::console::uart_bytes() - b0, Relaxed);
+            return Ok(0);
+        }
+        sleep(cell)?;
+    }
 }
+
+/// Lo más que tardó en guardar una línea `debug_log` (sin contar esperas
+/// por lugar). Es tiempo de reloj: en QEMU incluye pausas del host, así que
+/// ktest lo publica como dato (`bench: debug_log_max_us`) pero no lo exige.
+pub static DEBUG_LOG_MAX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Lo más que salió por el UART durante una llamada a `debug_log`. Con el
+/// búfer, 0: la syscall nunca espera al UART (ktest lo exige).
+pub static DEBUG_LOG_UART_MAX: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 fn channel_create(cell: &Cell, out: u64, contract: u64) -> SysResult<u64> {
     // `channel_contract` lo devuelve como resultado de syscall, que es

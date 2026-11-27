@@ -159,6 +159,8 @@ pub enum QemuExit {
 /// Termina QEMU por semihosting (`SYS_EXIT`) si se arrancó con la bandera
 /// `semihosting`; si no, detiene la CPU.
 pub fn qemu_exit(code: QemuExit) -> ! {
+    // Lo que quedó en el búfer de la consola sale antes de apagar.
+    crate::console::flush();
     if SEMIHOSTING.load(Ordering::Relaxed) {
         // Si el kernel termina antes de mapear el UART (por ejemplo, un
         // device tree inválido), el texto guardado sale por semihosting.
