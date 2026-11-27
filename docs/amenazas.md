@@ -64,13 +64,14 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    mitad alta entera lo hace fallar), y cada entrada desde anillo 3 llega
    con la raíz de usuario de la cell (si el stub de salida no la carga,
    falla). Cuesta: sin PCID, cada cambio de tablas vacía la TLB (el IPC de
-   ida y vuelta pasa de unos 40 a unos 75 µs en QEMU). Con la bandera de
-   arranque `pcid` y una CPU que lo tenga, cada cell recibe dos
+   ida y vuelta pasa de unos 40 a unos 75 µs en QEMU sin KVM). Con una CPU
+   que tenga PCID (salvo con la bandera `nopcid`), cada cell recibe dos
    identificadores de TLB (`kcore::asid`, Kani `switch_is_safe`: si no se
    vacía, la TLB solo tiene traducciones de esa raíz y vigentes) y entrar o
-   salir del kernel no vacía nada. Está apagado por defecto: QEMU sin KVM
-   no emula PCID, así que ese camino todavía no corrió (`make smoke` pasa la
-   bandera y el kernel dice si lo usó). En ARM64 no hay KPTI:
+   salir del kernel no vacía nada. QEMU sin KVM no emula PCID: lo prueba el
+   job `kvm` de la CI, que corre `make smoke` con KVM y exige que el kernel
+   lo use (en su primera corrida, 5 246 257 entradas desde anillo 3, todas
+   con la raíz de usuario). En ARM64 no hay KPTI:
    el kernel está en `TTBR1_EL1`, siempre activo, y los núcleos que usamos
    (Cortex-A76 en QEMU, A72 en la Raspberry Pi 4) no son vulnerables a
    Meltdown. Contra Spectre v1, cada valor que viene de una cell y se
@@ -84,9 +85,8 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    que queda: no hay retpolines ni IBRS (Spectre v2), y el compilador
    podría, en teoría, volver a poner una rama en un índice enmascarado.
    `clock_monotonic` da resolución de nanosegundos, útil para medir
-   tiempos. *Mitigación futura*: probar PCID con KVM o en hardware y
-   prenderlo por defecto, reducir la resolución del reloj para cells sin un
-   derecho específico.
+   tiempos. *Mitigación futura*: reducir la resolución del reloj para cells
+   sin un derecho específico.
 2. **DMA sin IOMMU.** Un driver con capacidades `Memory` con `CONTROL`
    conoce direcciones físicas y el dispositivo puede escribir en cualquier
    lugar de la RAM. Un driver es, por lo tanto, de confianza respecto a la

@@ -52,9 +52,9 @@ const ROOT_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 /// ¿Hay PCID (CR4.PCIDE)?
 static PCID: AtomicBool = AtomicBool::new(false);
 
-/// ¿Se pidió PCID (bandera `pcid`)? Apagado por defecto: QEMU sin KVM no
-/// emula PCID, así que este camino solo se prueba con KVM o en hardware.
-static WANT_PCID: AtomicBool = AtomicBool::new(false);
+/// ¿Usar PCID si la CPU lo tiene? Sí, salvo con la bandera `nopcid`. QEMU
+/// sin KVM no emula PCID: este camino lo prueba el job `kvm` de la CI.
+static WANT_PCID: AtomicBool = AtomicBool::new(true);
 
 /// Pide (o no) usar PCID si la CPU lo tiene.
 pub fn want_pcid(on: bool) {
