@@ -24,6 +24,7 @@ conecta con el modelo mediante **tests derivados del modelo** (ver abajo).
 | `Nsos/StoreContract.lean` | El almacén de `Store.lean` sigue los contratos `store_root` y `store_obj`. |
 | `Nsos/MigrationContract.lean` | La migración de `Migration.lean` sigue los contratos `handover` y `restore`. |
 | `Nsos/ContractId.lean` | El contrato de cada canal (`Sys.contract`) no cambia. |
+| `Nsos/Quota.lean` | Cuotas de memoria por supervisor: cada cell gasta solo su cuota, `cell_spawn` le pasa parte de la suya a la hija y al morir vuelve al supervisor (modelo antes del código). |
 | `Nsos/Examples.lean` | Escenarios evaluados al compilar (ciclos de canales, dos cells esperando, handles viejos). |
 | `TraceGen.lean` | Genera `crates/kcore/tests/data/cspace_model.trace` y `crates/contract/tests/data/contract_model.trace`. |
 
@@ -268,6 +269,22 @@ Cells selladas (cada mapeo dice además si es ejecutable):
 Mutaciones que rompen `step_sealed`: que `mem_map` acepte `EXEC` aunque
 nunca junto con `WRITE` (W^X solo por mapeo); que el cargador mapee dos veces
 un mismo marco propio; que el cargador acepte segmentos W+X.
+
+Cuotas de memoria (`Nsos/Quota.lean`, antes del código del kernel):
+
+* `QuotaModel.step_inv`: en todo paso, los marcos libres son la suma de las
+  cuotas disponibles de las cells vivas, y libres más usados es el total.
+* `QuotaModel.avail_le_free` y `QuotaModel.alloc_ok`: la cuota disponible
+  siempre está respaldada por marcos libres, y pedir hasta ella funciona.
+* `QuotaModel.step_others`: un paso que no hace `x` ni mata a `x` no le baja
+  la cuota disponible ni la saca de las vivas.
+* `QuotaModel.no_starvation`: con cualquier secuencia de pasos ajenos, `x`
+  sigue viva, con al menos la cuota que tenía, y la puede pedir entera.
+* `QuotaModel.run_conserves`: desde el arranque, ningún marco se pierde.
+
+Mutaciones que rompen `step_inv`: aceptar un pedido que se pasa por un
+marco de la cuota, crear una hija con una cuota que se pasa por un marco de
+la del supervisor, y no devolver los marcos usados de la hija al morir.
 
 ## Tests derivados del modelo
 

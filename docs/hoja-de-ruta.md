@@ -34,8 +34,11 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **Cuotas de memoria** por supervisor (punto 4 de `amenazas.md`):
-   primero el modelo de contabilidad en Lean.
+1. **Cuotas de memoria** por supervisor (punto 4 de `amenazas.md`). El
+   modelo en Lean está hecho (`Nsos/Quota.lean`). Falta el código: la
+   contabilidad en `kcore` con Kani contra el modelo, `cell_spawn` con un
+   argumento de cuota y una prueba negativa en QEMU (una cell que intenta
+   agotar la memoria y otra que igual consigue la suya).
 2. **Latencia en el peor caso** (punto 16): consola con búfer vaciado por
    interrupción del UART y latencia máxima de syscall en `bench` con
    `caos` corriendo.
