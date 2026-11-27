@@ -8,8 +8,9 @@ Se escribe **antes** que el código del kernel.
 Cada cell viva tiene una **cuota disponible** (`avail`: marcos que todavía
 puede usar) y marcos **usados** (`used`: sus objetos `Memory`, tablas de
 páginas, imagen). Una cell nueva la crea su supervisor con `cell_spawn`, que
-le pasa parte de *su propia* cuota disponible. Al morir, la cuota de la cell
-(lo que le quedaba y lo que usaba) vuelve a su supervisor.
+le pasa parte de *su propia* cuota disponible. Al morir, lo que le quedaba
+vuelve a la cuota disponible del supervisor, y lo que usaba pasa a contarse
+como usado del supervisor hasta que se libere.
 
 El kernel mantiene un único número global: los marcos físicos libres
 (`free`). El invariante es que esos marcos son exactamente la suma de las
@@ -22,7 +23,7 @@ cuotas disponibles de las cells vivas, y que ningún marco se pierde.
 | `alloc c n` | `mem_create` (y las tablas de páginas de `mem_map`): cobra `n` marcos a `c` |
 | `release c n` | soltar la última capacidad de un objeto `Memory` de `c` |
 | `spawn p d q` | `cell_spawn` de `p` con cuota `q` para la hija `d` |
-| `kill p d` | la hija `d` de `p` termina (sus marcos vuelven al sistema y su cuota a `p`) |
+| `kill p d` | la hija `d` de `p` termina: su cuota disponible vuelve a `p`, y sus marcos usados pasan a ser de `p` (un objeto `Memory` que la hija mandó a otra cell puede sobrevivirla; se devuelve con `release p n` cuando se libera) |
 
 ## Qué se demuestra
 
@@ -55,8 +56,8 @@ cuotas disponibles de las cells vivas, y que ningún marco se pierde.
 
 Cada una hace fallar `step_inv`: aceptar un pedido que se pasa por un
 marco de la cuota disponible, crear una hija con una cuota que se pasa por
-un marco de la del supervisor, y no devolverle al supervisor los marcos
-usados de la hija cuando muere.
+un marco de la del supervisor, y no pasarle al supervisor los marcos usados
+de la hija cuando muere.
 -/
 
 namespace Nsos.QuotaModel
@@ -201,8 +202,8 @@ def St.step (s : St) : Ev → Option St
     if p ∈ s.cells ∧ d ∈ s.cells ∧ p ≠ d ∧ s.parent d = some p ∧
         (∀ c ∈ s.cells, s.parent c ≠ some d) then
       some { s with cells := s.cells.erase d,
-                    avail := upd s.avail p (s.avail p + s.avail d + s.used d),
-                    free := s.free + s.used d }
+                    avail := upd s.avail p (s.avail p + s.avail d),
+                    used := upd s.used p (s.used p + s.used d) }
     else none
 
 /-- El invariante: cells sin repetidos, los marcos libres son la suma de las
@@ -265,7 +266,8 @@ theorem step_inv {s s' : St} {e : Ev} (h : s.Inv) (hs : s.step e = some s') : s'
       have hp' := mem_erase_of_ne' hpd hp
       have e1 := sumOn_erase (f := s.avail) hnd hd
       have e2 := sumOn_erase (f := s.used) hnd hd
-      have h2 := sumOn_upd (f := s.avail) (v := s.avail p + s.avail d + s.used d) hnd' hp'
+      have h2 := sumOn_upd (f := s.avail) (v := s.avail p + s.avail d) hnd' hp'
+      have h3 := sumOn_upd (f := s.used) (v := s.used p + s.used d) hnd' hp'
       refine ⟨hnd', ?_, ?_⟩ <;> simp only <;> omega
     · cases hs
 

@@ -264,7 +264,7 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
 
 ## 7. Cells
 
-* `cell_spawn(image, caps, n)` exige `EXEC` sobre la imagen y `GRANT` sobre
+* `cell_spawn(image, caps, n, quota)` exige `EXEC` sobre la imagen y `GRANT` sobre
   cada capacidad (hasta 16). Valida el ELF *antes* de quitarle nada a quien
   llama, crea un espacio de direcciones nuevo, carga la imagen y **mueve**
   las `n` capacidades al CSpace de la hija (slots 1..n en ese orden: es su
@@ -273,6 +273,13 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
   en el CSpace de quien llama *antes* de crear la hija (`CSpace::reserve`):
   si no hay lugar, falla con `NoMemory` sin crear nada, y nunca queda una
   hija corriendo sin una capacidad que la controle.
+* La hija recibe `quota` marcos de cuota de memoria, que salen de la cuota
+  disponible de quien llama (sin tantos, `NoMemory`). Con ella paga todo lo
+  suyo: tablas de páginas, imagen, pila y los objetos de `mem_create` (que
+  se le cobran aunque viajen a otra cell). Al terminar, lo que le queda
+  disponible vuelve a quien la creó, y lo que sigue en uso pasa a contarse
+  como suyo hasta que se libere. `nsos_rt::cell_spawn` da 512 marcos
+  (2 MiB); `cell_spawn_with_quota` elige la cuota.
 * Una cell no hereda nada que no se le pase explícitamente.
 * Si la cell falla (excepción de CPU, `panic`, violación de ABI), el kernel la
   termina y libera sus capacidades (los peers ven `PEER_CLOSED`). El kernel

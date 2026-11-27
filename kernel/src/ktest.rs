@@ -435,7 +435,7 @@ pub fn run_migration(origin: bool) -> bool {
             rights: cell::PORT_RIGHTS,
         };
         let dma = |pages| {
-            cell::MemObj::new(pages)
+            cell::MemObj::new(pages, crate::quota::root())
                 .map(|m| Cap {
                     object: KObject::Memory(m),
                     rights: cell::DMA_RIGHTS,
@@ -559,8 +559,10 @@ pub fn run_store(mode: &str) -> bool {
             object: KObject::IoPorts(Arc::new(cell::PortRange { base, len })),
             rights: cell::PORT_RIGHTS,
         };
-        let ring = cell::MemObj::new(5).ok_or("sin memoria contigua para DMA")?;
-        let buf = cell::MemObj::new(1).ok_or("sin memoria contigua para DMA")?;
+        let ring =
+            cell::MemObj::new(5, crate::quota::root()).ok_or("sin memoria contigua para DMA")?;
+        let buf =
+            cell::MemObj::new(1, crate::quota::root()).ok_or("sin memoria contigua para DMA")?;
         let mem = |m: &Arc<cell::MemObj>, rights| Cap {
             object: KObject::Memory(m.clone()),
             rights,
@@ -632,6 +634,7 @@ pub fn run_store(mode: &str) -> bool {
 pub fn run_cells() -> bool {
     kprintln!("ktest: cells en anillo 3");
     let free_before = pmm::stats().free_frames;
+    let quota_before = crate::quota::root().avail();
     if let Err(e) = crate::boot_demo_cells() {
         kprintln!("  FALLO: {}", e);
         return false;
@@ -688,6 +691,15 @@ pub fn run_cells() -> bool {
             })
         ),
     );
+    // Con 1 MiB por objeto, la cuota de `glotona` alcanza para unos pocos;
+    // sin cuotas se llevaría toda la memoria del sistema (cientos).
+    check(
+        "glotona: la cuota de memoria la frena (NoMemory sin pasarse)",
+        matches!(
+            status("glotona"),
+            Some(Exited(n)) if n >= 1 && (n as u64) * 256 <= crate::GLOTONA_QUOTA
+        ),
+    );
     check(
         "init (supervisor) terminó con 0",
         status("init") == Some(Exited(0)),
@@ -742,6 +754,10 @@ pub fn run_cells() -> bool {
     check(
         "la memoria de las cells se liberó",
         pmm::stats().free_frames == free_before,
+    );
+    check(
+        "las cuotas volvieron enteras a la cuenta del kernel",
+        crate::quota::root().avail() == quota_before,
     );
     check(
         "el kernel sigue: el heap responde",

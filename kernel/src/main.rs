@@ -19,6 +19,7 @@ mod irq;
 mod ktest;
 mod mm;
 mod pci;
+mod quota;
 mod sched;
 mod sync;
 mod syscall;
@@ -92,6 +93,8 @@ extern "C" fn kmain() -> ! {
     arch::init_devices();
     pci::init();
     let st = mm::pmm::stats();
+    // De acá salen las cuotas de memoria de todas las cells.
+    quota::init(st.free_frames as u64);
     let reclaimable: u64 = memmap
         .entries()
         .filter(|e| e.kind() == MemKind::BootloaderReclaimable)
@@ -243,6 +246,8 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("desmapeo", desmapeo, alloc::vec![]).map_err(report)?;
     let sellada = module("sellada").ok_or("falta el módulo sellada")?;
     cell::spawn("sellada", sellada, alloc::vec![]).map_err(report)?;
+    let glotona = module("glotona").ok_or("falta el módulo glotona")?;
+    cell::spawn_with_quota("glotona", glotona, alloc::vec![], GLOTONA_QUOTA).map_err(report)?;
     boot_supervisor(report)?;
     boot_virtio_console(report)
 }
@@ -259,6 +264,12 @@ pub fn image(name: &str) -> Result<cell::KCap, &'static str> {
     })
 }
 
+/// Cuota de `glotona` (4 MiB): la prueba negativa de las cuotas.
+pub const GLOTONA_QUOTA: u64 = 1024;
+
+/// Cuota de `init` (16 MiB): de ella salen las de las cells que crea.
+const INIT_QUOTA: u64 = 4096;
+
 /// Arranca `init`, el supervisor, con las imágenes de las cells que vigila.
 fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<(), &'static str> {
     let init = module("init").ok_or("falta el módulo init")?;
@@ -270,7 +281,7 @@ fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<
         image("cliente")?,
         image("contador-roto")?,
     ];
-    cell::spawn("init", init, caps).map_err(report)?;
+    cell::spawn_with_quota("init", init, caps, INIT_QUOTA).map_err(report)?;
     Ok(())
 }
 
@@ -308,7 +319,7 @@ fn boot_virtio_console(
         rights: cell::PORT_RIGHTS,
     };
     let dma = |pages| {
-        cell::MemObj::new(pages)
+        cell::MemObj::new(pages, quota::root())
             .map(|m| Cap {
                 object: cell::KObject::Memory(m),
                 rights: cell::DMA_RIGHTS,

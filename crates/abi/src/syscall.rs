@@ -70,10 +70,13 @@ pub enum Syscall {
     MemInfo = 43,
 
     // ---- Cells (5x) ----
-    /// `cell_spawn(h_image, caps: *const CapHandle, n) -> h_cell`: crea una
-    /// cell a partir de una imagen (requiere `EXEC`) y le *mueve* las
-    /// capacidades dadas (cada una requiere `GRANT`), que recibe en los
-    /// slots `1..=n`. Devuelve una capacidad a la cell nueva.
+    /// `cell_spawn(h_image, caps: *const CapHandle, n, quota) -> h_cell`:
+    /// crea una cell a partir de una imagen (requiere `EXEC`) y le *mueve*
+    /// las capacidades dadas (cada una requiere `GRANT`), que recibe en los
+    /// slots `1..=n`. La cell nueva recibe `quota` marcos de cuota de
+    /// memoria, que salen de la cuota disponible de quien llama (sin tantos,
+    /// `NoMemory`) y vuelven cuando termina. Devuelve una capacidad a la
+    /// cell nueva.
     CellSpawn = 50,
     /// `cell_kill(h_cell)`: termina la cell (requiere `CONTROL`). No espera:
     /// la terminación se observa con `cell_status`.

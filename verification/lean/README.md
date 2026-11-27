@@ -284,7 +284,8 @@ Cuotas de memoria (`Nsos/Quota.lean`, antes del código del kernel):
 
 Mutaciones que rompen `step_inv`: aceptar un pedido que se pasa por un
 marco de la cuota, crear una hija con una cuota que se pasa por un marco de
-la del supervisor, y no devolver los marcos usados de la hija al morir.
+la del supervisor, y no pasarle al supervisor los marcos usados de la hija
+al morir.
 
 ## Tests derivados del modelo
 
