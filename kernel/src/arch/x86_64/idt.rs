@@ -157,6 +157,9 @@ nsos_trap_save:
     mov rsp, rax
     mov rax, [rip + NSOS_USER_CR3]
     mov cr3, rax
+    // PCID: si se cargó vaciando, la próxima vez no hace falta.
+    mov rbx, [rip + NSOS_NOFLUSH]
+    or [rip + NSOS_USER_CR3], rbx
     pop rbx
     pop rax
 2:

@@ -262,17 +262,16 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
     s.since_ns = now;
     let next = s.find(next_id).expect("hilo listo inexistente");
     next.state = State::Running;
-    let root = match &next.cell {
+    match &next.cell {
         Some(c) => {
             crate::arch::set_kernel_stack(next.kstack_top);
-            crate::arch::set_cell_roots(c.root(), c.user_root());
-            c.root()
+            // SAFETY: raíces de una cell viva (una cell que termina pone las
+            // suyas en 0 antes de liberarlas, y su hilo ya no vuelve).
+            unsafe { crate::arch::enter_cell(c.root(), c.user_root()) };
         }
-        None => crate::mm::kernel_root(),
-    };
-    // SAFETY: `root` es el espacio del kernel o el de una cell viva (una
-    // cell que termina pone su raíz en 0 antes de liberarla).
-    unsafe { crate::arch::paging::switch_to(root) };
+        // SAFETY: el espacio del kernel mapea todo lo que el kernel usa.
+        None => unsafe { crate::arch::paging::switch_to(crate::mm::kernel_root()) },
+    }
     next.frame
 }
 

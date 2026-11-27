@@ -71,7 +71,9 @@ if [[ "$ARCH" == "aarch64" ]]; then
     SMAP=pan-fault
 fi
 
-VIRTCON_PATTERN="hola desde una cell" run_case boot "test-exit" 33 "ktest: .* 0 fallos" "$@"
+# `pcid`: usar PCID con KPTI si la CPU lo tiene (con KVM; QEMU sin KVM no
+# lo emula y el kernel dice "PCID no").
+VIRTCON_PATTERN="hola desde una cell" run_case boot "test-exit pcid" 33 "ktest: .* 0 fallos" "$@"
 run_case wx-fault "test-wx-fault" 35 "escritura sin permiso" "$@"
 run_case "$SMAP" "test-smap-fault" 35 "lectura sin permiso" "$@"
 for variant in "" --clave-distinta; do

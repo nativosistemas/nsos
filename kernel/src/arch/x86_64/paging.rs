@@ -133,6 +133,10 @@ impl AddressSpace {
     pub fn unmap(&mut self, virt: VirtAddr) -> Option<PhysAddr> {
         let phys = pt::unmap(&mut Hhdm, self.pml4, virt)?;
         super::cpu::invlpg(virt);
+        if self.user_pml4 != 0 {
+            // PCID: `invlpg` solo limpió el identificador cargado.
+            super::kpti::invalidate(self.pml4);
+        }
         Some(phys)
     }
 
@@ -202,6 +206,8 @@ impl AddressSpace {
                 walk(e & ADDR_MASK, 3, free);
             }
         }
+        // PCID: que ninguna raíz nueva con esta dirección herede su TLB.
+        super::kpti::forget(self.pml4);
         free(self.pml4);
         if self.user_pml4 != 0 {
             free(self.user_pml4);
@@ -227,6 +233,7 @@ pub unsafe fn switch_to(root: PhysAddr) {
     if root != 0 && super::cpu::read_cr3() & !0xFFF != root {
         // SAFETY: delegada al llamador.
         unsafe { super::cpu::write_cr3(root) };
+        super::kpti::loaded_plain(root);
     }
 }
 
@@ -274,6 +281,8 @@ pub fn harden() {
     unsafe { cpu::write_cr4(cr4) };
     SMEP.store(smep, Ordering::Relaxed);
     SMAP.store(smap, Ordering::Relaxed);
+    // PCID para KPTI (con la raíz del kernel cargada sin identificador).
+    super::kpti::enable_pcid();
 }
 
 /// Protecciones de la CPU contra el kernel tocando páginas de cells:
