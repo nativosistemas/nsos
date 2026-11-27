@@ -56,6 +56,9 @@ struct Thread {
     cell: Option<Arc<Cell>>,
     /// Tope de la pila de kernel (para entradas desde anillo 3).
     kstack_top: u64,
+    /// Hilo de servicio del kernel (la consola): no termina nunca y no
+    /// cuenta en [`live_threads`].
+    daemon: bool,
 }
 
 // SAFETY: `frame` apunta dentro de la pila propia del hilo; solo el scheduler
@@ -97,6 +100,7 @@ pub fn init() {
         state: State::Running,
         cell: None,
         kstack_top: 0,
+        daemon: true,
     };
     *SCHED.lock() = Some(Scheduler {
         threads: vec![idle],
@@ -163,6 +167,7 @@ fn add_thread(name: &'static str, mut init: TrapFrame, cell: Option<Arc<Cell>>) 
         state: State::Ready,
         cell,
         kstack_top: top,
+        daemon: false,
     });
     s.ready.push_back(id);
     id
@@ -334,10 +339,23 @@ pub fn exit_from_trap(frame: *mut TrapFrame) -> *mut TrapFrame {
     schedule(frame)
 }
 
-/// Hilos vivos sin contar el idle.
+/// Hilos vivos sin contar el idle ni los de servicio.
 pub fn live_threads() -> usize {
     let g = SCHED.lock();
-    g.as_ref().map(|s| s.threads.len() - 1).unwrap_or(0)
+    g.as_ref()
+        .map(|s| s.threads.iter().filter(|t| !t.daemon).count())
+        .unwrap_or(0)
+}
+
+/// Crea un hilo de servicio del kernel: como [`spawn`], pero no termina y
+/// no cuenta en [`live_threads`] (así `wait_all` no lo espera).
+pub fn spawn_daemon(name: &'static str, f: impl FnOnce() + Send + 'static) -> ThreadId {
+    let id = spawn(name, f);
+    let mut g = SCHED.lock();
+    if let Some(t) = g.as_mut().and_then(|s| s.find(id)) {
+        t.daemon = true;
+    }
+    id
 }
 
 /// Cambios de contexto realizados.

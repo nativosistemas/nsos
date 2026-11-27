@@ -125,6 +125,8 @@ pub enum QemuExit {
 /// Termina QEMU si se lanzó con `-device isa-debug-exit,iobase=0xf4`.
 /// En hardware real (o sin el dispositivo) no hace nada y se detiene.
 pub fn qemu_exit(code: QemuExit) -> ! {
+    // Lo que quedó en el búfer de la consola sale antes de apagar.
+    crate::console::flush();
     // SAFETY: 0xF4 es el puerto que configuramos para isa-debug-exit en los
     // scripts de QEMU; en un PC sin ese dispositivo el puerto no está mapeado
     // y la escritura se ignora.

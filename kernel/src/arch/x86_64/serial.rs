@@ -62,14 +62,21 @@ impl Serial {
     }
 }
 
-impl fmt::Write for Serial {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for b in s.bytes() {
+impl Serial {
+    /// Escribe bytes tal cual (con `\r` antes de cada `\n`).
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
             if b == b'\n' {
                 self.write_byte(b'\r');
             }
             self.write_byte(b);
         }
+    }
+}
+
+impl fmt::Write for Serial {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_bytes(s.as_bytes());
         Ok(())
     }
 }

@@ -34,14 +34,11 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **Latencia en el peor caso** (punto 16): consola con búfer vaciado por
-   interrupción del UART y latencia máxima de syscall en `bench` con
-   `caos` corriendo.
-2. **Spectre**: barreras en el resto de los índices que vienen de una
+1. **Spectre**: barreras en el resto de los índices que vienen de una
    cell (la entrada de syscalls y el CSpace ya las tienen); después KPTI.
-3. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
+2. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
    layout del almacén, enlace) y `caos` con semilla al azar en la CI.
-4. Después: handoff, SMP, KPTI, IOMMU y Raspberry Pi 4 y 5 (ver
+3. Después: handoff, SMP, KPTI, IOMMU y Raspberry Pi 4 y 5 (ver
    [`arm64.md`](arm64.md)).
 
 ## Riesgos

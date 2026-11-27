@@ -123,6 +123,8 @@ extern "C" fn kmain() -> ! {
     // Interrupciones y scheduler.
     arch::time::init(TIMER_HZ);
     sched::init();
+    // Desde acá la consola escribe por el búfer y su hilo (`console`).
+    console::start();
     cpu::enable_interrupts();
 
     let boot_us = arch::time::counter_ns(arch::time::counter() - t_start) / 1000;
@@ -265,6 +267,8 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     let puntual = module("puntual").ok_or("falta el módulo puntual")?;
     cell::spawn_with_reserve("puntual", puntual, alloc::vec![], 512, PUNTUAL_CPU)
         .map_err(report)?;
+    let parlanchina = module("parlanchina").ok_or("falta el módulo parlanchina")?;
+    cell::spawn("parlanchina", parlanchina, alloc::vec![]).map_err(report)?;
     let charlatana = module("charlatana").ok_or("falta el módulo charlatana")?;
     cell::spawn_with_quota("charlatana", charlatana, alloc::vec![], CHARLATANA_QUOTA)
         .map_err(report)?;
