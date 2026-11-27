@@ -447,3 +447,13 @@ interrupciones apagadas: unos 89 ms en hardware real a 115200 baudios.
 * Prueba en QEMU: `parlanchina` escribe líneas de 1024 bytes y ktest
   comprueba que durante `debug_log` no sale ningún byte por el UART (con la
   escritura directa de antes, 1038).
+
+## Spectre v1: barreras en los valores de las cells (hecho)
+
+* `kcore::nospec` (Kani `index_any` y `bound_any`): índices y tamaños
+  acotados sin ramas. Lo usan el CSpace y los tamaños de `cell_spawn` y
+  `wait`.
+* Barrera de especulación después de validar las páginas de `usercopy`
+  (una por copia, entre la validación y la copia), el rango de `mem_map` y
+  el acceso de `ioport`. Con la barrera por página, el IPC en ARM64 pasaba
+  de unos 54 a 96 µs; con una por copia, queda igual.

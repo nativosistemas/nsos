@@ -946,6 +946,9 @@ impl Cell {
         if !nsos_kcore::paging::user_range_ok(vaddr, obj.size(), elf::USER_MIN, elf::USER_MAX) {
             return Err(Error::InvalidArgs);
         }
+        // Spectre v1: no recorrer las tablas, ni especulando, con una
+        // dirección de la mitad del kernel.
+        crate::arch::cpu::speculation_barrier();
         // La entrada de la lista de mapeos la paga la cell; si no se mapea,
         // se le devuelve (el `Drop` de `Mapping` la devuelve al quitarlo).
         self.account.charge_kmem(MAPPING_KMEM)?;

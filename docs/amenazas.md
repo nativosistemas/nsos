@@ -56,16 +56,19 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    bit USER) en el espacio de cada cell (en ARM64, en `TTBR1_EL1`, siempre
    activo) y no hay KPTI: en una CPU vulnerable
    a Meltdown, una cell podría leer memoria del kernel por ejecución
-   especulativa. Contra Spectre v1 hay una mitigación parcial: una barrera
-   de especulación después de decodificar el número de syscall (`lfence`;
-   en ARM64, `dsb nsh; isb`) y el índice del CSpace enmascarado sin ramas
-   (`index_nospec`, Kani: `index_nospec_any`), así que una predicción
-   equivocada no lee un slot fuera de la tabla. No hay retpolines, IBRS ni
-   barreras en el resto de los controles de rango (colas, tablas de
-   páginas, el almacén). `clock_monotonic` da resolución de nanosegundos,
-   útil para medir tiempos. *Mitigación futura*: KPTI con PCID, barreras
-   en el resto de los índices que vienen de una cell, reducir la
-   resolución del reloj para cells sin un derecho específico.
+   especulativa. Contra Spectre v1, cada valor que viene de una cell y se
+   usa después de un control está cubierto: barrera de especulación
+   (`lfence`; en ARM64, `dsb nsh; isb`) después de decodificar el número de
+   syscall, después de validar las páginas de `usercopy` (antes de copiar
+   por el HHDM), después de validar el rango de `mem_map` y el acceso de
+   `ioport`; y acotado sin ramas (`kcore::nospec`, Kani: `index_any`,
+   `bound_any`) el índice del CSpace y los tamaños de `cell_spawn` y
+   `wait`. Los mensajes (`payload`, `cap_slice`) se acotan con `min`. Lo
+   que queda: no hay retpolines ni IBRS (Spectre v2), y el compilador
+   podría, en teoría, volver a poner una rama en un índice enmascarado.
+   `clock_monotonic` da resolución de nanosegundos, útil para medir
+   tiempos. *Mitigación futura*: KPTI con PCID, reducir la resolución del
+   reloj para cells sin un derecho específico.
 2. **DMA sin IOMMU.** Un driver con capacidades `Memory` con `CONTROL`
    conoce direcciones físicas y el dispositivo puede escribir en cualquier
    lugar de la RAM. Un driver es, por lo tanto, de confianza respecto a la

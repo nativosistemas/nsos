@@ -18,6 +18,7 @@ casos borde.
 | `from_bytes_any_input` | `crates/abi/src/msg.rs` | Cualquier buffer de 256 bytes: sin panics; si es válido, como mucho `MAX_CAPS` handles no nulos y `to_bytes` lo reproduce. |
 | `insert_any`, `get_with_any`, `remove_any`, `dup_any`, `remove_all_any`, `insert_all_any`, `clear_any` | `crates/kcore/src/cspace.rs` | Desde **cualquier** CSpace que cumpla los invariantes (generaciones arbitrarias, slots retirados, lista libre en cualquier orden, límites arbitrarios), cada operación con argumentos cualesquiera, incluidos handles fabricados: sin panics ni overflows, mantiene los invariantes (`check_invariants`), y cumple su contrato (un handle quitado deja de valer, `dup` no agrega derechos, `remove_all`/`insert_all` son atómicos, etc.). |
 | `reserve_any`, `insert_reserved_any`, `reserved_after_*` | `crates/kcore/src/cspace.rs` | Desde cualquier CSpace, también con reservas pendientes: `reserve` mantiene los invariantes (las vivas más las reservadas no pasan el límite y cada reserva tiene un slot). Desde cualquier CSpace con una reserva pendiente, `insert_reserved` no falla y su handle nombra la capacidad insertada; como toda operación mantiene los invariantes (las pruebas de arriba parten de estados con reservas), por inducción la reserva tiene lugar después de cualquier secuencia. `reserved_after_insert`, `_remove` y `_dup` lo comprueban componiendo la operación. Es lo que usa `cell_spawn` para no dejar una hija sin supervisor. Que `insert` no tenga en cuenta las reservas lo hace fallar. |
+| `index_any`, `bound_any` | `crates/kcore/src/nospec.rs` | Contra Spectre v1: `index` da exactamente el índice dentro del rango y 0 fuera, y `bound` el tamaño si no pasa del tope y 0 si pasa, con cualquier valor menor que 2^63 (sin ramas). |
 | `index_nospec_any` | `crates/kcore/src/cspace.rs` | El índice enmascarado contra Spectre v1 da exactamente el slot pedido dentro de la tabla y el 0 (siempre vacío) fuera, con cualquier slot de 32 bits y cualquier largo. |
 | `cspace_get_any_handle` | `crates/kcore/src/cspace.rs` | `get` con cualquier valor de 32 bits nunca entra en pánico. |
 | `cspace_generation_never_wraps` | `crates/kcore/src/cspace.rs` | Un slot en su última generación se retira; el handle viejo no revive. |
@@ -103,7 +104,8 @@ marcos. El host lo recorre con más marcos en `matches_reference_model`.
 Que `insert` no tenga en cuenta las reservas (el control de antes) hace
 fallar `reserved_after_insert`: la reserva se queda sin lugar en el límite
 y en los slots. Que `index_nospec` no enmascare el índice hace fallar
-`index_nospec_any`.
+`index_nospec_any`; que `nospec::bound` no acote el tamaño hace fallar
+`bound_any`.
 
 ### Mutación de `wait`
 

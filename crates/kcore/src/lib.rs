@@ -17,6 +17,7 @@ pub mod fdt;
 pub mod frame_bitmap;
 pub mod ipc_gc;
 pub mod irq;
+pub mod nospec;
 pub mod paging;
 pub mod paging_arm64;
 pub mod platform;
