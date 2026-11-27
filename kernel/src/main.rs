@@ -125,7 +125,7 @@ extern "C" fn kmain() -> ! {
         if arch::kpti::pcid() {
             "sí"
         } else {
-            "no (sin la bandera `pcid` o la CPU no lo tiene)"
+            "no (la CPU no lo tiene o se arrancó con `nopcid`)"
         }
     );
 

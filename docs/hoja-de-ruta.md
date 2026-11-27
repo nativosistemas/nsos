@@ -34,13 +34,9 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **Probar PCID** con KVM o en hardware (QEMU sin KVM no lo emula) y
-   prenderlo por defecto: hoy KPTI vacía la TLB en cada cambio de tablas y
-   el IPC cuesta casi el doble. El job `kvm` de la CI corre `make smoke` con
-   KVM y falla si hay PCID y el kernel no lo usó.
-2. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
+1. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
    layout del almacén, enlace) y `caos` con semilla al azar en la CI.
-3. Después: handoff, SMP, KPTI, IOMMU y Raspberry Pi 4 y 5 (ver
+2. Después: handoff, SMP, IOMMU y Raspberry Pi 4 y 5 (ver
    [`arm64.md`](arm64.md)).
 
 ## Riesgos

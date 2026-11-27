@@ -54,11 +54,10 @@ pub fn nonce_seed() -> [u8; 16] {
 /// fijas o en PCI.
 pub fn discover(_memmap: &crate::boot::limine::Memmap) {}
 
-/// Ajustes que dependen de la línea de comandos: `pcid` pide usar PCID con
-/// KPTI si la CPU lo tiene (apagado por defecto hasta probarlo en hardware;
-/// ver `kpti`).
+/// Ajustes que dependen de la línea de comandos: `nopcid` apaga PCID (KPTI
+/// vacía entonces la TLB en cada cambio de tablas; ver `kpti`).
 pub fn configure(has_flag: &dyn Fn(&str) -> bool) {
-    kpti::want_pcid(has_flag("pcid"));
+    kpti::want_pcid(!has_flag("nopcid"));
 }
 
 /// Breakpoint de software (`int3`); el kernel lo cuenta y sigue.

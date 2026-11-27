@@ -40,8 +40,8 @@ jobs:
 
   # Lo mismo que `check`, con KVM: los runners tienen /dev/kvm pero sin
   # permiso para el usuario. Con KVM, `run-qemu.sh` usa `-cpu host`, y si la
-  # CPU tiene PCID el arranque principal (bandera `pcid`) lo usa con KPTI:
-  # es el único lugar donde corre ese camino (QEMU sin KVM no emula PCID).
+  # CPU tiene PCID el kernel lo usa con KPTI: es el único lugar donde corre
+  # ese camino (QEMU sin KVM no emula PCID).
   kvm:
     runs-on: ubuntu-latest
     steps:
