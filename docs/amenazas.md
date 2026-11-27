@@ -34,6 +34,7 @@ físico.
 | Una cell solo toca el hardware que se le dio | `IoPorts` con desplazamientos relativos al rango; sin acceso a puertos fuera de él. En ARM64 el kernel asigna él mismo los BAR de E/S, y el acceso pasa por la ventana de E/S mapeada | `intruso`: puertos sin capacidad, con objetos de otro tipo. Kani: `io_ranges_disjoint` (dos rangos asignados nunca se solapan y caben en la ventana) y `pio_access_in_range` (el acceso cae entero en el rango y en la ventana) |
 | Un device tree roto o malicioso no rompe el kernel ni lo hace mapear memoria propia o de una cell como dispositivo (ARM64) | Lector sin índices sin verificar (`kcore::fdt`); toda región de dispositivo (UART, GIC, ECAM, ventana de E/S) se descarta si, redondeada a páginas, toca alguna región no reservada del mapa de memoria (`platform::mmio_allowed`) | Kani: `token_any`, `new_any`, `read_cells_any`, `reg_entry_any`, `translate_any` (sin pánicos, cada token avanza: todo recorrido termina), `mmio_never_touches_ram`, `ecam_addr_in_region`; tests en el host con cada byte de un árbol alterado, cada truncamiento y miles de árboles al azar (el iterador de nodos no entra en Kani) |
 | Un fallo de una cell no afecta al kernel ni a las demás | Excepción en anillo 3 → se termina la cell, se cierran sus capacidades y se libera su memoria | `fragil`, `intruso`; ktest verifica que no se pierden marcos |
+| Una cell no deja sin memoria a otra | Cuota por supervisor (`kernel/src/quota.rs`): cada marco de una cell (imagen, pila, tablas, objetos `Memory`) se cobra a su cuota; `cell_spawn` separa la de la hija de la cuota de quien la crea; al morir, lo disponible vuelve al supervisor y lo que sigue en uso pasa a ser suyo. Los marcos libres alcanzan siempre para todas las cuotas disponibles | Lean: `QuotaModel.step_inv`, `no_starvation`, `run_conserves` (3 mutaciones lo rompen). Kani: `charge_any`, `refund_any`, `split_any`, `absorb_any` (`kcore::quota` hace exactamente los pasos del modelo). QEMU: `glotona` pide objetos de 1 MiB hasta `NoMemory` y se frena en su cuota (sin cuotas se lleva 215 MiB); ktest comprueba que todas las cuotas vuelven enteras a la cuenta del kernel |
 | Una cell colgada se puede terminar, y toda cell creada tiene quien la termine | `cell_kill` con `CONTROL`; la cell muere desde su hilo, nunca a mitad de una syscall. `cell_spawn` reserva el lugar de la capacidad `Cell` antes de crear la hija (`CSpace::reserve`), así que nunca queda una hija sin supervisor | `dormilona` (bloqueada, girando y dormida en `wait`); Kani: `reserve_any`, `insert_reserved_any`, `reserved_after_*` (después de cualquier operación, la reserva sigue teniendo lugar) |
 | `wait` no deja a una cell dormida con un evento que le interesa, y solo observa lo que puede | El hilo se marca bloqueado **antes** de registrarse y mirar cada ítem bajo el lock de su objeto; quien activa una señal despierta a todos los registrados; cada handle necesita `WAIT` y señales que su tipo emita | Lean: `WaitModel.no_lost_wakeup`, `run_no_lost_wakeup` (4 mutaciones la rompen); Kani: `check_item_any`, `channel_signals_any`, `deadline_any`; `espera`, `init` y `contador-v1` en QEMU; `intruso`: 11 abusos de `wait`; `caos` |
 | Un servicio se actualiza sin que el cliente note saltos | Protocolo de supervisor con rollback, escrito con los contratos `handover` y `restore`; la versión nueva solo recibe el estado como `Mem<RO>` (sin `WRITE`, comprobado al recibir) | Lean: `Upgrade.client_sees_consecutive`, `UpgradeContract.upgrade_contract_safe` (el modelo sigue los contratos; 8 mutaciones lo rompen); Kani: `restore_decode_any`; test en QEMU con rechazo, caída y aceptación |
@@ -76,18 +77,21 @@ Ordenado por gravedad para el objetivo del proyecto (aislamiento).
    `Mem.step_iso` y `Mem.send_revokes` (verification/lean). Desde el hito
    13, `mem_unmap` suelta un mapeo sin soltar la capacidad (`Mem.unmap_removes`;
    la cell `desmapeo` comprueba que leer la página desmapeada es un #PF).
-4. **Agotamiento de recursos (DoS).** No hay cuotas: una cell puede llenar
-   su CSpace (1024 entradas) de objetos `Memory` de hasta 1 MiB, o crear
-   cells sin límite si tiene una imagen, y así dejar sin memoria al resto.
-   El scheduler es round-robin sin prioridades: no hay garantías de tiempo
+4. **Agotamiento de recursos (DoS).** La memoria de las cells tiene
+   *cuotas por supervisor* (resuelto en parte): todo marco que el kernel
+   reserva para una cell (imagen, pila, tablas de páginas, objetos `Memory`)
+   se cobra a su cuota, y `cell_spawn` le da a la hija una cuota que sale de
+   la de quien la crea. Una cell ya no puede dejar sin marcos a otra
+   (`QuotaModel.no_starvation`; ver la tabla de arriba). Lo que queda:
+   la memoria del propio kernel que consume una cell no se cuenta (sus
+   hilos y pilas de kernel, colas de mensajes, la CSpace, hasta 1024
+   entradas), y el kernel se guarda una reserva fija (`KERNEL_RESERVE`,
+   8 MiB) para lo suyo. Crear cells no tiene otro límite que la cuota. El
+   scheduler es round-robin sin prioridades: no hay garantías de tiempo
    real. `wait` no agrega un vector nuevo: cada objeto anota a lo sumo un
-   registro por hilo y por lista, y el scheduler un plazo por hilo. *Mitigación futura*: cuotas de memoria y de cells por supervisor
-   (las cuenta quien crea la cell). El diseño ya está modelado y demostrado
-   en Lean, antes del código (`Nsos/Quota.lean`): si los marcos libres son
-   la suma de las cuotas disponibles, una cell con cuota siempre consigue
-   memoria, haga lo que haga el resto (`QuotaModel.no_starvation`). Falta
-   implementarlo en el kernel; la memoria del propio kernel (pilas, colas,
-   CSpace) no entra en el modelo.
+   registro por hilo y por lista, y el scheduler un plazo por hilo.
+   *Mitigación futura*: contar también la memoria del kernel por cell, y
+   cuotas de CPU.
 5. **La consola es compartida y falsificable.** `debug_log` antepone el
    nombre de la cell solo al inicio de cada escritura; una cell puede
    escribir un salto de línea y luego texto que parezca venir de otra.

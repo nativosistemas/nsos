@@ -34,17 +34,14 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **Cuotas de memoria** por supervisor (punto 4 de `amenazas.md`). El
-   modelo en Lean está hecho (`Nsos/Quota.lean`). Falta el código: la
-   contabilidad en `kcore` con Kani contra el modelo, `cell_spawn` con un
-   argumento de cuota y una prueba negativa en QEMU (una cell que intenta
-   agotar la memoria y otra que igual consigue la suya).
+1. **Memoria del kernel por cell** (lo que queda del punto 4 de
+   `amenazas.md`): las cuotas ya cubren los marcos de las cells, pero no
+   sus hilos, colas ni CSpace.
 2. **Latencia en el peor caso** (punto 16): consola con búfer vaciado por
    interrupción del UART y latencia máxima de syscall en `bench` con
    `caos` corriendo.
-3. **Mitigación parcial de Spectre** antes de KPTI: `lfence` o índice
-   enmascarado tras los controles de rango del CSpace y del número de
-   syscall.
+3. **Spectre**: barreras en el resto de los índices que vienen de una
+   cell (la entrada de syscalls y el CSpace ya las tienen); después KPTI.
 4. **Fuzzing en el host** con `cargo-fuzz` (ELF, FDT, `Message::from_bytes`,
    layout del almacén, enlace) y `caos` con semilla al azar en la CI.
 5. Después: handoff, SMP, KPTI, IOMMU y Raspberry Pi 4 y 5 (ver

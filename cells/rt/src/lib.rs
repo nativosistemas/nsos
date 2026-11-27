@@ -293,15 +293,31 @@ pub fn cap_info(h: CapHandle) -> SysResult<CapInfo> {
     Ok(info)
 }
 
+/// Cuota de memoria que [`cell_spawn`] le da a la cell nueva: 512 marcos
+/// (2 MiB), que salen de la cuota de quien la crea.
+pub const SPAWN_QUOTA: u64 = 512;
+
 /// Crea una cell a partir de la imagen `image` y le *mueve* `caps` (las
-/// recibe en los slots `1..=n`). Devuelve una capacidad a la cell nueva.
+/// recibe en los slots `1..=n`), con [`SPAWN_QUOTA`] marcos de cuota.
+/// Devuelve una capacidad a la cell nueva.
 pub fn cell_spawn(image: CapHandle, caps: &[CapHandle]) -> SysResult<CapHandle> {
+    cell_spawn_with_quota(image, caps, SPAWN_QUOTA)
+}
+
+/// Como [`cell_spawn`], con `quota` marcos de cuota de memoria para la cell
+/// nueva. Salen de la cuota disponible de quien llama y vuelven cuando la
+/// cell nueva termina; sin tantos disponibles, `NoMemory`.
+pub fn cell_spawn_with_quota(
+    image: CapHandle,
+    caps: &[CapHandle],
+    quota: u64,
+) -> SysResult<CapHandle> {
     decode_ret(syscall4(
         Syscall::CellSpawn,
         image.0 as u64,
         caps.as_ptr() as u64,
         caps.len() as u64,
-        0,
+        quota,
     ))
     .map(|v| CapHandle(v as u32))
 }

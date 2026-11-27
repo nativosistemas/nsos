@@ -9,6 +9,7 @@
 use crate::arch::paging::{flags, AddressSpace, PageSize, PAGE_SIZE};
 use crate::kprintln;
 use crate::mm::{self, phys_to_virt, pmm, PhysAddr};
+use crate::quota::{self, Account};
 use crate::sched::{self, ThreadId};
 use crate::sync::IrqSpinLock;
 use alloc::collections::BTreeMap;
@@ -75,27 +76,38 @@ impl KObject {
 }
 
 /// Objeto de memoria: `pages` marcos físicos contiguos, a cero al crearse.
-/// Se libera cuando muere su última capacidad *y* su último mapeo.
+/// Se libera cuando muere su última capacidad *y* su último mapeo. Sus
+/// marcos se cobran a la cuenta de quien lo creó, aunque viaje a otra cell.
 pub struct MemObj {
     pub phys: PhysAddr,
     pub pages: usize,
+    account: Arc<Account>,
 }
 
 impl MemObj {
-    /// Reserva `pages` marcos contiguos.
-    pub fn new(pages: usize) -> Option<Arc<MemObj>> {
-        let phys = pmm::alloc_contiguous(pages, 1)?;
+    /// Reserva `pages` marcos contiguos y los cobra a `account`.
+    pub fn new(pages: usize, account: Arc<Account>) -> Option<Arc<MemObj>> {
+        account.charge(pages as u64).ok()?;
+        let Some(phys) = pmm::alloc_contiguous(pages, 1) else {
+            account.refund(pages as u64);
+            return None;
+        };
         // SAFETY: marcos recién reservados, nuestros, en el HHDM.
         unsafe {
             core::ptr::write_bytes(phys_to_virt(phys) as *mut u8, 0, pages * PAGE_SIZE as usize)
         };
-        Some(Arc::new(MemObj { phys, pages }))
+        Some(Arc::new(MemObj {
+            phys,
+            pages,
+            account,
+        }))
     }
 
-    /// Objeto nuevo con `data` al principio (el resto a cero).
+    /// Objeto nuevo con `data` al principio (el resto a cero), pagado por el
+    /// kernel.
     pub fn from_bytes(data: &[u8]) -> Option<Arc<MemObj>> {
         let pages = (data.len() as u64).div_ceil(PAGE_SIZE).max(1) as usize;
-        let m = MemObj::new(pages)?;
+        let m = MemObj::new(pages, quota::root())?;
         // SAFETY: marcos recién reservados y nuestros (nadie más tiene el
         // `Arc` todavía); `data` cabe en `pages` páginas.
         unsafe {
@@ -119,6 +131,7 @@ impl Drop for MemObj {
         for i in 0..self.pages {
             pmm::free_frame(self.phys + i as u64 * PAGE_SIZE);
         }
+        self.account.refund(self.pages as u64);
     }
 }
 
@@ -527,6 +540,8 @@ pub struct Cell {
     kill: AtomicBool,
     /// Cómo terminó (`None` mientras corre) e hilos esperando ese momento.
     exit: IrqSpinLock<(Option<ExitStatus>, Vec<ThreadId>)>,
+    /// Cuenta de memoria: todo marco de la cell se cobra acá.
+    pub account: Arc<Account>,
 }
 
 static NEXT_CELL: AtomicU64 = AtomicU64::new(1);
@@ -596,32 +611,128 @@ pub enum SpawnError {
     Caps(Error),
 }
 
+/// Reserva un marco y lo cobra a `account` (si no entra en la cuota, no
+/// reserva nada).
+fn alloc_charged(account: &Account) -> Option<PhysAddr> {
+    account.charge(1).ok()?;
+    let p = pmm::alloc_frame();
+    if p.is_none() {
+        account.refund(1);
+    }
+    p
+}
+
+/// Libera un marco cobrado a `account`.
+fn free_charged(account: &Account, p: PhysAddr) {
+    pmm::free_frame(p);
+    account.refund(1);
+}
+
 fn map_user_page(
     space: &mut AddressSpace,
     frames: &mut Vec<PhysAddr>,
+    account: &Account,
     v: u64,
     f: u64,
 ) -> Result<PhysAddr, SpawnError> {
-    let p = pmm::alloc_frame().ok_or(SpawnError::NoMemory)?;
+    let p = alloc_charged(account).ok_or(SpawnError::NoMemory)?;
     frames.push(p);
-    let mut alloc = pmm::alloc_frame;
+    let mut alloc = || alloc_charged(account);
     space
         .map(v, p, PageSize::Size4K, f | flags::USER, &mut alloc)
         .map_err(|_| SpawnError::NoMemory)?;
     Ok(p)
 }
 
-/// Crea una cell a partir de una imagen ELF y le entrega `caps` en los slots
-/// 1..=n de su CSpace. Arranca su hilo principal.
+/// Crea una cell que crea el kernel, con [`quota::BOOT_QUOTA`] marcos de
+/// la cuenta raíz.
 pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, SpawnError> {
+    spawn_with_quota(name, image, caps, quota::BOOT_QUOTA)
+}
+
+/// Como [`spawn`], con `q` marcos de la cuenta raíz.
+pub fn spawn_with_quota(
+    name: &str,
+    image: &[u8],
+    caps: Vec<KCap>,
+    q: u64,
+) -> Result<Arc<Cell>, SpawnError> {
+    let account = quota::root().split(q).map_err(|_| SpawnError::NoMemory)?;
+    spawn_in(name, image, caps, account)
+}
+
+/// Crea una cell a partir de una imagen ELF, con la cuenta de memoria
+/// `account` (recién separada de la de su supervisor), y le entrega `caps`
+/// en los slots 1..=n de su CSpace. Arranca su hilo principal. Todo lo que
+/// reserva (tablas, imagen, pila) se cobra a `account`; si falla, lo libera
+/// y le devuelve la cuenta al supervisor.
+pub fn spawn_in(
+    name: &str,
+    image: &[u8],
+    caps: Vec<KCap>,
+    account: Arc<Account>,
+) -> Result<Arc<Cell>, SpawnError> {
+    let mut space = None;
+    let mut frames = Vec::new();
+    let r = build(name, image, caps, &account, &mut space, &mut frames);
+    if r.is_err() {
+        if let Some(space) = space.take() {
+            space.destroy_user(&mut |p| free_charged(&account, p));
+        }
+        for p in frames {
+            free_charged(&account, p);
+        }
+        account.close();
+        return Err(r.err().unwrap());
+    }
+    let (img, cspace) = r.unwrap();
+    let space = space.expect("espacio armado");
+    let cell = Arc::new(Cell {
+        id: NEXT_CELL.fetch_add(1, Ordering::Relaxed),
+        name: String::from(name),
+        root: AtomicU64::new(space.root()),
+        space: IrqSpinLock::new(Some(space)),
+        cspace: IrqSpinLock::new(cspace),
+        frames: IrqSpinLock::new(frames),
+        mappings: IrqSpinLock::new(Vec::new()),
+        thread: AtomicU64::new(0),
+        kill: AtomicBool::new(false),
+        exit: IrqSpinLock::new((None, Vec::new())),
+        account,
+    });
+    kprintln!(
+        "cell {} \"{}\": {} segmentos, entrada {:#x}",
+        cell.id,
+        name,
+        img.segments.len(),
+        img.entry
+    );
+    let tname: &'static str =
+        alloc::boxed::Box::leak(alloc::string::String::from(name).into_boxed_str());
+    let tid = sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP);
+    cell.thread.store(tid, Ordering::Relaxed);
+    Ok(cell)
+}
+
+/// Arma el espacio de direcciones, la imagen, la pila y la CSpace de una
+/// cell nueva. Lo que reserva queda en `space` y `frames` aunque falle, para
+/// que [`spawn_in`] lo libere.
+fn build(
+    _name: &str,
+    image: &[u8],
+    caps: Vec<KCap>,
+    account: &Account,
+    space_out: &mut Option<AddressSpace>,
+    frames: &mut Vec<PhysAddr>,
+) -> Result<(elf::Image, CSpace<KObject>), SpawnError> {
     let img = elf::parse(image).map_err(SpawnError::Elf)?;
-    let mut alloc = pmm::alloc_frame;
-    let mut space = {
+    let mut alloc = || alloc_charged(account);
+    let new = {
         let k = mm::KERNEL_SPACE.lock();
         AddressSpace::new_user(k.as_ref().expect("mm sin inicializar"), &mut alloc)
             .ok_or(SpawnError::NoMemory)?
     };
-    let mut frames = Vec::new();
+    let space = space_out.insert(new);
 
     for seg in &img.segments {
         let mut f = 0;
@@ -633,7 +744,7 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
         }
         let mut off = 0;
         while off < seg.memsz {
-            let p = map_user_page(&mut space, &mut frames, seg.vaddr + off, f)?;
+            let p = map_user_page(space, frames, account, seg.vaddr + off, f)?;
             // Copiar la parte del archivo que cae en esta página (el resto ya
             // está a cero).
             if off < seg.filesz {
@@ -651,8 +762,9 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
     let mut v = USER_STACK_TOP - USER_STACK_SIZE;
     while v < USER_STACK_TOP {
         map_user_page(
-            &mut space,
-            &mut frames,
+            space,
+            frames,
+            account,
             v,
             flags::WRITABLE | flags::NO_EXECUTE,
         )?;
@@ -663,31 +775,7 @@ pub fn spawn(name: &str, image: &[u8], caps: Vec<KCap>) -> Result<Arc<Cell>, Spa
     cspace
         .insert_all(caps)
         .map_err(|(e, _)| SpawnError::Caps(e))?;
-
-    let cell = Arc::new(Cell {
-        id: NEXT_CELL.fetch_add(1, Ordering::Relaxed),
-        name: String::from(name),
-        root: AtomicU64::new(space.root()),
-        space: IrqSpinLock::new(Some(space)),
-        cspace: IrqSpinLock::new(cspace),
-        frames: IrqSpinLock::new(frames),
-        mappings: IrqSpinLock::new(Vec::new()),
-        thread: AtomicU64::new(0),
-        kill: AtomicBool::new(false),
-        exit: IrqSpinLock::new((None, Vec::new())),
-    });
-    kprintln!(
-        "cell {} \"{}\": {} segmentos, entrada {:#x}",
-        cell.id,
-        name,
-        img.segments.len(),
-        img.entry
-    );
-    let tname: &'static str =
-        alloc::boxed::Box::leak(alloc::string::String::from(name).into_boxed_str());
-    let tid = sched::spawn_user(tname, cell.clone(), img.entry, USER_STACK_TOP);
-    cell.thread.store(tid, Ordering::Relaxed);
-    Ok(cell)
+    Ok((img, cspace))
 }
 
 /// Termina la cell `cell` desde un contexto que corre en su espacio (su
@@ -713,12 +801,15 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
     unsafe { crate::arch::paging::switch_to(mm::kernel_root()) };
     cell.root.store(0, Ordering::Relaxed);
     if let Some(space) = cell.space.lock().take() {
-        space.destroy_user(&mut |p| pmm::free_frame(p));
+        space.destroy_user(&mut |p| free_charged(&cell.account, p));
     }
     for p in core::mem::take(&mut *cell.frames.lock()) {
-        pmm::free_frame(p);
+        free_charged(&cell.account, p);
     }
     drop(core::mem::take(&mut *cell.mappings.lock()));
+    // Lo que le queda disponible vuelve al supervisor; lo que sigue en uso
+    // (objetos `Memory` que viajaron a otras cells) pasa a ser suyo.
+    cell.account.close();
 
     // Recién ahora (recursos liberados) se avisa a quienes esperan.
     let waiters = {
@@ -754,7 +845,7 @@ impl Cell {
         if write {
             f |= flags::WRITABLE;
         }
-        let mut alloc = pmm::alloc_frame;
+        let mut alloc = || alloc_charged(&self.account);
         for i in 0..obj.pages as u64 {
             space
                 .map(

@@ -112,6 +112,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cell-glotona"
+version = "0.1.0"
+dependencies = [
+ "nsos-rt",
+]
+
+[[package]]
 name = "cell-hola"
 version = "0.1.0"
 dependencies = [

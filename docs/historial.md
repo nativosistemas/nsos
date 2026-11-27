@@ -378,3 +378,21 @@ derechos, el mismo objeto podía quedar RW y RX a la vez.
   almacén y migración corren en ARM64 igual que en x86_64.
 * Paso 3: Raspberry Pi 4 y 5 (firmware UEFI, controlador PCIe propio de la
   Pi, FAT32 para la SD). Ver [`arm64.md`](arm64.md).
+
+## Cuotas de memoria por supervisor (hecho)
+
+Cerraba el hueco más grande frente al adversario definido: una cell podía
+dejar sin memoria a todas las demás.
+
+* Modelo primero: `Nsos/Quota.lean`. Los marcos libres son la suma de las
+  cuotas disponibles de las cells vivas (`step_inv`), así que una cell con
+  cuota siempre consigue memoria haga lo que haga el resto
+  (`no_starvation`), y ningún marco se pierde (`run_conserves`). Tres
+  mutaciones lo rompen.
+* `kcore::quota` hace exactamente los pasos del modelo (Kani:
+  `charge_any`, `refund_any`, `split_any`, `absorb_any`). El kernel tiene
+  una cuenta por cell (`kernel/src/quota.rs`) y cobra imagen, pila, tablas
+  y `mem_create`; `cell_spawn` recibe la cuota de la hija.
+* Prueba negativa en QEMU: `glotona` pide objetos de 1 MiB hasta
+  `NoMemory` y se frena en su cuota; sin cuotas se lleva 215 MiB. ktest
+  comprueba además que todas las cuotas vuelven enteras al kernel.

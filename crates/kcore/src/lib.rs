@@ -20,6 +20,7 @@ pub mod irq;
 pub mod paging;
 pub mod paging_arm64;
 pub mod platform;
+pub mod quota;
 pub mod wait;
 
 pub use cspace::CSpace;

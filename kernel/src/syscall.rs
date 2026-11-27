@@ -95,7 +95,7 @@ fn dispatch(s: Syscall, cell: &Arc<Cell>, a: [u64; 4]) -> SysResult<u64> {
         Syscall::MemMap => mem_map(cell, h(a0), a1, a2),
         Syscall::MemUnmap => cell.unmap_memory(a0, a1).map(|_| 0),
         Syscall::MemInfo => mem_info(cell, h(a0), a1),
-        Syscall::CellSpawn => cell_spawn(cell, h(a0), a1, a2),
+        Syscall::CellSpawn => cell_spawn(cell, h(a0), a1, a2, a3),
         Syscall::CellKill => cell_kill(cell, h(a0)),
         Syscall::CellStatus => cell_status(cell, h(a0), a1, a2),
         Syscall::IrqAck => irq_ack(cell, h(a0)),
@@ -161,7 +161,9 @@ fn sleep(cell: &Cell) -> SysResult<()> {
 const SPAWN_MAX_CAPS: usize = 16;
 
 /// `cell_spawn(h_image, caps, n) -> h_cell`.
-fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64) -> SysResult<u64> {
+/// La cuota de la hija (`q` marcos) sale de la cuota disponible de quien
+/// llama (`quota::Account::split`); al morir la hija, vuelve.
+fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64, q: u64) -> SysResult<u64> {
     let n = usize::try_from(n).map_err(|_| Error::InvalidArgs)?;
     if n > SPAWN_MAX_CAPS {
         return Err(Error::InvalidArgs);
@@ -183,19 +185,30 @@ fn cell_spawn(cell: &Cell, img: CapHandle, uptr: u64, n: u64) -> SysResult<u64> 
     // Reservar el lugar de la respuesta *antes* de mover las capacidades:
     // después de crear la cell, insertarla no puede fallar (si fallara, la
     // cell quedaría corriendo sin que nadie pueda matarla).
+    let account = cell.account.split(q)?;
     let (reservation, caps) = {
         let mut cs = cell.cspace.lock();
-        let r = cs.reserve()?;
-        match cs.remove_all(&hs, Rights::GRANT) {
-            Ok(caps) => (r, caps),
+        let reserved = cs
+            .reserve()
+            .and_then(|r| match cs.remove_all(&hs, Rights::GRANT) {
+                Ok(caps) => Ok((r, caps)),
+                Err(e) => {
+                    cs.cancel(r);
+                    Err(e)
+                }
+            });
+        match reserved {
+            Ok(x) => x,
             Err(e) => {
-                cs.cancel(r);
+                drop(cs);
+                account.close(); // la cuota vuelve entera
                 return Err(e);
             }
         }
     };
     cell.revoke_mappings();
-    let child = match cell::spawn(&image.name, image.bytes, caps) {
+    // `spawn_in` se queda con la cuenta: si falla, la devuelve.
+    let child = match cell::spawn_in(&image.name, image.bytes, caps, account) {
         Ok(c) => c,
         Err(e) => {
             kprintln!("cell_spawn \"{}\": {:?}", image.name, e);
@@ -283,7 +296,7 @@ fn mem_create(cell: &Cell, size: u64, fl: u64) -> SysResult<u64> {
         return Err(Error::InvalidArgs);
     }
     let pages = size.div_ceil(crate::arch::paging::PAGE_SIZE) as usize;
-    let obj = cell::MemObj::new(pages).ok_or(Error::NoMemory)?;
+    let obj = cell::MemObj::new(pages, cell.account.clone()).ok_or(Error::NoMemory)?;
     let h = cell.cspace.lock().insert(Cap {
         object: KObject::Memory(obj),
         rights: cell::MEM_RIGHTS,
