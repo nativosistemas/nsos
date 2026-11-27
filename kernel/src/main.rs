@@ -271,13 +271,15 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     // reserva que giran a la vez.
     let acaparadora = module("acaparadora").ok_or("falta el módulo acaparadora")?;
     for _ in 0..ACAPARADORAS {
-        cell::spawn("acaparadora", acaparadora, alloc::vec![]).map_err(report)?;
+        cell::spawn_with_quota("acaparadora", acaparadora, alloc::vec![], SMALL_QUOTA)
+            .map_err(report)?;
     }
     let puntual = module("puntual").ok_or("falta el módulo puntual")?;
-    cell::spawn_with_reserve("puntual", puntual, alloc::vec![], 512, PUNTUAL_CPU)
+    cell::spawn_with_reserve("puntual", puntual, alloc::vec![], SMALL_QUOTA, PUNTUAL_CPU)
         .map_err(report)?;
     let parlanchina = module("parlanchina").ok_or("falta el módulo parlanchina")?;
-    cell::spawn("parlanchina", parlanchina, alloc::vec![]).map_err(report)?;
+    cell::spawn_with_quota("parlanchina", parlanchina, alloc::vec![], SMALL_QUOTA)
+        .map_err(report)?;
     let charlatana = module("charlatana").ok_or("falta el módulo charlatana")?;
     cell::spawn_with_quota("charlatana", charlatana, alloc::vec![], CHARLATANA_QUOTA)
         .map_err(report)?;
@@ -299,6 +301,13 @@ pub fn image(name: &str) -> Result<cell::KCap, &'static str> {
 
 /// Reserva de CPU de `puntual` (unidades de `quota::CPU_UNITS` por segundo).
 pub const PUNTUAL_CPU: u64 = 40;
+
+/// Cuota de las cells de prueba que casi no usan memoria (2 MiB, 256 KiB de
+/// memoria del kernel). Con la cuota de arranque entera, todas las cells de
+/// la demo juntas no entran en la memoria del kernel de una máquina de
+/// 256 MiB arrancada por UEFI: `init` arrancaba solo si alguna ya había
+/// terminado.
+const SMALL_QUOTA: u64 = 512;
 
 /// Cuántas `acaparadora` giran a la vez que `puntual`.
 const ACAPARADORAS: usize = 6;
