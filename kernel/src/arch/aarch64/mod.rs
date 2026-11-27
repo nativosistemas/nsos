@@ -130,9 +130,15 @@ pub fn breakpoint() {
 /// tiene `SP_EL1` al volver a EL0 (ver `trap`).
 pub fn set_kernel_stack(_top: u64) {}
 
-/// Raíces de la cell que va a correr: en ARM64 no hay KPTI (los núcleos
-/// que usamos no son vulnerables a Meltdown).
-pub fn set_cell_roots(_kernel: u64, _user: u64) {}
+/// Pasa a las tablas de la cell que va a correr. En ARM64 no hay KPTI (los
+/// núcleos que usamos no son vulnerables a Meltdown): una sola raíz.
+///
+/// # Safety
+/// `kernel` es la raíz de una cell viva.
+pub unsafe fn enter_cell(kernel: u64, _user: u64) {
+    // SAFETY: delegada al llamador.
+    unsafe { paging::switch_to(kernel) };
+}
 
 /// Deshabilita interrupciones y detiene la CPU para siempre.
 pub fn halt_forever() -> ! {

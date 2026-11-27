@@ -471,3 +471,14 @@ interrupciones apagadas: unos 89 ms en hardware real a 115200 baudios.
   entradas desde anillo 3 de una corrida llegan con la raíz de usuario (no
   cargarla al salir lo hace fallar).
 * Sin PCID: el IPC cuesta casi el doble en QEMU.
+
+## PCID para KPTI (hecho, apagado por defecto)
+
+* `kcore::asid` reparte 8 lugares de dos identificadores (tablas del kernel
+  y de usuario) entre las cells que corren. Se vacía un identificador
+  cuando su lugar pasa a otra raíz, cuando la raíz se libera y cuando se
+  desmapea algo de ella. Kani (`switch_is_safe`) lo demuestra contra un
+  modelo de la TLB; dos mutaciones lo rompen.
+* El kernel lo usa con la bandera `pcid` si la CPU lo tiene. QEMU sin KVM no
+  emula PCID, así que el camino todavía no corrió: falta probarlo con KVM o
+  en hardware antes de prenderlo por defecto.

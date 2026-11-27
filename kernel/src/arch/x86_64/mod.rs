@@ -18,10 +18,14 @@ use port::Port;
 pub use idt::{initial_frame, TrapFrame};
 pub use syscall::set_kernel_stack;
 
-/// Raíces de la cell que va a correr (KPTI: la de usuario la carga el stub
-/// de salida a anillo 3).
-pub fn set_cell_roots(kernel: u64, user: u64) {
-    kpti::set_roots(kernel, user);
+/// Pasa a las tablas del kernel de la cell que va a correr y deja lista la
+/// de usuario para el stub de salida (KPTI, con PCID si hay).
+///
+/// # Safety
+/// `kernel` y `user` son las raíces de una cell viva.
+pub unsafe fn enter_cell(kernel: u64, user: u64) {
+    // SAFETY: delegada al llamador.
+    unsafe { kpti::enter_cell(kernel, user) };
 }
 
 /// Código de excepción de un fallo de página (`ExitStatus::Faulted`).
@@ -50,8 +54,12 @@ pub fn nonce_seed() -> [u8; 16] {
 /// fijas o en PCI.
 pub fn discover(_memmap: &crate::boot::limine::Memmap) {}
 
-/// Ajustes que dependen de la línea de comandos (nada en x86_64).
-pub fn configure(_has_flag: &dyn Fn(&str) -> bool) {}
+/// Ajustes que dependen de la línea de comandos: `pcid` pide usar PCID con
+/// KPTI si la CPU lo tiene (apagado por defecto hasta probarlo en hardware;
+/// ver `kpti`).
+pub fn configure(has_flag: &dyn Fn(&str) -> bool) {
+    kpti::want_pcid(has_flag("pcid"));
+}
 
 /// Breakpoint de software (`int3`); el kernel lo cuenta y sigue.
 pub fn breakpoint() {

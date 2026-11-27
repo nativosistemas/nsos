@@ -119,6 +119,15 @@ extern "C" fn kmain() -> ! {
     let yn = |b| if b { "sí" } else { "no (la CPU no lo tiene)" };
     let [(n1, p1), (n2, p2)] = arch::paging::protections();
     kprintln!("mm: {} {}, {} {}", n1, yn(p1), n2, yn(p2));
+    #[cfg(target_arch = "x86_64")]
+    kprintln!(
+        "mm: KPTI, PCID {}",
+        if arch::kpti::pcid() {
+            "sí"
+        } else {
+            "no (sin la bandera `pcid` o la CPU no lo tiene)"
+        }
+    );
 
     // Interrupciones y scheduler.
     arch::time::init(TIMER_HZ);

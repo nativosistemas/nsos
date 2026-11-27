@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+pub mod asid;
 pub mod cspace;
 pub mod elf;
 pub mod fdt;

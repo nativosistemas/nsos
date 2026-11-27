@@ -33,7 +33,7 @@ Política:
 | `kernel/src/ktest.rs` | escrituras de prueba, cambiar la mitad baja (ARM64, test de PAN) | solo en modo test; direcciones mapeadas por el propio test |
 | `kernel/src/main.rs` | tests negativos `test-wx-fault` y `test-smap-fault` | solo con esas banderas; se espera el #PF |
 | `kernel/src/arch/x86_64/syscall.rs` | MSR de `syscall`, stub de entrada (carga la CR3 del kernel antes de tocar la pila) | un solo núcleo: la pila de kernel del hilo actual está en `NSOS_KSTACK_TOP` (con SMP: por CPU vía `swapgs`) |
-| `kernel/src/arch/x86_64/kpti.rs` | pila de entrada y plantilla de la mitad alta de las tablas de usuario (`UnsafeCell` en `.kpti_data`), direcciones de los símbolos del linker | un solo núcleo; la pila de entrada solo la usan los stubs con interrupciones apagadas; la plantilla se escribe una vez antes de crear cells |
+| `kernel/src/arch/x86_64/kpti.rs` | pila de entrada y plantilla de la mitad alta de las tablas de usuario (`UnsafeCell` en `.kpti_data`), direcciones de los símbolos del linker, CR4.PCIDE y CR3 con identificador | un solo núcleo; la pila de entrada solo la usan los stubs con interrupciones apagadas; la plantilla se escribe una vez antes de crear cells |
 | `kernel/src/usercopy.rs` | copiar desde/hacia memoria de cells vía HHDM | cada página se traduce con las tablas de la cell y exige USER (y WRITABLE al escribir) |
 | `kernel/src/cell.rs` | copiar segmentos ELF a marcos nuevos | marcos recién reservados; rangos validados por `kcore::elf` |
 | `kernel/src/boot/limine.rs` (módulos) | leer módulos cargados por Limine | `size` bytes válidos en memoria que el kernel nunca reclama |
