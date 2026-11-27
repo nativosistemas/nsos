@@ -38,6 +38,49 @@ jobs:
       - name: Arranque en QEMU (UEFI)
         run: make smoke-uefi
 
+  # Lo mismo que `check`, con KVM: los runners tienen /dev/kvm pero sin
+  # permiso para el usuario. Con KVM, `run-qemu.sh` usa `-cpu host`, y si la
+  # CPU tiene PCID el arranque principal (bandera `pcid`) lo usa con KPTI:
+  # es el único lugar donde corre ese camino (QEMU sin KVM no emula PCID).
+  kvm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain de Rust
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Dependencias del sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 xorriso ovmf
+      - name: Habilitar KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          ls -l /dev/kvm || true
+          grep -m1 -o -w pcid /proc/cpuinfo || echo "la CPU del runner no tiene PCID"
+      - name: Arranque en QEMU con KVM
+        run: make smoke
+      - name: PCID con KPTI
+        run: |
+          grep -h "mm: KPTI, PCID\|KPTI:" build/boot.log | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -w /dev/kvm ] && grep -q -w pcid /proc/cpuinfo; then
+            grep -q "mm: KPTI, PCID sí" build/boot.log \
+              || { echo "::error::Hay KVM y PCID, pero el kernel no usó PCID"; exit 1; }
+          else
+            echo "::warning::Sin KVM o sin PCID: no se probó PCID"
+          fi
+      - name: Benchmarks
+        if: always()
+        run: |
+          if [ -f build/bench.log ]; then
+            tools/bench-summary.sh build/bench.log "Benchmarks (QEMU con KVM)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
   arm64:
     runs-on: ubuntu-latest
     steps:
