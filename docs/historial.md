@@ -457,3 +457,17 @@ interrupciones apagadas: unos 89 ms en hardware real a 115200 baudios.
   (una por copia, entre la validación y la copia), el rango de `mem_map` y
   el acceso de `ioport`. Con la barrera por página, el IPC en ARM64 pasaba
   de unos 54 a 96 µs; con una por copia, queda igual.
+
+## KPTI en x86_64 (hecho)
+
+* Cada cell tiene dos raíces: la del kernel (la de siempre) y la de usuario,
+  que comparte la mitad baja y de la alta solo trae `.kpti_text` (stubs de
+  entrada y salida) y `.kpti_data` (GDT, TSS, IDT, pila de entrada, pila del
+  doble fallo y las variables que leen los stubs). La CPU deja el marco en
+  la pila de entrada (`TSS.RSP0`); el stub carga la raíz del kernel y lo
+  copia a la pila del hilo. Al volver, al revés. Sin páginas globales.
+* ktest: las tablas de usuario no ven el HHDM, el heap, el texto ni la pila
+  del kernel (copiar la mitad alta entera lo hace fallar), y las 390 000
+  entradas desde anillo 3 de una corrida llegan con la raíz de usuario (no
+  cargarla al salir lo hace fallar).
+* Sin PCID: el IPC cuesta casi el doble en QEMU.

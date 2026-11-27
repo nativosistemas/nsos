@@ -21,6 +21,11 @@ const TESTS: &[Test] = &[
     ("marcos: reservar y liberar", frames),
     ("paginación: mapear, traducir y desmapear", paging),
     ("paginación: W^X en el kernel", kernel_wx),
+    #[cfg(target_arch = "x86_64")]
+    (
+        "paginación: KPTI (las tablas de usuario no ven el kernel)",
+        kpti,
+    ),
     ("excepciones: un breakpoint vuelve", breakpoint),
     ("timer: llegan ticks", timer_ticks),
     ("scheduler: apropiación entre 3 hilos", preemption),
@@ -120,8 +125,8 @@ pub fn map_user_test_page() -> u64 {
     } else {
         // La mitad baja tiene su propia raíz: un espacio de cell de prueba
         // (que se pierde: el test termina en pánico).
-        let mut user =
-            crate::arch::paging::AddressSpace::new_user(kernel, &mut alloc).expect("sin marcos");
+        let mut user = crate::arch::paging::AddressSpace::new_user(kernel, &mut alloc, &mut |_| {})
+            .expect("sin marcos");
         user.map(USER_VADDR, phys, PageSize::Size4K, f, &mut alloc)
             .expect("map falló");
         // SAFETY: el espacio nuevo es una mitad baja válida; el kernel no
@@ -130,6 +135,64 @@ pub fn map_user_test_page() -> u64 {
         // `user` no libera sus tablas al salir de alcance: quedan en uso.
     }
     USER_VADDR
+}
+
+/// KPTI: un espacio de cell nuevo. Con su raíz de usuario se ve su página
+/// igual que con la del kernel, y del kernel solo los stubs de entrada (sin
+/// USER): ni el HHDM, ni el heap, ni el resto del texto, ni las pilas.
+#[cfg(target_arch = "x86_64")]
+fn kpti() -> Result<(), &'static str> {
+    use crate::arch::paging::AddressSpace;
+    const USER_VA: u64 = 0x4000_0000;
+    let mut alloc = pmm::alloc_frame;
+    let mut space = {
+        let g = mm::KERNEL_SPACE.lock();
+        AddressSpace::new_user(
+            g.as_ref().ok_or("mm sin inicializar")?,
+            &mut alloc,
+            &mut |_| {},
+        )
+        .ok_or("sin marcos")?
+    };
+    let phys = pmm::alloc_frame().ok_or("sin marcos")?;
+    let f = flags::USER | flags::WRITABLE | flags::NO_EXECUTE;
+    space
+        .map(USER_VA, phys, PageSize::Size4K, f, &mut alloc)
+        .map_err(|_| "map falló")?;
+    let r = (|| {
+        check(space.user_root() != 0, "sin raíz de usuario")?;
+        check(
+            space.translate_user(USER_VA).map(|(p, _)| p) == Some(phys),
+            "la raíz de usuario no ve la página de la cell",
+        )?;
+        let heap = Box::new(0u64);
+        let hidden = [
+            (phys_to_virt(phys), "el HHDM"),
+            (&*heap as *const u64 as u64, "el heap"),
+            (kpti as *const () as u64, "el texto del kernel"),
+            (&heap as *const _ as u64, "la pila de kernel"),
+        ];
+        for (va, what) in hidden {
+            check(
+                space.translate(va).is_some(),
+                "la raíz del kernel no ve el kernel",
+            )?;
+            if space.translate_user(va).is_some() {
+                kprint!("[{} visible] ", what);
+                return Err("la raíz de usuario ve el kernel");
+            }
+        }
+        for (start, _, _) in crate::arch::kpti::shared_ranges() {
+            let (_, fl) = space
+                .translate_user(start)
+                .ok_or("faltan los stubs de entrada")?;
+            check(fl & flags::USER == 0, "los stubs de entrada tienen USER")?;
+        }
+        Ok(())
+    })();
+    space.destroy_user(&mut |p| pmm::free_frame(p));
+    pmm::free_frame(phys);
+    r
 }
 
 fn paging() -> Result<(), &'static str> {
@@ -801,6 +864,22 @@ pub fn run_cells() -> bool {
         "la memoria de las cells se liberó",
         pmm::stats().free_frames == free_before,
     );
+    // KPTI: todas las entradas desde anillo 3 llegaron con la raíz de
+    // usuario de la cell (si el stub de salida no la cargara, las cells
+    // correrían con el kernel mapeado).
+    #[cfg(target_arch = "x86_64")]
+    {
+        let (entries, wrong) = crate::arch::kpti::entry_stats();
+        kprintln!(
+            "ktest: KPTI: {} entradas desde anillo 3, {} con otra raíz",
+            entries,
+            wrong
+        );
+        check(
+            "KPTI: las cells corren con su raíz de usuario",
+            entries > 0 && wrong == 0,
+        );
+    }
     check(
         "las cuotas volvieron enteras a la cuenta del kernel",
         crate::quota::root().avail() == quota_before

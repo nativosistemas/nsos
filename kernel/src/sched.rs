@@ -265,6 +265,7 @@ pub fn schedule(frame: *mut TrapFrame) -> *mut TrapFrame {
     let root = match &next.cell {
         Some(c) => {
             crate::arch::set_kernel_stack(next.kstack_top);
+            crate::arch::set_cell_roots(c.root(), c.user_root());
             c.root()
         }
         None => crate::mm::kernel_root(),

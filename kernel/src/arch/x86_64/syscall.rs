@@ -24,9 +24,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// Valor de `vector` en el `TrapFrame` de una syscall.
 pub const SYSCALL_VECTOR: u64 = 0x80;
 
+// En `.kpti_data`: los stubs las leen antes de cambiar a las tablas del
+// kernel (ver `super::kpti`).
 #[no_mangle]
+#[link_section = ".kpti_data"]
 static NSOS_KSTACK_TOP: AtomicU64 = AtomicU64::new(0);
 #[no_mangle]
+#[link_section = ".kpti_data"]
 static NSOS_USER_RSP: AtomicU64 = AtomicU64::new(0);
 
 const MSR_STAR: u32 = 0xC000_0081;
@@ -35,10 +39,16 @@ const MSR_SFMASK: u32 = 0xC000_0084;
 
 global_asm!(
     r#"
-.section .text
+.section .kpti_text, "ax"
 .global nsos_syscall_entry
 nsos_syscall_entry:
+    // KPTI: con las tablas de usuario. `rsp` sirve de registro temporal
+    // (las interrupciones están apagadas por SFMASK).
     mov [rip + NSOS_USER_RSP], rsp
+    mov rsp, cr3
+    mov [rip + NSOS_ENTRY_CR3], rsp
+    mov rsp, [rip + NSOS_KERNEL_CR3]
+    mov cr3, rsp
     mov rsp, [rip + NSOS_KSTACK_TOP]
     push {user_ds}
     push [rip + NSOS_USER_RSP]
@@ -47,7 +57,7 @@ nsos_syscall_entry:
     push rcx
     push 0
     push {vector}
-    jmp nsos_trap_common
+    jmp nsos_trap_save
 "#,
     user_ds = const gdt::USER_DS as u64,
     user_cs = const gdt::USER_CS as u64,
@@ -76,8 +86,9 @@ pub fn init() {
     }
 }
 
-/// Fija la pila de kernel para entradas desde anillo 3 (syscall y TSS).
+/// Fija la pila de kernel del hilo que va a correr: ahí copian el marco
+/// los stubs al entrar desde anillo 3 (la CPU lo deja en la pila de entrada
+/// de KPTI, `TSS.RSP0`).
 pub fn set_kernel_stack(top: u64) {
     NSOS_KSTACK_TOP.store(top, Ordering::Relaxed);
-    gdt::set_kernel_stack(top);
 }

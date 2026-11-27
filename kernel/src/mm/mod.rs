@@ -82,7 +82,7 @@ pub fn init(memmap: &Memmap, exec: &ExecutableAddress) {
                 hhdm + base,
                 base,
                 len,
-                flags::WRITABLE | flags::NO_EXECUTE | flags::GLOBAL,
+                flags::WRITABLE | flags::NO_EXECUTE,
                 &mut alloc,
             )
             .expect("no se pudo mapear el HHDM");
@@ -110,7 +110,7 @@ pub fn init(memmap: &Memmap, exec: &ExecutableAddress) {
                     v,
                     v2p(v),
                     crate::arch::paging::PageSize::Size4K,
-                    f | flags::GLOBAL,
+                    f,
                     &mut alloc,
                 )
                 .expect("no se pudo mapear el kernel");
@@ -125,6 +125,10 @@ pub fn init(memmap: &Memmap, exec: &ExecutableAddress) {
     space
         .prealloc_kernel_half(&mut alloc)
         .expect("sin marcos para la mitad alta");
+    // Sin páginas globales: con KPTI, cambiar a las tablas de usuario tiene
+    // que sacar al kernel de la TLB. La mitad alta de esas tablas (solo lo
+    // que necesitan los stubs de entrada) se arma acá.
+    crate::arch::paging::prepare_user_half(&space, &mut alloc);
 
     // 4. Activar (con las protecciones de la arquitectura).
     // SAFETY: el nuevo espacio mapea el código del kernel (sección text),

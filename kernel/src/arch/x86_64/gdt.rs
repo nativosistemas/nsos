@@ -51,6 +51,9 @@ struct Statics {
 // CPU es la única que lee estas estructuras.
 unsafe impl Sync for Statics {}
 
+// En `.kpti_data`: la CPU lee la GDT y la TSS (y usa la pila del doble
+// fallo) también con las tablas de usuario de KPTI.
+#[link_section = ".kpti_data"]
 static S: Statics = Statics {
     gdt: UnsafeCell::new([
         0,
@@ -86,6 +89,9 @@ pub fn init() {
         let tss = &mut *S.tss.get();
         let df_top = (S.df_stack.get() as u64) + IST_STACK_SIZE as u64;
         tss.ist[(IST_DOUBLE_FAULT - 1) as usize] = df_top;
+        // KPTI: desde anillo 3, la CPU deja el marco en la pila de entrada
+        // (la única pila que ven las tablas de usuario).
+        core::ptr::addr_of_mut!(tss.rsp).write_unaligned([super::kpti::entry_stack_top(), 0, 0]);
 
         let base = S.tss.get() as u64;
         let limit = (size_of::<Tss>() - 1) as u64;
@@ -123,15 +129,5 @@ pub fn init() {
             tss = in(reg) TSS_SEL as u64,
             tmp = out(reg) _,
         );
-    }
-}
-
-/// Fija la pila de anillo 0 usada al entrar desde anillo 3.
-pub fn set_kernel_stack(top: u64) {
-    // SAFETY: escritura de un u64 en el TSS; se llama con interrupciones
-    // deshabilitadas desde el scheduler, único escritor.
-    unsafe {
-        let tss = S.tss.get();
-        core::ptr::addr_of_mut!((*tss).rsp).write_unaligned([top, 0, 0]);
     }
 }

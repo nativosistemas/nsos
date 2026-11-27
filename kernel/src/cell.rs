@@ -600,6 +600,8 @@ pub struct Cell {
     pub id: u64,
     pub name: String,
     root: AtomicU64,
+    /// Raíz con la que corre en anillo 3 (KPTI; en ARM64, la misma).
+    user_root: AtomicU64,
     space: IrqSpinLock<Option<AddressSpace>>,
     pub cspace: IrqSpinLock<CSpace<KObject>>,
     /// Marcos de usuario propiedad de la cell.
@@ -632,6 +634,11 @@ impl Cell {
     /// CR3 de la cell (0 si ya se destruyó).
     pub fn root(&self) -> PhysAddr {
         self.root.load(Ordering::Relaxed)
+    }
+
+    /// Raíz con la que corre en anillo 3 (KPTI).
+    pub fn user_root(&self) -> PhysAddr {
+        self.user_root.load(Ordering::Relaxed)
     }
 
     /// Ejecuta `f` sobre el espacio de direcciones (si sigue vivo).
@@ -791,6 +798,7 @@ pub fn spawn_in(
         id: NEXT_CELL.fetch_add(1, Ordering::Relaxed),
         name: String::from(name),
         root: AtomicU64::new(space.root()),
+        user_root: AtomicU64::new(space.user_root()),
         space: IrqSpinLock::new(Some(space)),
         cspace: IrqSpinLock::new(cspace),
         frames: IrqSpinLock::new(frames),
@@ -829,8 +837,12 @@ fn build(
     let mut alloc = || alloc_charged(account);
     let new = {
         let k = mm::KERNEL_SPACE.lock();
-        AddressSpace::new_user(k.as_ref().expect("mm sin inicializar"), &mut alloc)
-            .ok_or(SpawnError::NoMemory)?
+        AddressSpace::new_user(
+            k.as_ref().expect("mm sin inicializar"),
+            &mut alloc,
+            &mut |p| free_charged(account, p),
+        )
+        .ok_or(SpawnError::NoMemory)?
     };
     let space = space_out.insert(new);
 
@@ -913,6 +925,7 @@ pub fn terminate(cell: &Cell, status: ExitStatus) {
     // SAFETY: el espacio del kernel mapea todo lo que el kernel usa.
     unsafe { crate::arch::paging::switch_to(mm::kernel_root()) };
     cell.root.store(0, Ordering::Relaxed);
+    cell.user_root.store(0, Ordering::Relaxed);
     if let Some(space) = cell.space.lock().take() {
         space.destroy_user(&mut |p| free_charged(&cell.account, p));
     }
