@@ -18,8 +18,18 @@
 //! [`KERNEL_RESERVE`], y de ella salen las cuotas de las cells que crea el
 //! kernel y los objetos `Memory` que reparte (búferes de DMA).
 //!
+//! Hay dos recursos, cada uno con su [`Quota`] y las mismas reglas: los
+//! **marcos** de las cells y la **memoria del kernel** (`kmem`, bytes del
+//! heap) que el kernel gasta por ellas: su pila de kernel, su CSpace, las
+//! colas de mensajes, los canales, los mapeos. Cada marco de cuota trae
+//! [`KMEM_PER_FRAME`] bytes de `kmem`, así que `cell_spawn` reparte los dos
+//! en la misma proporción y el modelo de Lean vale para cada uno por
+//! separado (los mismos pasos sobre el mismo árbol de supervisores).
+//!
 //! Orden de los locks: una cuenta antes que las de sus supervisores. Nunca
-//! se toma la de una hija con la de su supervisor tomada.
+//! se toma la de una hija con la de su supervisor tomada. El lock de un
+//! canal se puede tener tomado al cobrar (los mensajes se cobran al
+//! encolarse); nunca al revés.
 
 use crate::sync::IrqSpinLock;
 use alloc::sync::Arc;
@@ -30,8 +40,25 @@ use nsos_kcore::quota::Quota;
 /// allocador después de arrancar (tablas del kernel, `map_mmio`, ktest).
 pub const KERNEL_RESERVE: u64 = 2048;
 
+/// Bytes del heap que el kernel se guarda para sí (sus hilos, la PCI, los
+/// tests y lo que se libera un poco después de cobrarse, como la pila de
+/// kernel de una cell que terminó).
+pub const KERNEL_KMEM_RESERVE: u64 = 3 << 20;
+
+/// Bytes de memoria del kernel que trae cada marco de cuota.
+pub const KMEM_PER_FRAME: u64 = 512;
+
 /// Cuota de las cells que crea el kernel al arrancar (8 MiB).
 pub const BOOT_QUOTA: u64 = 2048;
+
+/// Recurso de una cuenta.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Res {
+    /// Marcos físicos de la cell.
+    Frames,
+    /// Bytes del heap del kernel gastados por la cell.
+    Kmem,
+}
 
 /// Cuenta de memoria de una cell.
 pub struct Account {
@@ -41,17 +68,32 @@ pub struct Account {
 }
 
 struct State {
-    quota: Quota,
-    /// La cell murió: sus marcos se cuentan en el supervisor.
+    frames: Quota,
+    kmem: Quota,
+    /// La cell murió: lo suyo se cuenta en el supervisor.
     dead: bool,
+}
+
+impl State {
+    fn get(&mut self, r: Res) -> &mut Quota {
+        match r {
+            Res::Frames => &mut self.frames,
+            Res::Kmem => &mut self.kmem,
+        }
+    }
 }
 
 static ROOT: IrqSpinLock<Option<Arc<Account>>> = IrqSpinLock::new(None);
 
-/// Crea la cuenta raíz con `free` marcos libres (menos la reserva del
-/// kernel). Se llama una vez, después de iniciar el allocador de marcos.
-pub fn init(free: u64) {
-    let root = Account::new(Quota::new(free.saturating_sub(KERNEL_RESERVE)), None);
+/// Crea la cuenta raíz con `free` marcos libres y `heap` bytes de heap
+/// (menos las reservas del kernel). Se llama una vez, después de iniciar el
+/// allocador de marcos y el heap.
+pub fn init(free: u64, heap: u64) {
+    let root = Account::new(
+        Quota::new(free.saturating_sub(KERNEL_RESERVE)),
+        Quota::new(heap.saturating_sub(KERNEL_KMEM_RESERVE)),
+        None,
+    );
     *ROOT.lock() = Some(Arc::new(root));
 }
 
@@ -61,83 +103,110 @@ pub fn root() -> Arc<Account> {
 }
 
 impl Account {
-    fn new(quota: Quota, parent: Option<Arc<Account>>) -> Self {
+    fn new(frames: Quota, kmem: Quota, parent: Option<Arc<Account>>) -> Self {
         Self {
-            state: IrqSpinLock::new(State { quota, dead: false }),
+            state: IrqSpinLock::new(State {
+                frames,
+                kmem,
+                dead: false,
+            }),
             parent,
         }
     }
 
     /// Cobra `n` marcos. `NoMemory` si se pasan de la cuota disponible.
     pub fn charge(&self, n: u64) -> Result<(), Error> {
+        self.charge_res(Res::Frames, n)
+    }
+
+    /// Devuelve `n` marcos liberados.
+    pub fn refund(&self, n: u64) {
+        self.refund_res(Res::Frames, n)
+    }
+
+    /// Cobra `n` bytes de memoria del kernel.
+    pub fn charge_kmem(&self, n: u64) -> Result<(), Error> {
+        self.charge_res(Res::Kmem, n)
+    }
+
+    /// Devuelve `n` bytes de memoria del kernel.
+    pub fn refund_kmem(&self, n: u64) {
+        self.refund_res(Res::Kmem, n)
+    }
+
+    fn charge_res(&self, r: Res, n: u64) -> Result<(), Error> {
         let mut g = self.state.lock();
-        if g.dead || !g.quota.charge(n) {
+        if g.dead || !g.get(r).charge(n) {
             return Err(Error::NoMemory);
         }
         Ok(())
     }
 
-    /// Devuelve `n` marcos liberados. Si la cell murió, van a la cuenta que
-    /// heredó sus usados (su supervisor, o el primero vivo hacia arriba).
-    pub fn refund(&self, n: u64) {
+    /// Si la cell murió, lo devuelto va a la cuenta que heredó lo suyo (su
+    /// supervisor, o el primero vivo hacia arriba).
+    fn refund_res(&self, r: Res, n: u64) {
         let mut g = self.state.lock();
         if g.dead {
             let parent = self.parent.as_deref().expect("la cuenta raíz no muere");
             // Con este lock tomado: así `close` no puede estar a mitad de
-            // pasarle los usados al supervisor.
-            parent.refund(n);
+            // pasarle lo suyo al supervisor.
+            parent.refund_res(r, n);
             drop(g);
             return;
         }
-        let ok = g.quota.refund(n);
-        debug_assert!(ok, "se devolvieron marcos que no estaban cobrados");
+        let ok = g.get(r).refund(n);
+        debug_assert!(ok, "se devolvió memoria que no estaba cobrada");
     }
 
-    /// Separa `q` marcos de la cuota disponible para una cell hija.
+    /// Separa `q` marcos de la cuota disponible para una cell hija, con
+    /// `q * KMEM_PER_FRAME` bytes de memoria del kernel. Las dos o ninguna.
     pub fn split(self: &Arc<Self>, q: u64) -> Result<Arc<Account>, Error> {
-        let child = {
+        let k = q.checked_mul(KMEM_PER_FRAME).ok_or(Error::NoMemory)?;
+        let (frames, kmem) = {
             let mut g = self.state.lock();
-            if g.dead {
+            if g.dead || q > g.frames.avail || k > g.kmem.avail {
                 return Err(Error::NoMemory);
             }
-            g.quota.split(q).ok_or(Error::NoMemory)?
+            let frames = g.frames.split(q).expect("comprobado arriba");
+            let kmem = g.kmem.split(k).expect("comprobado arriba");
+            (frames, kmem)
         };
-        Ok(Arc::new(Account::new(child, Some(self.clone()))))
+        Ok(Arc::new(Account::new(frames, kmem, Some(self.clone()))))
     }
 
     /// La cell murió: lo disponible vuelve al supervisor y lo usado pasa a
-    /// ser suyo (paso `kill` del modelo). Si el supervisor también murió,
-    /// sube hasta el primero vivo. Idempotente.
+    /// ser suyo (paso `kill` del modelo, para cada recurso). Si el supervisor
+    /// también murió, sube hasta el primero vivo. Idempotente.
     pub fn close(&self) {
         let mut g = self.state.lock();
         if g.dead {
             return;
         }
         let parent = self.parent.as_deref().expect("la cuenta raíz no muere");
-        parent.absorb(g.quota);
-        g.quota = Quota::default();
+        parent.absorb(g.frames, g.kmem);
+        g.frames = Quota::default();
+        g.kmem = Quota::default();
         g.dead = true;
     }
 
-    fn absorb(&self, q: Quota) {
-        let g = self.state.lock();
+    fn absorb(&self, frames: Quota, kmem: Quota) {
+        let mut g = self.state.lock();
         if g.dead {
             let parent = self.parent.as_deref().expect("la cuenta raíz no muere");
-            parent.absorb(q);
+            parent.absorb(frames, kmem);
             return;
         }
-        let mut g = g;
-        let ok = g.quota.absorb(q);
+        let ok = g.frames.absorb(frames) && g.kmem.absorb(kmem);
         assert!(ok, "cuenta de memoria fuera de rango");
     }
 
-    /// Cuota disponible (para `cell_status` y los tests).
+    /// Cuota disponible de marcos.
     pub fn avail(&self) -> u64 {
-        self.state.lock().quota.avail
+        self.state.lock().frames.avail
     }
 
-    /// Marcos en uso.
-    pub fn used(&self) -> u64 {
-        self.state.lock().quota.used
+    /// Cuota disponible de memoria del kernel, en bytes.
+    pub fn kmem_avail(&self) -> u64 {
+        self.state.lock().kmem.avail
     }
 }

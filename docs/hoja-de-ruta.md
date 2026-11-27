@@ -34,9 +34,7 @@ Cada hito se entrega como un PR con tests y documentación.
 En orden de prioridad según el [modelo de amenazas](amenazas.md). El detalle
 de lo ya hecho está en el [historial](historial.md).
 
-1. **Memoria del kernel por cell** (lo que queda del punto 4 de
-   `amenazas.md`): las cuotas ya cubren los marcos de las cells, pero no
-   sus hilos, colas ni CSpace.
+1. **Cuotas de CPU** (lo que queda del punto 4 de `amenazas.md`).
 2. **Latencia en el peor caso** (punto 16): consola con búfer vaciado por
    interrupción del UART y latencia máxima de syscall en `bench` con
    `caos` corriendo.

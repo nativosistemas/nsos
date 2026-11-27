@@ -43,7 +43,11 @@ cuotas disponibles de las cells vivas, y que ningún marco se pierde.
 ## Abstracciones
 
 * La memoria se cuenta en marcos; no se modela qué marco es cuál (eso lo
-  verifica Kani sobre `kcore::frame_bitmap`).
+  verifica Kani sobre `kcore::frame_bitmap`). El kernel lleva dos recursos
+  con estas reglas: los marcos y la memoria del kernel (bytes del heap que
+  gasta por cada cell). Cada uno es una instancia de este modelo, con los
+  mismos pasos sobre el mismo árbol de supervisores (`cell_spawn` reparte
+  los dos en proporción fija), así que los teoremas valen para cada uno.
 * Solo muere una cell sin hijas vivas; matar un subárbol es matar sus
   hojas una por una.
 * Quién puede pedir cada paso (capacidades `Cell` con `CONTROL`, objetos

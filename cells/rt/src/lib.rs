@@ -294,7 +294,9 @@ pub fn cap_info(h: CapHandle) -> SysResult<CapInfo> {
 }
 
 /// Cuota de memoria que [`cell_spawn`] le da a la cell nueva: 512 marcos
-/// (2 MiB), que salen de la cuota de quien la crea.
+/// (2 MiB, con 256 KiB de memoria del kernel, de los que la cell en sí usa
+/// unos 210), que salen de la cuota de quien la crea. Para una cell que
+/// encola muchos mensajes o crea hijas, [`cell_spawn_with_quota`].
 pub const SPAWN_QUOTA: u64 = 512;
 
 /// Crea una cell a partir de la imagen `image` y le *mueve* `caps` (las

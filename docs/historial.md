@@ -396,3 +396,23 @@ dejar sin memoria a todas las demás.
 * Prueba negativa en QEMU: `glotona` pide objetos de 1 MiB hasta
   `NoMemory` y se frena en su cuota; sin cuotas se lleva 215 MiB. ktest
   comprueba además que todas las cuotas vuelven enteras al kernel.
+
+## Memoria del kernel por cell (hecho)
+
+Una cell podía agotar el heap del kernel (8 MiB fijos): llenando las colas
+de sus canales (hasta 1024 extremos con 64 mensajes cada uno, unos 20 MiB)
+o creando hijas, que cuestan 64 KiB de pila de kernel cada una. Y el
+registro de terminaciones y los nombres de hilo crecían sin tope.
+
+* La cuenta de cada cell tiene un segundo recurso con las mismas reglas: la
+  memoria del kernel (512 B por marco de cuota). Se cobran la pila de
+  kernel y la CSpace de cada cell (reservada entera, nunca crece), cada
+  mensaje encolado (a quien lo manda), cada canal y cada mapeo. El heap pasa
+  a ser una novena parte de la RAM libre.
+* Es otra instancia del modelo de `Nsos/Quota.lean` y usa la misma
+  aritmética verificada con Kani (`kcore::quota`).
+* Prueba negativa en QEMU: `charlatana` se manda mensajes a sí misma hasta
+  `NoMemory` y se frena en 678; sin cobrarlos encola 12 928. ktest comprueba
+  que las dos cuotas vuelven enteras al kernel.
+* `EXITS` guarda las últimas 1024 terminaciones y el hilo de una cell ya no
+  filtra una copia de su nombre.

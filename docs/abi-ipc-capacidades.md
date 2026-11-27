@@ -278,8 +278,12 @@ las tareas correspondientes. Sin hilos del kernel por petición y sin GC.
   suyo: tablas de páginas, imagen, pila y los objetos de `mem_create` (que
   se le cobran aunque viajen a otra cell). Al terminar, lo que le queda
   disponible vuelve a quien la creó, y lo que sigue en uso pasa a contarse
-  como suyo hasta que se libere. `nsos_rt::cell_spawn` da 512 marcos
-  (2 MiB); `cell_spawn_with_quota` elige la cuota.
+  como suyo hasta que se libere. Cada marco de cuota trae además 512 B de
+  memoria del kernel, con la que la hija paga lo que el kernel gasta por
+  ella: unos 210 KiB fijos (pila de kernel y CSpace), cada mensaje que
+  encola hasta que se recibe (432 B), cada canal que crea (1,5 KiB) y cada
+  mapeo. `nsos_rt::cell_spawn` da 512 marcos (2 MiB y 256 KiB de memoria
+  del kernel); `cell_spawn_with_quota` elige la cuota.
 * Una cell no hereda nada que no se le pase explícitamente.
 * Si la cell falla (excepción de CPU, `panic`, violación de ABI), el kernel la
   termina y libera sus capacidades (los peers ven `PEER_CLOSED`). El kernel

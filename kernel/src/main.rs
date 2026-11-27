@@ -94,7 +94,15 @@ extern "C" fn kmain() -> ! {
     pci::init();
     let st = mm::pmm::stats();
     // De acá salen las cuotas de memoria de todas las cells.
-    quota::init(st.free_frames as u64);
+    quota::init(st.free_frames as u64, mm::heap::size() as u64);
+    kprintln!(
+        "cuotas: {} marcos y {} KiB de heap del kernel para las cells; por cell {} KiB, por mensaje {} B, por canal {} B",
+        quota::root().avail(),
+        quota::root().kmem_avail() / 1024,
+        cell::CELL_KMEM / 1024,
+        cell::MSG_KMEM,
+        cell::CHANNEL_KMEM
+    );
     let reclaimable: u64 = memmap
         .entries()
         .filter(|e| e.kind() == MemKind::BootloaderReclaimable)
@@ -248,6 +256,9 @@ pub fn boot_demo_cells() -> Result<(), &'static str> {
     cell::spawn("sellada", sellada, alloc::vec![]).map_err(report)?;
     let glotona = module("glotona").ok_or("falta el módulo glotona")?;
     cell::spawn_with_quota("glotona", glotona, alloc::vec![], GLOTONA_QUOTA).map_err(report)?;
+    let charlatana = module("charlatana").ok_or("falta el módulo charlatana")?;
+    cell::spawn_with_quota("charlatana", charlatana, alloc::vec![], CHARLATANA_QUOTA)
+        .map_err(report)?;
     boot_supervisor(report)?;
     boot_virtio_console(report)
 }
@@ -267,8 +278,12 @@ pub fn image(name: &str) -> Result<cell::KCap, &'static str> {
 /// Cuota de `glotona` (4 MiB): la prueba negativa de las cuotas.
 pub const GLOTONA_QUOTA: u64 = 1024;
 
-/// Cuota de `init` (16 MiB): de ella salen las de las cells que crea.
-const INIT_QUOTA: u64 = 4096;
+/// Cuota de `charlatana` (4 MiB, 512 KiB de memoria del kernel): la prueba
+/// negativa de la cuota de memoria del kernel.
+pub const CHARLATANA_QUOTA: u64 = 1024;
+
+/// Cuota de `init` (32 MiB): de ella salen las de las cells que crea.
+const INIT_QUOTA: u64 = 8192;
 
 /// Arranca `init`, el supervisor, con las imágenes de las cells que vigila.
 fn boot_supervisor(report: impl Fn(cell::SpawnError) -> &'static str) -> Result<(), &'static str> {

@@ -124,7 +124,7 @@ fn channel_create(cell: &Cell, out: u64, contract: u64) -> SysResult<u64> {
         return Err(Error::InvalidArgs);
     }
     copy_to_user(cell, out, &[0u8; 8])?; // validar antes de crear nada
-    let (a, b) = cell::channel_create(contract);
+    let (a, b) = cell::channel_create_paid(contract, &cell.account)?;
     let caps = vec![
         Cap {
             object: KObject::Channel(a),
@@ -467,8 +467,16 @@ fn send_msg(
                 _ => return Err(Error::WrongType),
             };
             ep.send_with(wait, || {
-                let caps = cs.remove_all(msg.cap_slice(), Rights::GRANT)?;
-                Ok(QueuedMsg::new(msg.header, msg.data, caps))
+                // El mensaje lo paga quien lo manda, antes de quitarle nada.
+                cell.account.charge_kmem(cell::MSG_KMEM)?;
+                let caps = match cs.remove_all(msg.cap_slice(), Rights::GRANT) {
+                    Ok(caps) => caps,
+                    Err(e) => {
+                        cell.account.refund_kmem(cell::MSG_KMEM);
+                        return Err(e);
+                    }
+                };
+                Ok(QueuedMsg::new(msg.header, msg.data, caps).paid_by(cell.account.clone()))
             })
         };
         match r {
